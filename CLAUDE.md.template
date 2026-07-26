@@ -1,0 +1,173 @@
+# Long-term memory — local Turso vector DB (agent-foundations)
+
+Use this system for ALL cross-session memory **when available** (see the
+session-start check). Only if it is unavailable, fall back to the built-in
+`~/.claude/projects/<hash>/memory/` store for that session.
+
+Config + details: read `{{BASE_PATH}}/README.md`. Helper scripts are in
+`{{BASE_PATH}}/scripts` (`BASE_PATH` is machine-specific — update it here after a
+laptop switch). Memory ops go through the scripts, not raw MCP calls.
+
+## Session start (ALWAYS, before doing anything else)
+1. `python3 "{{BASE_PATH}}/scripts/recall.py" --status`
+   - `MISSING` — DB file gone. ASK whether to RESTORE the latest backup (do NOT
+     recreate an empty DB):
+     `gzcat "$(ls -1t "{{BASE_PATH}}/Backups"/*-agent-foundations*.sql.gz | head -1)" | tursodb "{{SUPERCHARGED_MEMORY_TURSO_PATH}}" --experimental-multiprocess-wal`
+     (The DB lives at `{{SUPERCHARGED_MEMORY_TURSO_PATH}}` — set during setup; scripts read it from the
+     `SUPERCHARGED_MEMORY_TURSO_PATH` env var, so it must be exported in your shell for them to agree.)
+   - `EMPTY` — no memories yet. ASK whether to backfill from a directory:
+     `python3 "{{BASE_PATH}}/scripts/backfill.py" --dir "<path>"`.
+   - `DEGRADED n` — Ollama is down but the DB is fine (`n` = memory count; `0` also
+     means empty). Still load baseline (step 2) and use recall (it falls back to
+     keyword-only). Do NOT store new memories this session — neither semantic nor
+     episodic can be embedded — tell the user.
+   - `ERROR …` — unavailable: fall back to the built-in memory store; tell the user.
+   - `READY n` — proceed.
+2. Load baseline and follow it for the whole session:
+   `python3 "{{BASE_PATH}}/scripts/recall.py" --baseline`.
+
+## Recall (when to read memory)
+- At the start of a task that may rely on prior context, and whenever the user
+  refers to past decisions/facts.
+- Also BEFORE debugging anything non-trivial (a past session may have hit the
+  same gotcha) and BEFORE storing (dedup / supersede check).
+- `python3 "{{BASE_PATH}}/scripts/recall.py" "<query>" [--table semantic|episodic|both] [--project <id>] [--k N]`
+- Ranking is hybrid: query tokens found in a memory's text are boosted above pure
+  semantic order, so exact ids / error strings surface too.
+
+## Store — AUTONOMOUS. Building the knowledge base is YOUR job.
+
+The user does not ask you to remember things — you notice and store on your
+own. Store the moment an insight is CONFIRMED (fix verified, decision made),
+not at session end: sessions die without warning. Never ask permission to
+store (sole exception: baseline). After storing, report it in one line —
+`memorized: <topic>` — and continue. In a DEGRADED session you cannot store:
+put the finished memory text in your reply instead so it isn't lost.
+
+`python3 "{{BASE_PATH}}/scripts/remember.py" --table <t> [--project <id>] --topic <topic> --keywords "<k1, k2, …>" --source <src> --model <your-model-id> --text "<memory>" (--category <c> | --event-type <e> --importance <i>)`
+
+### Episodic memory policy — ACTIVE: `{{EPISODIC_MODE}}`
+
+This machine's episodic-storage verbosity, chosen during setup. It governs
+**episodic** memory only (the append-only event log) — semantic storage
+(gotchas, feedback, corrections, constraints) always follows the Capture
+triggers below regardless of this setting. Follow the active mode:
+
+- `every-prompt` — store an episodic `note` for **every** user prompt / turn,
+  capturing what was asked and what you did. Highest verbosity.
+- `major-actions` — store an episodic memory for every **substantive** action
+  (a change made, a task carried out), but **skip** quick questions,
+  clarifications, and trivial back-and-forth.
+- `major-events` — store episodic memories **only** for major events: a feature
+  completed, a bug resolved, a decision made, a milestone or incident. This is
+  the default and matches the episodic Capture triggers as written.
+- `manual` — store episodic memories **only** when the user explicitly asks you
+  to. Do not auto-store events. (Semantic capture is unaffected — still autonomous.)
+
+If `{{EPISODIC_MODE}}` is more permissive than the Capture triggers below,
+it ADDS episodic stores; if more restrictive (`major-events`, `manual`), it
+NARROWS which triggers fire an episodic write. When in doubt, ask the user.
+
+### Capture triggers — when one fires, a store is REQUIRED
+1. **Root cause found** — a bug's actual cause identified and the fix verified.
+   → episodic `bug_fix`: symptom, root cause, fix. If the cause generalizes
+   beyond this one bug, ALSO store the lesson as a semantic gotcha (next
+   trigger) — two memories are fine.
+2. **Gotcha discovered** — anything that behaved differently than expected or
+   documented: library/dependency quirk, framework footgun, API surprise,
+   build/tooling trap, hidden architecture constraint. Fire this whenever you
+   were surprised, blocked for a while, or a fix worked for a non-obvious
+   reason. → semantic `reference` (external: library/tool/platform) or
+   `project` (ours: codebase/architecture). Highest-value trigger — when in
+   doubt, store.
+3. **User correction / preference** — the user overrides your approach or
+   states how they want things done. → semantic `feedback`, with why + how
+   to apply.
+4. **Decision** — a design/architecture choice made, alternatives rejected.
+   → episodic `decision`: what was chosen, what was rejected, why.
+5. **Milestone** — project start, feature/large-chunk complete, incident.
+   → episodic with the matching event_type (incidents: include root cause).
+6. **Hard-won context** — non-obvious constraint, environment quirk, process
+   knowledge that took real effort to establish and is written down nowhere.
+   → semantic `project` or `reference`.
+
+### Completion gate (run BEFORE reporting any task done)
+Ask: "Did this task surface a root cause, gotcha, correction, decision, or
+constraint not yet in memory?" If yes → store now, then report. Mentioning a
+lesson in your summary while storing nothing is a bug in your behavior.
+
+### The filter (keep noise out)
+Store only what passes: "Would an agent with zero context of this session act
+differently a month from now for knowing this?" Skip: anything re-derivable
+from code/git/tickets, session-local state, routine work without surprise,
+generic best practices.
+
+### Writing the memory
+- Self-contained note — the future reader has no session context. Shape:
+  situation → what is true → how to apply. Quote exact error messages.
+- Recall first: existing memory covers the topic but is now wrong/incomplete
+  → `--supersedes <id>`; still correct → don't store a duplicate. (The script
+  refuses near-duplicates; `--force` only if genuinely distinct.)
+- `--keywords` are appended into the memory text itself — ids, exact error
+  strings, library + version, synonyms, EN and DE phrasings someone would
+  search by. They sharpen both semantic and keyword recall.
+- Comfortably under the 2000-char cap (the cap is a safeguard, not a target).
+
+### semantic — durable FACTS (timeless, revisable)
+- `--category` ∈ {user, feedback, project, reference}. Gotchas: `reference` =
+  external (library/tool/platform behavior), `project` = ours
+  (codebase/architecture).
+- `baseline` = must-always-apply rules loaded every session. NEVER store a baseline
+  memory without the user's explicit confirmation — ask, then pass `--confirm-baseline`.
+- To revise a fact, use `remember.py --supersedes <old-id> …` — it inserts the new
+  version and marks the old row superseded in one call (don't hand-edit `superseded_by`).
+
+### episodic — noteworthy EVENTS (time-anchored, append-only)
+- `--event-type` ∈ {project_start, bug_fix, feature_complete, decision, milestone,
+  incident, note}. `--importance` ∈ {routine, notable, major}.
+- Events recur legitimately — no dedup guard; the filter above still applies.
+
+## Populating columns
+- `--project` = the tracking-tool work-item id (ClickUp task id, Jira key, etc.,
+  e.g. `869e7xzp6`); omit for a global memory not tied to a ticket.
+- `--topic` = a short headline / subject of the memory.
+- `--model` = your own exact model id (e.g. `claude-opus-4-8`).
+
+## Rules
+- NEVER store PII — anonymize; store pointers (ticket/case ids, role labels), not
+  personal data. Applies to the text AND anything sent to Ollama to embed.
+- On `database is busy` the script retries; if it still fails, run it again.
+- One embedding model per DB (bge-m3) — don't change `EMBED_MODEL`; the script
+  refuses mixed vector spaces.
+
+## Coworkers (named personas)
+
+Concepts: README.md "Coworkers". The commands here are complete — answer
+coworker questions from the DB directly; don't go read files first.
+Reads (list, load, inspect) are ad-hoc SQL via the turso MCP; writes go
+through `coworkers.py` / `remember.py --coworker`.
+
+**List** ("what/which coworkers do I have"): query directly:
+`SELECT id, name, expertise, trust_level, active FROM coworkers;`
+
+**Load** ("load jeff"): read (via MCP, plain SQL) his `coworkers` row +
+current `appraisals` row + `semantic_memory` tagged to him with
+`category='feedback'` created after that appraisal (or after his own
+`created_at` if he has none yet). Confirm out loud what you loaded, then
+adopt his personality/expertise/trust_level for the rest of the session.
+Global baseline rules stay a hard floor underneath — no trust_level loosens
+them. If he's retired (`active=0`), say so before proceeding.
+
+**Feedback while a coworker is loaded**: both your corrections/praise
+(`--source user-stated`) and the coworker's own noticed learnings
+(`--source self-observed`) go through
+`remember.py --coworker <name> ...`. Self-observed writes are
+gated by trust_level: `supervised` → propose the text and wait for an
+ok before storing; `trusted`/`autonomous` → store directly, mention it in
+passing.
+
+**Appraisal review** (you trigger it explicitly, never scheduled): pull the
+coworker's `category='feedback'` history since their current appraisal
+(same data as load), discuss it, then run
+`coworkers.py --appraise <name> --trust <level> --text "<distilled>"` once
+you've agreed on the text and rating.
