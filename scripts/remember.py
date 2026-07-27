@@ -38,10 +38,10 @@ def store_memory(table, text, *, topic=None, project=None, category=None,
         if table != "semantic":
             sys.exit("--supersedes is only valid for semantic memories.")
         cur = M.scalar(f"SELECT count(*) FROM semantic_memory "
-                       f"WHERE id={int(supersedes)} AND superseded_by IS NULL;")
+                       f"WHERE id={int(supersedes)} AND superseded_by IS NULL AND retired_at IS NULL;")
         if not cur or int(cur) != 1:
-            sys.exit(f"refused: --supersedes {supersedes}: no current (un-superseded) "
-                     "semantic row with that id — nothing revised, nothing stored.")
+            sys.exit(f"refused: --supersedes {supersedes}: no current (un-superseded, "
+                     "non-retired) semantic row with that id — nothing revised, nothing stored.")
 
     coworker_ids = []
     if coworker:
@@ -68,7 +68,8 @@ def store_memory(table, text, *, topic=None, project=None, category=None,
             visible = (" AND (id NOT IN (SELECT memory_id FROM memory_coworkers WHERE memory_table='semantic') "
                       f"OR id IN (SELECT memory_id FROM memory_coworkers WHERE memory_table='semantic' AND coworker_id IN ({ids_csv})))")
         near = M.scalar(f"SELECT round(vector_distance_cos(embedding,{vlit}),4) "
-                        f"FROM semantic_memory WHERE superseded_by IS NULL{visible} ORDER BY 1 LIMIT 1;")
+                        f"FROM semantic_memory WHERE superseded_by IS NULL AND retired_at IS NULL"
+                        f"{visible} ORDER BY 1 LIMIT 1;")
         if near not in ("", "NULL") and float(near) < DUP_DIST:
             sys.exit(f"refused: a near-duplicate already exists (cosine {near} < {DUP_DIST}). "
                      "Use --supersedes <id> to replace it, or --force to add anyway.")

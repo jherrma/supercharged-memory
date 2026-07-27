@@ -25,6 +25,11 @@ laptop switch). Memory ops go through the scripts, not raw MCP calls.
    - `READY n` — proceed.
 2. Load baseline and follow it for the whole session:
    `python3 "{{BASE_PATH}}/scripts/recall.py" --baseline`.
+3. Load the topic index (what subjects have memory at all — rebuilt by each
+   sleep pass, see `instructions/SLEEP.md`):
+   `python3 "{{BASE_PATH}}/scripts/recall.py" --topics`. Skim it; if the
+   conversation touches one of these topics, dig deeper with `recall.py`
+   even if it doesn't look like an obvious search term on its own.
 
 ## Recall (when to read memory)
 - At the start of a task that may rely on prior context, and whenever the user
@@ -34,6 +39,11 @@ laptop switch). Memory ops go through the scripts, not raw MCP calls.
 - `python3 "{{BASE_PATH}}/scripts/recall.py" "<query>" [--table semantic|episodic|both] [--project <id>] [--k N]`
 - Ranking is hybrid: query tokens found in a memory's text are boosted above pure
   semantic order, so exact ids / error strings surface too.
+- The topic index loaded at session start (step 3 above) is the primary
+  "don't know what to search for" tool. If you suspect it's gone stale
+  mid-session (a topic created after the last sleep won't be in it yet),
+  re-run `recall.py --topics`, or substring-query directly:
+  `SELECT topic, keywords FROM topic_keywords WHERE topic LIKE '%x%' OR keywords LIKE '%x%';`
 
 ## Store — AUTONOMOUS. Building the knowledge base is YOUR job.
 
@@ -171,3 +181,13 @@ coworker's `category='feedback'` history since their current appraisal
 (same data as load), discuss it, then run
 `coworkers.py --appraise <name> --trust <level> --text "<distilled>"` once
 you've agreed on the text and rating.
+
+## Sleep (consolidation — user-triggered only, never scheduled)
+
+When the user says "sleep" or "go to sleep", follow
+`{{BASE_PATH}}/instructions/SLEEP.md` step by step. Short version: sift
+unprocessed episodic memory for what was actually learned (discard bare event
+sequences), promote the rest into semantic memory, consolidate/retire
+overlapping or obsolete semantic facts (soft-delete only, ask the user when
+obsolescence isn't clear-cut), then rebuild the `topic_keywords` index used by
+the recall hint above.

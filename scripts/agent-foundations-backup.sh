@@ -9,7 +9,7 @@ set -uo pipefail
 
 TURSO="${TURSO_BIN:-$HOME/.turso/tursodb}"
 DB="${SUPERCHARGED_MEMORY_TURSO_PATH:-$HOME/Documents/turso/agent-foundations.db}"
-DEST="${BACKUP_DIR:-/Users/jonathan.herrmann/Documents/tmp/privat/Agentic Development/Backups}"
+DEST="${BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/Backups}"
 ERR=/tmp/agent-foundations-backup.err
 
 [ -f "$DB" ] || { echo "[backup] DB missing: $DB" >&2; exit 1; }

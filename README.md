@@ -194,7 +194,8 @@ enforced via `CHECK` (SQLite ignores declared VARCHAR sizes): `memory_text` ≤
 work-item id), `topic`, `category` ∈ `baseline|user|feedback|project|reference`,
 `source`, `model`, `embed_model`, `memory_text`, `file_reference`,
 `embedding F32_BLOB(1024)`, `superseded_by` (current truth =
-`WHERE superseded_by IS NULL`).
+`WHERE superseded_by IS NULL`), `retired_at` (soft-delete set by a sleep pass —
+current truth also requires `retired_at IS NULL`; never a hard `DELETE`).
 
 `baseline` = must-always-apply rules, loaded every session start
 (`recall.py --baseline`), not by search. **Storing a baseline memory requires
@@ -205,7 +206,8 @@ explicit user confirmation** (`--confirm-baseline`). None are seeded by default.
 `id`, `created_at` (event time), `project`, `topic`, `event_type` ∈
 `project_start|bug_fix|feature_complete|decision|milestone|incident|note`,
 `importance` ∈ `routine|notable|major`, `source`, `model`, `embed_model`,
-`memory_text`, `file_reference`, `embedding F32_BLOB(1024)`.
+`memory_text`, `file_reference`, `embedding F32_BLOB(1024)`, `processed_at`
+(set once a sleep pass has sifted this row; NULL = not yet processed).
 
 ## Coworkers
 
@@ -226,6 +228,40 @@ row per coworker, history via `superseded_by`).
   that coworker (untagged ∪ tagged-to-them).
 - `trust_level` (`supervised|trusted|autonomous`) never loosens a global baseline
   rule — it's a hard floor regardless of which coworker is active.
+
+## Sleep cycle
+
+A user-triggered ("sleep" / "go to sleep") consolidation pass — never
+scheduled automatically. Full procedure in `instructions/SLEEP.md`; no new
+memory tables, just three additions:
+
+- `episodic_memory.processed_at` — sleep sifts unprocessed rows, keeping only
+  ones where something was actually learned (discarding bare event sequences
+  like "x happened, then y happened"), promotes the kept ones into
+  `semantic_memory` (via `remember.py`, same as any other store/supersede),
+  then stamps `processed_at` on every row it looked at — kept or discarded —
+  so nothing gets re-sifted forever.
+- `semantic_memory.retired_at` — sleep also sweeps current semantic memory for
+  near-duplicates to consolidate (`remember.py --supersedes`) and obsolete
+  facts to retire. Retirement is **soft-delete only** (`scripts/sleep.py
+  --retire`, sets `retired_at`) — same never-hard-delete philosophy as
+  coworkers' `active=0`. "Obsolete" has no fixed rule; ask the user when it's
+  not clear-cut.
+- `topic_keywords` (new table, see schema below) — a curated topic → keywords
+  index, rebuilt wholesale each sleep (`scripts/sleep.py --rebuild-topics`:
+  full DELETE + re-INSERT, never accumulated). **Loaded in full at every
+  session start** (`recall.py --topics`, same slot as `--baseline`) so a
+  session knows *what topics have memory* without having to guess a search
+  term first. This puts pressure back on sleep's consolidation step to keep
+  the topic count bounded — `recall.py --topics` warns past 50 topics as a
+  nudge to merge harder next sleep, since that many would cost real context
+  budget every session.
+
+### `topic_keywords` — curated topic index, derived (not a source of truth)
+
+`topic` (primary key), `keywords`, `updated_at`. Deliberately unlinked to
+`semantic_memory`/`episodic_memory` — no FK, no embedding, substring-searched
+via plain `LIKE`.
 
 ## Concurrency & locking
 

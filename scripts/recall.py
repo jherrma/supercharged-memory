@@ -14,6 +14,7 @@ coworker's current profile (that's ad-hoc SQL, see README.md - Coworkers).
   recall.py "869e7xzp6" --table episodic --k 3
   recall.py "null check pattern" --coworker jeff
   recall.py --baseline        # baseline memories (pure SQL, works without Ollama)
+  recall.py --topics          # topic_keywords index (pure SQL, load every session)
   recall.py --status          # MISSING | EMPTY | DEGRADED n | READY n
   recall.py --count
 """
@@ -73,7 +74,18 @@ def baseline():
     M.require_db()
     print("===== baseline (load every session, follow for the whole session) =====")
     print(M.exec_sql("SELECT topic, memory_text FROM semantic_memory "
-                     "WHERE category='baseline' AND superseded_by IS NULL ORDER BY created_at;"))
+                     "WHERE category='baseline' AND superseded_by IS NULL "
+                     "AND retired_at IS NULL ORDER BY created_at;"))
+
+
+def topics():
+    M.require_db()
+    n = M.scalar("SELECT count(*) FROM topic_keywords;")
+    print(f"===== topic index (load every session; {n} topic(s); rebuilt by sleep) =====")
+    print(M.exec_sql("SELECT topic, keywords FROM topic_keywords ORDER BY updated_at DESC;"))
+    if n and int(n) > 50:
+        print(f"NOTE: {n} topics is a lot to hold in context every session — "
+              "consider consolidating harder next sleep (merge overlapping topics).")
 
 
 def search(query, table, k, project, coworker):
@@ -85,7 +97,7 @@ def search(query, table, k, project, coworker):
     have_ollama = M.ollama_up()
     vlit = M.fmt_vec(M.embed(query)) if have_ollama else None
     for t in (["semantic", "episodic"] if table == "both" else [table]):
-        base = ("superseded_by IS NULL" if t == "semantic" else "1=1") + proj
+        base = ("superseded_by IS NULL AND retired_at IS NULL" if t == "semantic" else "1=1") + proj
         if coworker_id is not None:
             base += (f" AND (id NOT IN (SELECT memory_id FROM memory_coworkers WHERE memory_table={M.q(t)}) "
                     f"OR id IN (SELECT memory_id FROM memory_coworkers WHERE memory_table={M.q(t)} AND coworker_id={coworker_id}))")
@@ -109,6 +121,7 @@ def main():
     p.add_argument("--project"); p.add_argument("--k", type=int, default=5)
     p.add_argument("--coworker", help="scope search to memories visible to this coworker")
     p.add_argument("--baseline", action="store_true")
+    p.add_argument("--topics", action="store_true", help="load the topic_keywords index (load every session, like --baseline)")
     p.add_argument("--status", action="store_true")
     p.add_argument("--count", action="store_true")
     a = p.parse_args()
@@ -119,6 +132,8 @@ def main():
                                        "(SELECT count(*) FROM episodic_memory);")); return
     if a.baseline:
         baseline(); return
+    if a.topics:
+        topics(); return
     if not a.query:
         sys.exit("provide a query, or use --baseline / --status / --count")
     search(a.query, a.table, a.k, a.project, a.coworker)

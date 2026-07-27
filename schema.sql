@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS semantic_memory (
   memory_text    TEXT NOT NULL CHECK (length(memory_text) <= 2000),
   file_reference TEXT,
   embedding      F32_BLOB(1024),
-  superseded_by  INTEGER REFERENCES semantic_memory(id)
+  superseded_by  INTEGER REFERENCES semantic_memory(id),
+  retired_at     TEXT     -- soft-delete (set by sleep.py --retire): obsolete,
+                          -- no replacement. NULL = current. Never hard-deleted.
 );
 
 CREATE TABLE IF NOT EXISTS episodic_memory (
@@ -35,7 +37,10 @@ CREATE TABLE IF NOT EXISTS episodic_memory (
   embed_model    TEXT CHECK (length(embed_model) <= 128),
   memory_text    TEXT NOT NULL CHECK (length(memory_text) <= 2000),
   file_reference TEXT,
-  embedding      F32_BLOB(1024)
+  embedding      F32_BLOB(1024),
+  processed_at   TEXT     -- set by sleep.py once a sleep pass has sifted this
+                          -- row (whether promoted to semantic or discarded as
+                          -- a bare event with no lasting lesson). NULL = unprocessed.
 );
 
 CREATE INDEX IF NOT EXISTS idx_sem_category ON semantic_memory(category);
@@ -43,6 +48,18 @@ CREATE INDEX IF NOT EXISTS idx_sem_current  ON semantic_memory(superseded_by);
 CREATE INDEX IF NOT EXISTS idx_sem_project  ON semantic_memory(project);
 CREATE INDEX IF NOT EXISTS idx_epi_type     ON episodic_memory(event_type);
 CREATE INDEX IF NOT EXISTS idx_epi_project  ON episodic_memory(project);
+CREATE INDEX IF NOT EXISTS idx_epi_processed ON episodic_memory(processed_at);
+
+-- Curated topic index, rebuilt wholesale by each sleep pass (sleep.py
+-- --rebuild-topics: DELETE + re-INSERT, never accumulated). Deliberately
+-- unlinked to semantic_memory/episodic_memory — a derived summary, not a
+-- source of truth, so no FK and no embedding. Query by substring:
+--   SELECT topic, keywords FROM topic_keywords WHERE topic LIKE '%x%' OR keywords LIKE '%x%';
+CREATE TABLE IF NOT EXISTS topic_keywords (
+  topic       TEXT NOT NULL PRIMARY KEY,
+  keywords    TEXT NOT NULL,
+  updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 -- Coworkers: named personas with scoped memory + trust-gated autonomy.
 -- No embedding column on coworkers/appraisals/memory_coworkers — none of

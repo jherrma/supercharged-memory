@@ -18,6 +18,10 @@ So editing `CLAUDE.md.template` or `scripts/*` here changes behavior only after 
 
 `instructions/SETUP.md` is an executable runbook: when the user says "run SETUP.md" (or asks to set up this machine), follow that file step by step. It verifies/installs the two dependencies (asking before any install), ensures the `bge-m3` model is pulled, and runs `install-claude-md.sh`. Don't improvise a setup flow — use that file.
 
+## Sleep cycle
+
+`instructions/SLEEP.md` is an executable runbook: when the user says "sleep" or "go to sleep", follow it step by step — never run it on a schedule, only when told. It sifts unprocessed episodic memory for actual lessons (discarding bare event sequences), promotes the rest into semantic memory, consolidates/retires overlapping or obsolete semantic facts (soft-delete via `scripts/sleep.py --retire`, never a hard `DELETE`), then rebuilds `topic_keywords` — the agent derives the topic/keyword groupings itself (judgment stays with the LLM); `scripts/sleep.py --rebuild-topics` is a dumb atomic DELETE+INSERT on top. `topic_keywords` is loaded in full at every session start (`recall.py --topics`, same slot as `--baseline`), so keep its row count bounded by consolidating hard — it costs context every session, not just when queried.
+
 ## Runtime dependencies (not installed by this repo)
 
 - **tursodb** (Turso 0.7.0, Rust SQLite rewrite w/ native vectors) — `curl -sSL tur.so/install | sh`. Registered as the `turso` MCP server for ad-hoc SQL.
@@ -34,6 +38,7 @@ bash scripts/install-claude-md.sh
 # Session start (the agent runs this first): MISSING | EMPTY | DEGRADED n | ERROR | READY n
 python3 scripts/recall.py --status
 python3 scripts/recall.py --baseline            # rules to load every session
+python3 scripts/recall.py --topics              # topic_keywords index, load every session
 
 # Recall (hybrid vector + keyword)
 python3 scripts/recall.py "<query>" [--table semantic|episodic|both] [--project <id>] [--k N] [--coworker <name>]
@@ -50,6 +55,11 @@ python3 scripts/backfill.py --dir <path> [--glob '*.md'] [--category project]
 python3 scripts/coworkers.py --add --name <n> --expertise "..." --personality "..."
 python3 scripts/coworkers.py --appraise <name> --trust <level> --text "..."
 
+# Sleep (mechanical write primitives; see instructions/SLEEP.md for the full procedure)
+python3 scripts/sleep.py --mark-processed <id1,id2,...>   # episodic_memory.processed_at
+python3 scripts/sleep.py --retire <id>                     # soft-delete a semantic memory
+echo '[{"topic":"...", "keywords":"..."}]' | python3 scripts/sleep.py --rebuild-topics
+
 # Backup / restore / rebuild
 bash scripts/agent-foundations-backup.sh
 gzcat "$(ls -1t Backups/*-agent-foundations*.sql.gz | head -1)" | tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal   # restore into a FRESH db file
@@ -62,9 +72,11 @@ python3 scripts/seed.py                          # empty by default; add SEM/EPI
 **`scripts/memlib.py` is the shared core** every script imports — config/env, `embed()` (asserts 1024 dims), vector literal formatting, SQL escaping (`q`, `like_lit`), and `exec_sql()`, the one tursodb runner: it detects errors on **stderr only** (so row data on stdout can't false-trigger) and retries with backoff on `busy|locked`. Everything else is a thin CLI on top of it.
 
 **Two memory tables (`schema.sql`), one row per memory, no chunking:**
-- `semantic_memory` — timeless facts, **revisable** via a supersede chain (`superseded_by IS NULL` = current truth). Category ∈ `baseline|user|feedback|project|reference`.
-- `episodic_memory` — time-anchored events, **append-only** (no dedup — events recur).
+- `semantic_memory` — timeless facts, **revisable** via a supersede chain (`superseded_by IS NULL` = current truth) and soft-deletable via `retired_at` (set only by `sleep.py --retire`; current truth also requires `retired_at IS NULL`). Category ∈ `baseline|user|feedback|project|reference`.
+- `episodic_memory` — time-anchored events, **append-only** (no dedup — events recur). `processed_at` marks whether a sleep pass has already sifted a row.
 - `baseline` rows are loaded every session (not by search) and encode must-always-apply rules.
+
+**Sleep layer** — user-triggered consolidation (`instructions/SLEEP.md`), no new tables for episodic/semantic, just the two columns above plus one unlinked `topic_keywords(topic PK, keywords, updated_at)` table: a curated topic → keywords index, rebuilt wholesale each sleep (`sleep.py --rebuild-topics`, DELETE+re-INSERT). The agent derives topics/keywords itself from current semantic memory — the script only does the atomic write. `CLAUDE.md.template` points every session at this table (substring `LIKE`, ad-hoc SQL) so "no memory found" isn't mistaken for "nothing to look for."
 
 **Hybrid recall** (`recall.py`): brute-force `vector_distance_cos` ranked with a keyword boost = count of meaningful query tokens found in the text (stopwords dropped, digit-bearing id/error tokens always kept). If Ollama is down, it **degrades gracefully to keyword-only** — the DB stays usable, but new memories can't be stored (no embeddings).
 
@@ -80,3 +92,5 @@ python3 scripts/seed.py                          # empty by default; add SEM/EPI
 - **`BASE_PATH` in `CLAUDE.md.template` is machine-specific** — the one value to update on a new laptop (the installer defaults it to the repo's parent dir).
 - When rebuilding schema, **pipe** `schema.sql` — `tursodb "$(cat schema.sql)"` fails because the leading `--` comment parses as a CLI flag.
 - Don't hand-edit `superseded_by` — use `remember.py --supersedes` (semantic) / the appraisal flow (coworkers), which insert + supersede in one transaction.
+- **Never hard-delete a memory** — `retired_at` (semantic) is soft-delete only, set via `sleep.py --retire`; same never-delete philosophy as coworkers' `active=0`. Ask the user when obsolescence isn't clear-cut.
+- `sleep.py --rebuild-topics` is a **full replace**, not an upsert — always pass the complete current topic set on stdin, or you'll silently drop the topics you omit.
