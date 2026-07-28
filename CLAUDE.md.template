@@ -102,8 +102,6 @@ via the turso MCP; writes go through `coworkers.py` / `remember.py --coworker`.
 - **Appraisal review** (only when you trigger it, never scheduled): pull that same feedback
   history, discuss it, then `coworkers.py --appraise <name> --trust <level> --text "<distilled>"`.
 
-## Sleep (user-triggered only, never scheduled)
-On "sleep" / "go to sleep", follow `{{BASE_PATH}}/instructions/SLEEP.md` step by step: sift
-unprocessed episodic memory for what was actually learned (discard bare event sequences),
-promote it into semantic memory, consolidate/retire overlapping or obsolete facts (soft-delete
-only; ask the user when obsolescence isn't clear-cut), then rebuild `topic_keywords`.
+## On user request only — never scheduled, never proactive
+- "sleep" / "go to sleep" → follow `{{BASE_PATH}}/instructions/SLEEP.md` step by step.
+- "backup" → `bash "{{BASE_PATH}}/scripts/agent-foundations-backup.sh"` (writes `{{BASE_PATH}}/Backups/`).

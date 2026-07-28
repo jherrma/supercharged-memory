@@ -15,7 +15,11 @@ one small unlinked `topic_keywords` table.
 
 ## Step 1 — Pull unprocessed episodic memory
 
-Ad-hoc SQL via the turso MCP (read-only, no script needed):
+Ad-hoc SQL via the turso MCP (read-only, no script needed). Ignore the MCP's
+`current_database` tool — it reports `:memory: (default)` even when correctly
+attached to the real file ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061));
+confirm with the query itself, or read via
+`tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list "<sql>"`.
 
 ```sql
 SELECT id, created_at, topic, event_type, importance, memory_text

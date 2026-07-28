@@ -44,6 +44,13 @@ if grep -qF "$BEGIN" "$TARGET"; then
   mv "$tmp" "$TARGET"
 fi
 
+# Trim trailing blank lines. Without this, the '\n' separator printed before the
+# block below survives every strip and one blank line accumulates per re-install.
+tmp2="$(mktemp)"
+awk '{l[NR]=$0} END{e=NR; while(e>0 && l[e]~/^[[:space:]]*$/) e--; for(i=1;i<=e;i++) print l[i]}' \
+  "$TARGET" > "$tmp2"
+mv "$tmp2" "$TARGET"
+
 # Append the freshly rendered block ( | delimiter: paths contain slashes.
 # EPISODIC_MODE is validated to a fixed keyword set above, so it's sed-safe ).
 {

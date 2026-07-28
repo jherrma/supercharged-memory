@@ -24,7 +24,7 @@ So editing `CLAUDE.md.template` or `scripts/*` here changes behavior only after 
 
 ## Runtime dependencies (not installed by this repo)
 
-- **tursodb** (Turso 0.7.0, Rust SQLite rewrite w/ native vectors) — `curl -sSL tur.so/install | sh`. Registered as the `turso` MCP server for ad-hoc SQL.
+- **tursodb** (Turso 0.7.1, Rust SQLite rewrite w/ native vectors) — `curl -sSL tur.so/install | sh`. Registered as the `turso` MCP server for ad-hoc SQL. Its `current_database` MCP tool misreports `:memory: (default)` for a CLI-opened DB ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061)) — verify with a real `SELECT`, never `open_database`.
 - **Ollama** at `localhost:11434` running the **bge-m3** embedding model (`ollama pull bge-m3`), 1024-dim.
 
 ## Common commands
@@ -91,6 +91,7 @@ python3 scripts/seed.py                          # empty by default; add SEM/EPI
 - **Length caps are enforced by `CHECK`, not VARCHAR** (SQLite ignores declared sizes): `memory_text` ≤ 2000; most metadata ≤ 128.
 - **Never store PII** — anonymize before `remember.py`/`backfill.py`; store pointers (ticket ids, role labels). Applies to the text *and* anything sent to Ollama to embed.
 - **`CLAUDE.md.template` is loaded into context every session — keep it terse.** Prefer short imperative lines over prose; anything an agent needs only occasionally belongs in `README.md`/`instructions/`, which the template points at. The installer renders only the *active* episodic mode into `{{EPISODIC_RULE}}`, so adding a mode means adding its one-line rule to the `case` in `install-claude-md.sh` as well as the validation list.
+- **Rare on-request procedures get a pointer, not a summary.** Sleep and backup live under the template's "On user request only" heading as one line each — an absolute `{{BASE_PATH}}` path to `instructions/SLEEP.md` / `scripts/agent-foundations-backup.sh`, nothing about *how* they work. The steps are then read only in the rare session that actually sleeps. Keep the *policy* (user-triggered only, never scheduled/proactive) in the template, since an agent must know that without opening the file, and keep the *procedure* in the runbook. Don't let a summary creep back in.
 - **`BASE_PATH` in `CLAUDE.md.template` is machine-specific** — the one value to update on a new laptop (the installer defaults it to the repo's parent dir).
 - When rebuilding schema, **pipe** `schema.sql` — `tursodb "$(cat schema.sql)"` fails because the leading `--` comment parses as a CLI flag.
 - Don't hand-edit `superseded_by` — use `remember.py --supersedes` (semantic) / the appraisal flow (coworkers), which insert + supersede in one transaction.

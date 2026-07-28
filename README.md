@@ -256,7 +256,14 @@ row per coworker, history via `superseded_by`).
 
 A user-triggered ("sleep" / "go to sleep") consolidation pass — never
 scheduled automatically. Full procedure in `instructions/SLEEP.md`; no new
-memory tables, just three additions:
+memory tables, just three additions.
+
+`CLAUDE.md.template` deliberately carries only a **one-line pointer** to that
+file, not a summary of the procedure — sleep happens rarely, so its steps are
+read on demand and cost nothing in the sessions that never sleep. The pointer is
+an absolute path baked in at install time (`{{BASE_PATH}}`), so it resolves
+without the agent hunting for the repo. Same reasoning for backups (below).
+Keep the *policy* in the template (user-triggered only) and the *procedure* here.
 
 - `episodic_memory.processed_at` — sleep sifts unprocessed rows, keeping only
   ones where something was actually learned (discarding bare event sequences
@@ -302,7 +309,13 @@ scripts retry with backoff). A process without the flag is refused. The flag is
   `YYYY-MM-DD-agent-foundations.sql.gz` in `Backups/` (concurrent-safe reader;
   checks non-empty + has INSERTs + gzip intact). Retains **3 daily + 4 weekly**
   (Monday) copies, and runs even while a session is open.
-- **Manual backup:** `bash scripts/agent-foundations-backup.sh`
+- **Manual backup:** `bash scripts/agent-foundations-backup.sh` — this is also what
+  the agent runs when the user asks for a backup (`CLAUDE.md.template` points at
+  the script by absolute path). Dumps always land in this repo's `Backups/`, the
+  `BACKUP_DIR` default; `recall.py --candidates` looks there for restorable dumps,
+  so keep them together rather than scattering them per-machine. Taking a backup is
+  additive and non-destructive; **restoring is neither** — never restore without the
+  user's explicit ok.
 - **Restore** (into a fresh DB file):
   ```bash
   gzcat "$(ls -1t Backups/*-agent-foundations*.sql.gz | head -1)" \
