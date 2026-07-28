@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_PATH="${BASE_PATH:-$(dirname "$SCRIPT_DIR")}"
 TEMPLATE="$BASE_PATH/CLAUDE.md.template"
 TARGET="${TARGET:-$HOME/.claude/CLAUDE.md}"
-SUPERCHARGED_MEMORY_TURSO_PATH="${SUPERCHARGED_MEMORY_TURSO_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/turso/agent-foundations.db}"
+SUPERCHARGED_MEMORY_TURSO_PATH="${SUPERCHARGED_MEMORY_TURSO_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/turso/supercharged-memory.db}"
 EPISODIC_MODE="${EPISODIC_MODE:-major-events}"
 # Render only the ACTIVE mode's rule. Listing all four costs context every
 # session to describe three modes the agent must ignore.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for the agent-foundations memory scripts.
+"""Shared helpers for the supercharged-memory scripts.
 
 Central place for: DB/Ollama config, embedding (with dim assert), compact vector
 literals, SQL escaping, and a robust tursodb runner (stderr-scoped error
@@ -13,7 +13,7 @@ DB_ENV = "SUPERCHARGED_MEMORY_TURSO_PATH"
 # XDG Base Directory spec: state that survives and is not cache goes under
 # $XDG_DATA_HOME, which defaults to ~/.local/share.
 XDG_DATA_HOME = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local/share"))
-DB_DEFAULT = str(XDG_DATA_HOME / "turso/agent-foundations.db")
+DB_DEFAULT = str(XDG_DATA_HOME / "turso/supercharged-memory.db")
 DB = os.environ.get(DB_ENV, DB_DEFAULT)
 DB_FROM_ENV = DB_ENV in os.environ
 BACKUP_DIR = os.environ.get("BACKUP_DIR", str(Path(__file__).resolve().parent.parent / "Backups"))
@@ -79,7 +79,7 @@ def find_candidates():
             continue
     dbs.sort(key=lambda t: -t[1])
     try:
-        backups = sorted(Path(BACKUP_DIR).glob("*agent-foundations*.sql.gz"),
+        backups = sorted(Path(BACKUP_DIR).glob("*supercharged-memory*.sql.gz"),
                          key=lambda f: f.stat().st_mtime, reverse=True)
     except OSError:
         backups = []

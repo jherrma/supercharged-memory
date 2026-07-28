@@ -86,7 +86,7 @@ overridden `EMBED_MODEL`, pull that model instead.
 hold onto it as `SUPERCHARGED_MEMORY_TURSO_PATH` for the rest of this runbook. Guidance to give them:
 
 - It's a single SQLite file — end the path with a filename. The default is the
-  XDG-conformant `${XDG_DATA_HOME:-~/.local/share}/turso/agent-foundations.db`;
+  XDG-conformant `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db`;
   offer that if they just want one.
 - **It must be a local path, never inside a cloud-synced folder** (iCloud Drive,
   Dropbox, OneDrive, Google Drive) — cloud sync corrupts a live SQLite file.

@@ -66,7 +66,7 @@ activates the instructions, creates the DB, and finally offers to set up coworke
    export to your shell profile so every session and script agrees):
 
    ```bash
-   export SUPERCHARGED_MEMORY_TURSO_PATH="${XDG_DATA_HOME:-$HOME/.local/share}/turso/agent-foundations.db"   # your choice
+   export SUPERCHARGED_MEMORY_TURSO_PATH="${XDG_DATA_HOME:-$HOME/.local/share}/turso/supercharged-memory.db"   # your choice
    ```
 4. Register Turso as a Claude Code MCP server named `turso`, launched as
    `tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --mcp --experimental-multiprocess-wal`.
@@ -94,7 +94,7 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/agent-foundations.db` | The live DB. **Keep it local — never in a cloud-synced folder**; cloud sync corrupts live SQLite. |
+| `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db` | The live DB. **Keep it local — never in a cloud-synced folder**; cloud sync corrupts live SQLite. |
 | `TURSO_BIN` | `~/.turso/tursodb` | Path to the `tursodb` binary. |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint. |
 | `EMBED_MODEL` | `bge-m3` | Embedding model; one per DB. |
@@ -105,7 +105,7 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/agent-foundations.db` | Written into the instructions so the agent restores to the right path. Keep it in sync with the `SUPERCHARGED_MEMORY_TURSO_PATH` the scripts use. |
+| `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db` | Written into the instructions so the agent restores to the right path. Keep it in sync with the `SUPERCHARGED_MEMORY_TURSO_PATH` the scripts use. |
 | `EPISODIC_MODE` | `major-events` | Episodic-storage policy (see below). Validated to one of the four keys. |
 | `BASE_PATH` | repo root | Points at this repo; the installer fills it in automatically — update it on a new machine. |
 
@@ -198,7 +198,7 @@ thin CLIs on top:
   is down. Also `--baseline`, `--status`, `--count`.
 - **`backfill.py`** — import a directory of files for a fresh start (skips files over the cap).
 - **`seed.py`** — scaffold for a one-time bootstrap load (empty by default).
-- **`agent-foundations-backup.sh`** — the daily backup (below).
+- **`supercharged-memory-backup.sh`** — the daily backup (below).
 - **`install-claude-md.sh`** — render the template into `~/.claude/CLAUDE.md`.
 - **`coworkers.py`** — manage AI personas (below).
 
@@ -304,12 +304,12 @@ scripts retry with backoff). A process without the flag is refused. The flag is
 
 ## Backup & restore
 
-- **Daily backup** — schedule `scripts/agent-foundations-backup.sh` (e.g. a
+- **Daily backup** — schedule `scripts/supercharged-memory-backup.sh` (e.g. a
   launchd/cron job) to produce a **validated** gzipped SQL dump
-  `YYYY-MM-DD-agent-foundations.sql.gz` in `Backups/` (concurrent-safe reader;
+  `YYYY-MM-DD-supercharged-memory.sql.gz` in `Backups/` (concurrent-safe reader;
   checks non-empty + has INSERTs + gzip intact). Retains **3 daily + 4 weekly**
   (Monday) copies, and runs even while a session is open.
-- **Manual backup:** `bash scripts/agent-foundations-backup.sh` — this is also what
+- **Manual backup:** `bash scripts/supercharged-memory-backup.sh` — this is also what
   the agent runs when the user asks for a backup (`CLAUDE.md.template` points at
   the script by absolute path). Dumps always land in this repo's `Backups/`, the
   `BACKUP_DIR` default; `recall.py --candidates` looks there for restorable dumps,
@@ -318,7 +318,7 @@ scripts retry with backoff). A process without the flag is refused. The flag is
   user's explicit ok.
 - **Restore** (into a fresh DB file):
   ```bash
-  gzcat "$(ls -1t Backups/*-agent-foundations*.sql.gz | head -1)" \
+  gzcat "$(ls -1t Backups/*-supercharged-memory*.sql.gz | head -1)" \
     | tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal
   ```
 - **Rebuild empty schema** — **pipe** the file; don't pass it as a SQL argument

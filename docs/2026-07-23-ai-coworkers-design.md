@@ -1,7 +1,7 @@
 # AI Coworkers — design spec
 
 Status: approved by user, pre-implementation.
-Builds on: `agent-foundations` (turso + Ollama memory system, see `../README.md`).
+Builds on: `supercharged-memory` (turso + Ollama memory system, see `../README.md`).
 
 ## Purpose
 

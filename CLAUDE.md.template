@@ -1,4 +1,4 @@
-# Long-term memory — Turso vector DB (agent-foundations)
+# Long-term memory — Turso vector DB (supercharged-memory)
 
 ALL cross-session memory goes here, through the scripts (not raw MCP calls).
 Details: `{{BASE_PATH}}/README.md`. Commands below omit their prefix — always run
@@ -104,4 +104,4 @@ via the turso MCP; writes go through `coworkers.py` / `remember.py --coworker`.
 
 ## On user request only — never scheduled, never proactive
 - "sleep" / "go to sleep" → follow `{{BASE_PATH}}/instructions/SLEEP.md` step by step.
-- "backup" → `bash "{{BASE_PATH}}/scripts/agent-foundations-backup.sh"` (writes `{{BASE_PATH}}/Backups/`).
+- "backup" → `bash "{{BASE_PATH}}/scripts/supercharged-memory-backup.sh"` (writes `{{BASE_PATH}}/Backups/`).
