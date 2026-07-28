@@ -85,9 +85,9 @@ overridden `EMBED_MODEL`, pull that model instead.
 **Ask the user to paste an absolute path** for the live Turso database file, then
 hold onto it as `SUPERCHARGED_MEMORY_TURSO_PATH` for the rest of this runbook. Guidance to give them:
 
-- It's a single SQLite file — end the path with a filename, e.g.
-  `~/Documents/turso/agent-foundations.db`. Offer that as the default if they
-  just want one.
+- It's a single SQLite file — end the path with a filename. The default is the
+  XDG-conformant `${XDG_DATA_HOME:-~/.local/share}/turso/agent-foundations.db`;
+  offer that if they just want one.
 - **It must be a local path, never inside a cloud-synced folder** (iCloud Drive,
   Dropbox, OneDrive, Google Drive) — cloud sync corrupts a live SQLite file.
 - The parent directory will be created if missing.
@@ -117,6 +117,23 @@ export SUPERCHARGED_MEMORY_TURSO_PATH="<pasted-path>"     # also set it for this
 If the user declines to edit a profile, set it only for this session and tell
 them they'll need to export it themselves in future shells.
 
+**Also add it to `~/.claude/settings.json`** — this is not optional, and a profile
+export alone is *not* enough. Claude Code runs its Bash tool in a **non-interactive**
+shell, and `~/.zshrc` / `~/.bashrc` are only sourced for *interactive* shells. Without
+this the agent's own `recall.py --status` reads the fallback default path, reports
+`MISSING`, and offers to restore a backup over a perfectly healthy database. Merge the
+`env` key into the existing JSON (don't overwrite the file):
+
+```json
+{
+  "env": {
+    "SUPERCHARGED_MEMORY_TURSO_PATH": "<pasted-path>"
+  }
+}
+```
+
+Verify with `jq -e '.env.SUPERCHARGED_MEMORY_TURSO_PATH' ~/.claude/settings.json`.
+
 ## Step 5 — Choose the episodic-memory policy
 
 Episodic memory is the append-only log of *events*. Ask the user how aggressively
@@ -145,11 +162,32 @@ SUPERCHARGED_MEMORY_TURSO_PATH="<pasted-path>" EPISODIC_MODE="<chosen-key>" bash
 
 Report the `BASE_PATH`, `SUPERCHARGED_MEMORY_TURSO_PATH`, and `EPISODIC_MODE` it echoes back.
 
-Then create the database if it doesn't exist yet (the scripts refuse to
-auto-create an empty one):
+Then set up the database. **Never create one without checking for an existing one
+first** — on a re-run, a second machine, or after a path change, a fresh empty DB
+silently strands memory the user already has:
 
 ```bash
-[ -f "$SUPERCHARGED_MEMORY_TURSO_PATH" ] || tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql
+python3 scripts/recall.py --candidates    # any DB/backup elsewhere?
+```
+
+- **A `CANDIDATE DB` is listed** → do NOT create anything. Show the user the path
+  and its memory count and ask whether that is their real memory. If yes, point
+  `SUPERCHARGED_MEMORY_TURSO_PATH` at it (settings.json + profile + MCP) instead of
+  creating a new one.
+- **Only a `CANDIDATE BACKUP` is listed** → ask whether to restore it rather than
+  start empty:
+  `gzcat "<newest-backup>" | tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal`
+- **Nothing found, and the file doesn't exist** → confirm with the user that they
+  are starting from zero, then create it:
+
+  ```bash
+  [ -f "$SUPERCHARGED_MEMORY_TURSO_PATH" ] || tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql
+  ```
+
+Never pipe `schema.sql` into a path that already has a file — verify with `[ -f ]`
+as above. Finish with:
+
+```bash
 python3 scripts/recall.py --status     # expect EMPTY (fresh) or READY n
 ```
 

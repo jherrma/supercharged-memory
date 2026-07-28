@@ -1,193 +1,109 @@
-# Long-term memory — local Turso vector DB (agent-foundations)
+# Long-term memory — Turso vector DB (agent-foundations)
 
-Use this system for ALL cross-session memory **when available** (see the
-session-start check). Only if it is unavailable, fall back to the built-in
-`~/.claude/projects/<hash>/memory/` store for that session.
+ALL cross-session memory goes here, through the scripts (not raw MCP calls).
+Details: `{{BASE_PATH}}/README.md`. Commands below omit their prefix — always run
+them as `python3 "{{BASE_PATH}}/scripts/<cmd>"`.
 
-Config + details: read `{{BASE_PATH}}/README.md`. Helper scripts are in
-`{{BASE_PATH}}/scripts` (`BASE_PATH` is machine-specific — update it here after a
-laptop switch). Memory ops go through the scripts, not raw MCP calls.
+## Session start (before anything else)
+1. `recall.py --status`
+   - `READY n` → proceed. `ERROR …` → fall back to `~/.claude/projects/<hash>/memory/` for
+     this session; tell the user.
+   - `DEGRADED n` — Ollama down, DB fine. Still do steps 2–3, and recall works (keyword-only),
+     but you CANNOT store this session: say so, and put the memory text in your reply instead.
+   - `MISSING` — almost always a wrong path, not lost data. NEVER create, restore, or
+     overwrite a database on your own; show what `--status` found and ask.
+   - `EMPTY` — if you didn't just create it, run `recall.py --candidates` in case the real DB
+     is elsewhere; otherwise ask whether to `backfill.py --dir "<path>"`.
+2. `recall.py --baseline` — must-always-apply rules; follow them the whole session.
+3. `recall.py --topics` — index of which subjects have memory at all. Skim it; if the
+   conversation touches one, dig in with `recall.py` even if it's not an obvious search term.
 
-## Session start (ALWAYS, before doing anything else)
-1. `python3 "{{BASE_PATH}}/scripts/recall.py" --status`
-   - `MISSING` — DB file gone. ASK whether to RESTORE the latest backup (do NOT
-     recreate an empty DB):
-     `gzcat "$(ls -1t "{{BASE_PATH}}/Backups"/*-agent-foundations*.sql.gz | head -1)" | tursodb "{{SUPERCHARGED_MEMORY_TURSO_PATH}}" --experimental-multiprocess-wal`
-     (The DB lives at `{{SUPERCHARGED_MEMORY_TURSO_PATH}}` — set during setup; scripts read it from the
-     `SUPERCHARGED_MEMORY_TURSO_PATH` env var, so it must be exported in your shell for them to agree.)
-   - `EMPTY` — no memories yet. ASK whether to backfill from a directory:
-     `python3 "{{BASE_PATH}}/scripts/backfill.py" --dir "<path>"`.
-   - `DEGRADED n` — Ollama is down but the DB is fine (`n` = memory count; `0` also
-     means empty). Still load baseline (step 2) and use recall (it falls back to
-     keyword-only). Do NOT store new memories this session — neither semantic nor
-     episodic can be embedded — tell the user.
-   - `ERROR …` — unavailable: fall back to the built-in memory store; tell the user.
-   - `READY n` — proceed.
-2. Load baseline and follow it for the whole session:
-   `python3 "{{BASE_PATH}}/scripts/recall.py" --baseline`.
-3. Load the topic index (what subjects have memory at all — rebuilt by each
-   sleep pass, see `instructions/SLEEP.md`):
-   `python3 "{{BASE_PATH}}/scripts/recall.py" --topics`. Skim it; if the
-   conversation touches one of these topics, dig deeper with `recall.py`
-   even if it doesn't look like an obvious search term on its own.
+## Recall
+`recall.py "<query>" [--table semantic|episodic|both] [--project <id>] [--k N]`
 
-## Recall (when to read memory)
-- At the start of a task that may rely on prior context, and whenever the user
-  refers to past decisions/facts.
-- Also BEFORE debugging anything non-trivial (a past session may have hit the
-  same gotcha) and BEFORE storing (dedup / supersede check).
-- `python3 "{{BASE_PATH}}/scripts/recall.py" "<query>" [--table semantic|episodic|both] [--project <id>] [--k N]`
-- Ranking is hybrid: query tokens found in a memory's text are boosted above pure
-  semantic order, so exact ids / error strings surface too.
-- The topic index loaded at session start (step 3 above) is the primary
-  "don't know what to search for" tool. If you suspect it's gone stale
-  mid-session (a topic created after the last sleep won't be in it yet),
-  re-run `recall.py --topics`, or substring-query directly:
-  `SELECT topic, keywords FROM topic_keywords WHERE topic LIKE '%x%' OR keywords LIKE '%x%';`
+Read memory at the start of a task that may depend on prior context, whenever the user cites
+a past decision, BEFORE non-trivial debugging (a past session may have hit the same gotcha),
+and BEFORE storing (dedup / supersede check). Ranking is hybrid — query tokens matched in the
+text outrank pure cosine, so exact ids and error strings surface. The topic index is the
+"don't know what to search for" tool; it goes stale between sleeps, so re-run `--topics` or
+query directly: `SELECT topic, keywords FROM topic_keywords WHERE topic LIKE '%x%';`
 
-## Store — AUTONOMOUS. Building the knowledge base is YOUR job.
+## Store — AUTONOMOUS. Building this knowledge base is YOUR job.
+The user never asks you to remember; you notice and store. Store the moment an insight is
+CONFIRMED (fix verified, decision made) — sessions die without warning. Never ask permission
+(sole exception: `baseline`). Report in one line: `memorized: <topic>`, then continue.
 
-The user does not ask you to remember things — you notice and store on your
-own. Store the moment an insight is CONFIRMED (fix verified, decision made),
-not at session end: sessions die without warning. Never ask permission to
-store (sole exception: baseline). After storing, report it in one line —
-`memorized: <topic>` — and continue. In a DEGRADED session you cannot store:
-put the finished memory text in your reply instead so it isn't lost.
+`remember.py --table <t> --topic <topic> --keywords "<k1, k2, …>" --source <src> --model <your-model-id> --text "<memory>" [--project <id>] (--category <c> | --event-type <e> --importance <i>)`
 
-`python3 "{{BASE_PATH}}/scripts/remember.py" --table <t> [--project <id>] --topic <topic> --keywords "<k1, k2, …>" --source <src> --model <your-model-id> --text "<memory>" (--category <c> | --event-type <e> --importance <i>)`
+`--project` = tracking-tool work-item id (ClickUp/Jira, e.g. `869e7xzp6`); omit if not
+ticket-bound. `--model` = your own exact model id.
 
-### Episodic memory policy — ACTIVE: `{{EPISODIC_MODE}}`
-
-This machine's episodic-storage verbosity, chosen during setup. It governs
-**episodic** memory only (the append-only event log) — semantic storage
-(gotchas, feedback, corrections, constraints) always follows the Capture
-triggers below regardless of this setting. Follow the active mode:
-
-- `every-prompt` — store an episodic `note` for **every** user prompt / turn,
-  capturing what was asked and what you did. Highest verbosity.
-- `major-actions` — store an episodic memory for every **substantive** action
-  (a change made, a task carried out), but **skip** quick questions,
-  clarifications, and trivial back-and-forth.
-- `major-events` — store episodic memories **only** for major events: a feature
-  completed, a bug resolved, a decision made, a milestone or incident. This is
-  the default and matches the episodic Capture triggers as written.
-- `manual` — store episodic memories **only** when the user explicitly asks you
-  to. Do not auto-store events. (Semantic capture is unaffected — still autonomous.)
-
-If `{{EPISODIC_MODE}}` is more permissive than the Capture triggers below,
-it ADDS episodic stores; if more restrictive (`major-events`, `manual`), it
-NARROWS which triggers fire an episodic write. When in doubt, ask the user.
-
-### Capture triggers — when one fires, a store is REQUIRED
-1. **Root cause found** — a bug's actual cause identified and the fix verified.
-   → episodic `bug_fix`: symptom, root cause, fix. If the cause generalizes
-   beyond this one bug, ALSO store the lesson as a semantic gotcha (next
-   trigger) — two memories are fine.
-2. **Gotcha discovered** — anything that behaved differently than expected or
-   documented: library/dependency quirk, framework footgun, API surprise,
-   build/tooling trap, hidden architecture constraint. Fire this whenever you
-   were surprised, blocked for a while, or a fix worked for a non-obvious
-   reason. → semantic `reference` (external: library/tool/platform) or
-   `project` (ours: codebase/architecture). Highest-value trigger — when in
+### Triggers — when one fires, storing is REQUIRED
+1. **Gotcha** — anything that behaved differently than expected or documented; you were
+   surprised, blocked a while, or a fix worked for a non-obvious reason. → semantic
+   `reference` (external tool/library/platform) or `project` (ours). Highest value: when in
    doubt, store.
-3. **User correction / preference** — the user overrides your approach or
-   states how they want things done. → semantic `feedback`, with why + how
-   to apply.
-4. **Decision** — a design/architecture choice made, alternatives rejected.
-   → episodic `decision`: what was chosen, what was rejected, why.
-5. **Milestone** — project start, feature/large-chunk complete, incident.
-   → episodic with the matching event_type (incidents: include root cause).
-6. **Hard-won context** — non-obvious constraint, environment quirk, process
-   knowledge that took real effort to establish and is written down nowhere.
-   → semantic `project` or `reference`.
+2. **Root cause found** — cause identified AND fix verified. → episodic `bug_fix` (symptom,
+   cause, fix). If it generalizes beyond this bug, ALSO store the lesson as a gotcha.
+3. **User correction / preference** → semantic `feedback`, with why + how to apply.
+4. **Decision** — choice made, alternatives rejected → episodic `decision` (what, what not, why).
+5. **Milestone** — project start, feature complete, incident → episodic, matching event type.
+6. **Hard-won context** — non-obvious constraint or environment quirk written down nowhere →
+   semantic `project` / `reference`.
 
-### Completion gate (run BEFORE reporting any task done)
-Ask: "Did this task surface a root cause, gotcha, correction, decision, or
-constraint not yet in memory?" If yes → store now, then report. Mentioning a
-lesson in your summary while storing nothing is a bug in your behavior.
+**Episodic policy on this machine — `{{EPISODIC_MODE}}`: {{EPISODIC_RULE}}** This governs
+episodic writes only; semantic capture always follows the triggers above.
 
-### The filter (keep noise out)
-Store only what passes: "Would an agent with zero context of this session act
-differently a month from now for knowing this?" Skip: anything re-derivable
-from code/git/tickets, session-local state, routine work without surprise,
-generic best practices.
+**Completion gate** — before reporting ANY task done, ask: did this surface a gotcha, root
+cause, correction, decision, or constraint not yet in memory? If yes, store first. Mentioning
+a lesson while storing nothing is a bug in your behavior.
 
-### Writing the memory
-- Self-contained note — the future reader has no session context. Shape:
-  situation → what is true → how to apply. Quote exact error messages.
-- Recall first: existing memory covers the topic but is now wrong/incomplete
-  → `--supersedes <id>`; still correct → don't store a duplicate. (The script
-  refuses near-duplicates; `--force` only if genuinely distinct.)
-- `--keywords` are appended into the memory text itself — ids, exact error
-  strings, library + version, synonyms, EN and DE phrasings someone would
-  search by. They sharpen both semantic and keyword recall.
-- Comfortably under the 2000-char cap (the cap is a safeguard, not a target).
+**Filter** — store only what passes: "would an agent with zero context of this session act
+differently a month from now for knowing this?" Skip anything re-derivable from
+code/git/tickets, session-local state, and generic best practices.
 
-### semantic — durable FACTS (timeless, revisable)
-- `--category` ∈ {user, feedback, project, reference}. Gotchas: `reference` =
-  external (library/tool/platform behavior), `project` = ours
-  (codebase/architecture).
-- `baseline` = must-always-apply rules loaded every session. NEVER store a baseline
-  memory without the user's explicit confirmation — ask, then pass `--confirm-baseline`.
-- To revise a fact, use `remember.py --supersedes <old-id> …` — it inserts the new
-  version and marks the old row superseded in one call (don't hand-edit `superseded_by`).
+### Writing it
+- Self-contained — the reader has no session context. Situation → what's true → how to apply.
+  Quote exact error messages. Stay well under the 2000-char cap.
+- `--keywords` are appended into the text itself: ids, exact error strings, library + version,
+  synonyms, EN *and* DE phrasings someone would search by. They sharpen both search modes.
+- Recall first. Covered but now wrong/incomplete → `--supersedes <id>` (inserts + supersedes in
+  one call; never hand-edit `superseded_by`). Still correct → don't duplicate. The script
+  refuses near-duplicates; `--force` only if genuinely distinct.
 
-### episodic — noteworthy EVENTS (time-anchored, append-only)
-- `--event-type` ∈ {project_start, bug_fix, feature_complete, decision, milestone,
-  incident, note}. `--importance` ∈ {routine, notable, major}.
-- Events recur legitimately — no dedup guard; the filter above still applies.
-
-## Populating columns
-- `--project` = the tracking-tool work-item id (ClickUp task id, Jira key, etc.,
-  e.g. `869e7xzp6`); omit for a global memory not tied to a ticket.
-- `--topic` = a short headline / subject of the memory.
-- `--model` = your own exact model id (e.g. `claude-opus-4-8`).
+### Kinds
+- **semantic** = timeless facts, revisable. `--category` ∈ user, feedback, project, reference.
+  `baseline` = loaded every session — NEVER store one without the user's explicit ok, then
+  pass `--confirm-baseline`.
+- **episodic** = time-anchored events, append-only, no dedup guard (events recur legitimately).
+  `--event-type` ∈ project_start, bug_fix, feature_complete, decision, milestone, incident,
+  note. `--importance` ∈ routine, notable, major.
 
 ## Rules
-- NEVER store PII — anonymize; store pointers (ticket/case ids, role labels), not
-  personal data. Applies to the text AND anything sent to Ollama to embed.
-- On `database is busy` the script retries; if it still fails, run it again.
-- One embedding model per DB (bge-m3) — don't change `EMBED_MODEL`; the script
-  refuses mixed vector spaces.
+- NEVER store PII — anonymize; store pointers (ticket/case ids, role labels). Applies to the
+  text AND anything sent to Ollama to embed.
+- One embedding model per DB (bge-m3) — never change `EMBED_MODEL`.
+- `database is busy` → the script retries; if it still fails, run it again.
 
 ## Coworkers (named personas)
+Answer coworker questions from the DB directly — don't read files first. Reads are ad-hoc SQL
+via the turso MCP; writes go through `coworkers.py` / `remember.py --coworker`.
 
-Concepts: README.md "Coworkers". The commands here are complete — answer
-coworker questions from the DB directly; don't go read files first.
-Reads (list, load, inspect) are ad-hoc SQL via the turso MCP; writes go
-through `coworkers.py` / `remember.py --coworker`.
+- **List**: `SELECT id, name, expertise, trust_level, active FROM coworkers;`
+- **Load** ("load jeff"): his `coworkers` row + current `appraisals` row + `semantic_memory`
+  tagged to him with `category='feedback'` newer than that appraisal (or than his `created_at`
+  if he has none). Say what you loaded, then adopt his personality/expertise/trust_level for
+  the session. Baseline rules stay a hard floor — no trust level loosens them. If `active=0`,
+  say so before proceeding.
+- **Feedback while loaded**: `remember.py --coworker <name> …` — your corrections/praise
+  `--source user-stated`, his own noticed learnings `--source self-observed`. Self-observed is
+  trust-gated: `supervised` → propose the text and wait for an ok; `trusted`/`autonomous` →
+  store directly, mention it in passing.
+- **Appraisal review** (only when you trigger it, never scheduled): pull that same feedback
+  history, discuss it, then `coworkers.py --appraise <name> --trust <level> --text "<distilled>"`.
 
-**List** ("what/which coworkers do I have"): query directly:
-`SELECT id, name, expertise, trust_level, active FROM coworkers;`
-
-**Load** ("load jeff"): read (via MCP, plain SQL) his `coworkers` row +
-current `appraisals` row + `semantic_memory` tagged to him with
-`category='feedback'` created after that appraisal (or after his own
-`created_at` if he has none yet). Confirm out loud what you loaded, then
-adopt his personality/expertise/trust_level for the rest of the session.
-Global baseline rules stay a hard floor underneath — no trust_level loosens
-them. If he's retired (`active=0`), say so before proceeding.
-
-**Feedback while a coworker is loaded**: both your corrections/praise
-(`--source user-stated`) and the coworker's own noticed learnings
-(`--source self-observed`) go through
-`remember.py --coworker <name> ...`. Self-observed writes are
-gated by trust_level: `supervised` → propose the text and wait for an
-ok before storing; `trusted`/`autonomous` → store directly, mention it in
-passing.
-
-**Appraisal review** (you trigger it explicitly, never scheduled): pull the
-coworker's `category='feedback'` history since their current appraisal
-(same data as load), discuss it, then run
-`coworkers.py --appraise <name> --trust <level> --text "<distilled>"` once
-you've agreed on the text and rating.
-
-## Sleep (consolidation — user-triggered only, never scheduled)
-
-When the user says "sleep" or "go to sleep", follow
-`{{BASE_PATH}}/instructions/SLEEP.md` step by step. Short version: sift
-unprocessed episodic memory for what was actually learned (discard bare event
-sequences), promote the rest into semantic memory, consolidate/retire
-overlapping or obsolete semantic facts (soft-delete only, ask the user when
-obsolescence isn't clear-cut), then rebuild the `topic_keywords` index used by
-the recall hint above.
+## Sleep (user-triggered only, never scheduled)
+On "sleep" / "go to sleep", follow `{{BASE_PATH}}/instructions/SLEEP.md` step by step: sift
+unprocessed episodic memory for what was actually learned (discard bare event sequences),
+promote it into semantic memory, consolidate/retire overlapping or obsolete facts (soft-delete
+only; ask the user when obsolescence isn't clear-cut), then rebuild `topic_keywords`.

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The **source-controlled bootstrap** for a local, Turso-only long-term memory system for AI coding agents (Claude Code). This repo holds the scripts, schema, and CLAUDE.md template — **not** the runtime state. At runtime the pieces live *outside* the repo:
 
-- **The DB** (`~/Documents/turso/agent-foundations.db`) — the single source of truth. Must be **local only, never in a cloud-synced folder** (cloud sync corrupts live SQLite).
+- **The DB** (default `${XDG_DATA_HOME:-~/.local/share}/turso/agent-foundations.db`, XDG-conformant; override with `SUPERCHARGED_MEMORY_TURSO_PATH`) — the single source of truth. Must be **local only, never in a cloud-synced folder** (cloud sync corrupts live SQLite).
 - **The active instructions** (`~/.claude/CLAUDE.md`) — rendered from `CLAUDE.md.template` and installed between managed markers by `install-claude-md.sh`.
 - **Backups** — a local `Backups/` folder written by a daily launchd job.
 
@@ -39,6 +39,7 @@ bash scripts/install-claude-md.sh
 python3 scripts/recall.py --status
 python3 scripts/recall.py --baseline            # rules to load every session
 python3 scripts/recall.py --topics              # topic_keywords index, load every session
+python3 scripts/recall.py --candidates          # other memory DBs/backups — ALWAYS check before creating one
 
 # Recall (hybrid vector + keyword)
 python3 scripts/recall.py "<query>" [--table semantic|episodic|both] [--project <id>] [--k N] [--coworker <name>]
@@ -89,8 +90,11 @@ python3 scripts/seed.py                          # empty by default; add SEM/EPI
 - **Keywords are not a column** — `remember.py --keywords` appends them into `memory_text` so they're both embedded and LIKE-searchable.
 - **Length caps are enforced by `CHECK`, not VARCHAR** (SQLite ignores declared sizes): `memory_text` ≤ 2000; most metadata ≤ 128.
 - **Never store PII** — anonymize before `remember.py`/`backfill.py`; store pointers (ticket ids, role labels). Applies to the text *and* anything sent to Ollama to embed.
+- **`CLAUDE.md.template` is loaded into context every session — keep it terse.** Prefer short imperative lines over prose; anything an agent needs only occasionally belongs in `README.md`/`instructions/`, which the template points at. The installer renders only the *active* episodic mode into `{{EPISODIC_RULE}}`, so adding a mode means adding its one-line rule to the `case` in `install-claude-md.sh` as well as the validation list.
 - **`BASE_PATH` in `CLAUDE.md.template` is machine-specific** — the one value to update on a new laptop (the installer defaults it to the repo's parent dir).
 - When rebuilding schema, **pipe** `schema.sql` — `tursodb "$(cat schema.sql)"` fails because the leading `--` comment parses as a CLI flag.
 - Don't hand-edit `superseded_by` — use `remember.py --supersedes` (semantic) / the appraisal flow (coworkers), which insert + supersede in one transaction.
 - **Never hard-delete a memory** — `retired_at` (semantic) is soft-delete only, set via `sleep.py --retire`; same never-delete philosophy as coworkers' `active=0`. Ask the user when obsolescence isn't clear-cut.
+- **Never create, restore, or overwrite a DB unprompted.** `MISSING` almost always means a wrong path, not lost data. Run `recall.py --candidates`, show the user what was found, and ask — creating an empty DB strands the real one, and restoring a backup over a live DB loses everything since that backup. `require_db()` enforces the no-auto-create half; the rest is instruction-level in `CLAUDE.md.template`.
+- **`SUPERCHARGED_MEMORY_TURSO_PATH` must live in `~/.claude/settings.json` under `env`** — Claude Code's Bash tool is non-interactive and never sources `~/.zshrc`/`~/.bashrc`, so a profile export alone leaves the scripts on the default path. Default is XDG: `${XDG_DATA_HOME:-~/.local/share}/turso/agent-foundations.db`.
 - `sleep.py --rebuild-topics` is a **full replace**, not an upsert — always pass the complete current topic set on stdin, or you'll silently drop the topics you omit.

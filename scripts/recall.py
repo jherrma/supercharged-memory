@@ -16,6 +16,7 @@ coworker's current profile (that's ad-hoc SQL, see README.md - Coworkers).
   recall.py --baseline        # baseline memories (pure SQL, works without Ollama)
   recall.py --topics          # topic_keywords index (pure SQL, load every session)
   recall.py --status          # MISSING | EMPTY | DEGRADED n | READY n
+  recall.py --candidates      # other memory DBs/backups found — check before creating one
   recall.py --count
 """
 import argparse, re, sys
@@ -58,7 +59,12 @@ def kw_expr(toks):
 
 def status():
     if not M.db_exists():
-        print("MISSING"); return
+        # Print the path and any DB/backup found elsewhere: a wrong path (unset
+        # env var) looks identical to real data loss unless we say so.
+        print("MISSING")
+        for line in M.missing_report():
+            print("  " + line)
+        return
     try:
         n = int(M.scalar("SELECT (SELECT count(*) FROM semantic_memory) + "
                          "(SELECT count(*) FROM episodic_memory);"))
@@ -68,6 +74,25 @@ def status():
         print(f"DEGRADED {n}")           # DB fine, embeddings unavailable
     else:
         print("EMPTY" if n == 0 else f"READY {n}")
+
+
+def candidates():
+    """List memory DBs / backups found outside the configured path.
+
+    Answers "is my real memory somewhere else?" before anything creates,
+    restores, or writes into the wrong database.
+    """
+    dbs, backups = M.find_candidates()
+    print(f"configured path : {M.DB}"
+          f"{' (exists)' if M.db_exists() else ' (MISSING)'}")
+    for path, n in dbs:
+        print(f"CANDIDATE DB    : {path} ({n} memories)")
+    for b in backups[:5]:
+        print(f"CANDIDATE BACKUP: {b}")
+    if not dbs and not backups:
+        print("no other database or backup found in the usual locations")
+    else:
+        print("Ask the user before switching, restoring, or overwriting anything.")
 
 
 def baseline():
@@ -123,10 +148,14 @@ def main():
     p.add_argument("--baseline", action="store_true")
     p.add_argument("--topics", action="store_true", help="load the topic_keywords index (load every session, like --baseline)")
     p.add_argument("--status", action="store_true")
+    p.add_argument("--candidates", action="store_true",
+                   help="list memory DBs/backups found outside the configured path")
     p.add_argument("--count", action="store_true")
     a = p.parse_args()
     if a.status:
         status(); return
+    if a.candidates:
+        candidates(); return
     if a.count:
         M.require_db(); print(M.scalar("SELECT (SELECT count(*) FROM semantic_memory) + "
                                        "(SELECT count(*) FROM episodic_memory);")); return

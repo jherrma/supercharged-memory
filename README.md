@@ -66,7 +66,7 @@ activates the instructions, creates the DB, and finally offers to set up coworke
    export to your shell profile so every session and script agrees):
 
    ```bash
-   export SUPERCHARGED_MEMORY_TURSO_PATH="$HOME/Documents/turso/agent-foundations.db"   # your choice
+   export SUPERCHARGED_MEMORY_TURSO_PATH="${XDG_DATA_HOME:-$HOME/.local/share}/turso/agent-foundations.db"   # your choice
    ```
 4. Register Turso as a Claude Code MCP server named `turso`, launched as
    `tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --mcp --experimental-multiprocess-wal`.
@@ -94,7 +94,7 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `SUPERCHARGED_MEMORY_TURSO_PATH` | `~/Documents/turso/agent-foundations.db` | The live DB. **Keep it local — never in a cloud-synced folder**; cloud sync corrupts live SQLite. |
+| `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/agent-foundations.db` | The live DB. **Keep it local — never in a cloud-synced folder**; cloud sync corrupts live SQLite. |
 | `TURSO_BIN` | `~/.turso/tursodb` | Path to the `tursodb` binary. |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint. |
 | `EMBED_MODEL` | `bge-m3` | Embedding model; one per DB. |
@@ -105,7 +105,7 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `SUPERCHARGED_MEMORY_TURSO_PATH` | `~/Documents/turso/agent-foundations.db` | Written into the instructions so the agent restores to the right path. Keep it in sync with the `SUPERCHARGED_MEMORY_TURSO_PATH` the scripts use. |
+| `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/agent-foundations.db` | Written into the instructions so the agent restores to the right path. Keep it in sync with the `SUPERCHARGED_MEMORY_TURSO_PATH` the scripts use. |
 | `EPISODIC_MODE` | `major-events` | Episodic-storage policy (see below). Validated to one of the four keys. |
 | `BASE_PATH` | repo root | Points at this repo; the installer fills it in automatically — update it on a new machine. |
 
@@ -136,6 +136,7 @@ SQL and inspection only — revisions go through the scripts.
 python3 scripts/recall.py "how do I run a single test?" [--table semantic|episodic|both] [--project <id>] [--k N]
 python3 scripts/recall.py --baseline            # always-apply rules, loaded every session
 python3 scripts/recall.py --status              # availability check
+python3 scripts/recall.py --candidates          # other memory DBs/backups found on this machine
 
 # Store one memory (see the script docstrings for the full flag set)
 python3 scripts/remember.py --table semantic --topic <t> --category <c> \
@@ -151,11 +152,33 @@ python3 scripts/backfill.py --dir <path> [--glob '*.md'] [--category project]
 
 On session start the agent runs `recall.py --status` first:
 
-- **`MISSING`** — DB file gone → offer to **restore** the latest local dump (a lost DB is not a fresh DB).
-- **`EMPTY`** — no memories yet → offer to **backfill** from a directory.
+- **`MISSING`** — nothing at the configured path → **stop and ask the user** (see below).
+- **`EMPTY`** — DB exists but holds no memories → check `--candidates`, then offer to **backfill** from a directory.
 - **`DEGRADED n`** — Ollama down, DB fine → still load baseline and use keyword-only recall, but don't store new memories.
 - **`ERROR`** — fall back to the agent's built-in memory store.
 - **`READY n`** — load baseline and proceed.
+
+### Never lose a database by accident
+
+The most likely cause of `MISSING` is a **wrong path**, not lost data — and the two
+are indistinguishable unless you look. An agent that responds by creating a fresh DB
+silently strands the real one; an agent that restores a backup over a live DB loses
+everything since that backup. So nothing in this system ever creates, restores, or
+overwrites a database on its own:
+
+- `memlib.require_db()` refuses to let any script auto-create an empty DB.
+- `--status MISSING` prints the configured path, **where that path came from**
+  (env var vs. built-in default), and any other memory DB or backup it found —
+  each with its memory count.
+- `--candidates` runs that search on demand, at any time.
+- The agent instructions require it to work through *wrong path → candidate DB →
+  ask the user* before restore is even considered, and creating an empty DB is
+  the last resort with explicit confirmation.
+
+A path that silently defaults is the root of this whole failure mode, so note that
+**`SUPERCHARGED_MEMORY_TURSO_PATH` must be set where Claude Code can see it** —
+`~/.claude/settings.json` under `env`. A shell profile alone is not enough: the
+agent's Bash tool runs non-interactively and never sources `~/.zshrc` or `~/.bashrc`.
 
 ## How it works
 

@@ -8,7 +8,7 @@
 set -uo pipefail
 
 TURSO="${TURSO_BIN:-$HOME/.turso/tursodb}"
-DB="${SUPERCHARGED_MEMORY_TURSO_PATH:-$HOME/Documents/turso/agent-foundations.db}"
+DB="${SUPERCHARGED_MEMORY_TURSO_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/turso/agent-foundations.db}"
 DEST="${BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/Backups}"
 ERR=/tmp/agent-foundations-backup.err
 
