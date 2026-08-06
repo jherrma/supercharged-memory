@@ -3,3 +3,4 @@ __pycache__/
 Backups/
 coworkers/*.md
 !coworkers/README.md
+**/.DS_Store
