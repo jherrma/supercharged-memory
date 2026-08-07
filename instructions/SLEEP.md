@@ -13,6 +13,28 @@ ones — `episodic_memory`/`semantic_memory` are unchanged; sleep just adds a
 `processed_at` marker (episodic) and a `retired_at` soft-delete (semantic), plus
 one small unlinked `topic_keywords` table.
 
+## How the work is split — read this first
+
+**The orchestrating agent never holds `memory_text` in bulk.** Reading every row's
+full text into the session that is running sleep is the single largest context cost
+in this system, and it grows with the corpus. So sleep queries **skinny metadata
+only** (ids, topics, dates) and hands the actual reading to subagents:
+
+- Each worker prompt is **self-contained**: the ids it owns, the exact `tursodb`
+  read command, its judgment rules, the exact `remember.py` invocation, and your
+  model id to pass as `--model`.
+- Spawn workers **in one message** so they run concurrently.
+- Workers report back **one line per row**, not the text they read.
+- A worker that dies is a gap to report, never a silent omission.
+
+Read rows inside a worker with:
+
+```bash
+tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list \
+  "SELECT id, created_at, topic, event_type, importance, memory_text
+   FROM episodic_memory WHERE id IN (...);"
+```
+
 ## Step 1 — Pull unprocessed episodic memory
 
 Ad-hoc SQL via the turso MCP (read-only, no script needed). Ignore the MCP's
@@ -21,14 +43,19 @@ attached to the real file ([upstream #8061](https://github.com/tursodatabase/tur
 confirm with the query itself, or read via
 `tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list "<sql>"`.
 
+Pull **metadata only** — the text belongs in the workers, not here:
+
 ```sql
-SELECT id, created_at, topic, event_type, importance, memory_text
+SELECT id, created_at, topic, event_type, importance
 FROM episodic_memory WHERE processed_at IS NULL ORDER BY created_at;
 ```
 
+Split the ids into batches of ≤8 and dispatch one sift worker per batch (Steps 2–3
+are that worker's job; Step 4 stays yours).
+
 ## Step 2 — Sift: keep only what someone learned
 
-For each row, judge it — don't mechanically promote everything:
+This is the worker's judgment rule — give it verbatim. For each row:
 
 - **Keep** — the row records a fact, a decision, a root cause, a fix, a
   gotcha: something that changes what a future session should believe or do.
@@ -40,9 +67,12 @@ judgment call is the only filter — apply it seriously, don't rubber-stamp.
 
 ## Step 3 — Promote kept rows into semantic memory
 
-One `remember.py` call per kept row (or per cluster of related rows condensed
-into one fact — condensing several episodic rows into a single semantic memory
-is encouraged, don't force a 1:1 mapping):
+**The sift worker does this itself** — high volume, low risk, and routing merged
+text back through the orchestrator would defeat the whole split. It runs
+`recall.py` first to check the fact isn't already stored, then one `remember.py`
+call per kept row (or per cluster of related rows condensed into one fact —
+condensing several episodic rows into a single semantic memory is encouraged,
+don't force a 1:1 mapping):
 
 ```bash
 python3 scripts/remember.py --table semantic --category <c> --topic "<t>" \
@@ -55,9 +85,17 @@ python3 scripts/remember.py --table semantic --supersedes <old-id> ...
 Same writing rules as always (see `CLAUDE.md` — self-contained, situation →
 what's true → how to apply, under the 2000-char cap).
 
+Each worker returns **one line per id** and nothing more:
+`<id> → kept(sem=<new-id>) | discarded(<short reason>)`.
+
 ## Step 4 — Mark scanned episodic rows processed
 
-**Every** row looked at in Step 1, whether kept or discarded, in one call:
+**This stays with the orchestrator, and only for ids a worker actually reported
+back.** A worker that dies mid-batch must not leave its rows stamped as sifted with
+nothing written — unprocessed is the recoverable state, and those rows simply get
+re-sifted next sleep.
+
+Every reported row, kept or discarded, in one call:
 
 ```bash
 python3 scripts/sleep.py --mark-processed <id1,id2,id3,...>
@@ -68,15 +106,21 @@ future sleep, forever.
 
 ## Step 5 — Consolidate semantic memory
 
-Pull current semantic memory (`WHERE superseded_by IS NULL AND retired_at IS
-NULL`, ad-hoc SQL) and look for near-duplicates or overlapping facts —
-same signal as `remember.py`'s own dedup guard (cosine < 0.10), but you're
-scanning deliberately here, not just against one new insert. Merge overlapping
-memories into one via:
+Scope this to the **topics this pass touched** — the corpus-wide sweep is deep
+sleep's job (`DEEP-SLEEP.md` D3), and duplicating it here would read all of
+semantic memory on every ordinary sleep.
+
+For each touched topic, dispatch a worker: it pulls that topic's current rows
+(`WHERE superseded_by IS NULL AND retired_at IS NULL`), looks for near-duplicates
+or overlapping facts — same signal as `remember.py`'s own dedup guard
+(cosine < 0.10), but scanning deliberately rather than against one new insert —
+and proposes merges. Apply an approved merge with:
 
 ```bash
-python3 scripts/remember.py --table semantic --supersedes <old-id> --text "<merged>" ...
+python3 scripts/remember.py --table semantic --supersedes <id[,id...]> --text "<merged>" ...
 ```
+
+Several ids merge N memories into one row in a single transaction.
 
 ## Step 6 — Retire obsolete memories
 
@@ -121,7 +165,32 @@ that's real context budget spent every session regardless of whether that
 session needs it — consolidate overlapping topics harder in Step 5/7 if it's
 creeping up, don't just let it grow.
 
+Deriving the topics is judgment work over the whole corpus, so hand it to a single
+worker: it reads every current row's `topic` plus the `Keywords:` tail of its text
+and returns the finished JSON array. The orchestrator only pipes that into the
+script.
+
 ## Step 8 — Report
 
 One summary line: episodic rows processed (kept vs. discarded), semantic
-consolidations and retirements made, and the resulting topic count.
+consolidations and retirements made, and the resulting topic count. Name any
+worker that died — its rows are unprocessed, not silently dropped.
+
+## Step 9 — Offer deep sleep
+
+Sleep is done. Print this offer and stop; do **not** start deep sleep unless the
+user says yes:
+
+> Deep sleep additionally: (1) lists superseded/retired memories and hard-deletes
+> the ones you select, after a backup; (2) clusters all current semantic memory by
+> embedding similarity and proposes merges where memories cover the same topic and
+> differ only in nuance; (3) mines the whole episodic log for recurring patterns
+> and trends, storing each as a new `pattern` memory with its evidence ids; (4)
+> rebuilds the topic index. Merges and patterns come to you as one approval batch.
+> Proceed?
+
+On yes → follow `instructions/DEEP-SLEEP.md` from **D1** (the backup); D0 is this
+pass, already done. On no → stop here; nothing further to do.
+
+If the user asked for "deep sleep" in the first place, skip the question and
+continue straight into `DEEP-SLEEP.md` — the request is the consent.

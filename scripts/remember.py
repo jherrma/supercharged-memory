@@ -34,14 +34,20 @@ def store_memory(table, text, *, topic=None, project=None, category=None,
         sys.exit(f"refused: memory is {len(text)} chars; hard cap {M.MAX_TEXT}. "
                  "Tighten it or split into separate memories.")
     M.require_db()
-    if supersedes is not None:
+    if supersedes:
         if table != "semantic":
             sys.exit("--supersedes is only valid for semantic memories.")
-        cur = M.scalar(f"SELECT count(*) FROM semantic_memory "
-                       f"WHERE id={int(supersedes)} AND superseded_by IS NULL AND retired_at IS NULL;")
-        if not cur or int(cur) != 1:
-            sys.exit(f"refused: --supersedes {supersedes}: no current (un-superseded, "
-                     "non-retired) semantic row with that id — nothing revised, nothing stored.")
+        # Validate EVERY id before writing anything: a merge of N memories into one
+        # must not half-apply, leaving some old rows current and some superseded.
+        id_list = ",".join(str(i) for i in supersedes)
+        found = {int(l) for l in M.exec_sql(
+            f"SELECT id FROM semantic_memory WHERE id IN ({id_list}) "
+            "AND superseded_by IS NULL AND retired_at IS NULL;", mode="list").split()}
+        bad = [i for i in supersedes if i not in found]
+        if bad:
+            sys.exit(f"refused: --supersedes {','.join(str(i) for i in bad)}: no current "
+                     "(un-superseded, non-retired) semantic row with that id — nothing "
+                     "revised, nothing stored.")
 
     coworker_ids = []
     if coworker:
@@ -61,15 +67,17 @@ def store_memory(table, text, *, topic=None, project=None, category=None,
     vlit = M.fmt_vec(M.embed(text))
 
     # Dedup only for semantic; episodic is append-only (events recur legitimately).
-    if table == "semantic" and not force and supersedes is None:
+    if table == "semantic" and not force and not supersedes:
         visible = ""
         if coworker_ids:
             ids_csv = ",".join(str(i) for i in coworker_ids)
             visible = (" AND (id NOT IN (SELECT memory_id FROM memory_coworkers WHERE memory_table='semantic') "
                       f"OR id IN (SELECT memory_id FROM memory_coworkers WHERE memory_table='semantic' AND coworker_id IN ({ids_csv})))")
+        # embedding IS NOT NULL: vector_distance_cos raises "Invalid vector type" on a
+        # NULL embedding, so one such row would make every insert fail, not just skew.
         near = M.scalar(f"SELECT round(vector_distance_cos(embedding,{vlit}),4) "
-                        f"FROM semantic_memory WHERE superseded_by IS NULL AND retired_at IS NULL"
-                        f"{visible} ORDER BY 1 LIMIT 1;")
+                        f"FROM semantic_memory WHERE superseded_by IS NULL AND retired_at IS NULL "
+                        f"AND embedding IS NOT NULL{visible} ORDER BY 1 LIMIT 1;")
         if near not in ("", "NULL") and float(near) < DUP_DIST:
             sys.exit(f"refused: a near-duplicate already exists (cosine {near} < {DUP_DIST}). "
                      "Use --supersedes <id> to replace it, or --force to add anyway.")
@@ -99,12 +107,14 @@ def store_memory(table, text, *, topic=None, project=None, category=None,
         values = ", ".join(f"({M.q(table)}, last_insert_rowid(), {cid})" for cid in coworker_ids)
         join_insert = f" INSERT INTO memory_coworkers (memory_table, memory_id, coworker_id) VALUES {values};"
 
-    if supersedes is not None:
+    if supersedes:
         # Order matters: UPDATE doesn't touch last_insert_rowid(), so
         # join_insert can safely come after it and still see the new row's id.
+        # One UPDATE covers all superseded ids, so an N->1 merge is atomic.
+        id_list = ",".join(str(i) for i in supersedes)
         M.exec_sql("BEGIN; " + insert +
                    " UPDATE semantic_memory SET superseded_by=last_insert_rowid(), "
-                   f"updated_at=datetime('now') WHERE id={int(supersedes)};" +
+                   f"updated_at=datetime('now') WHERE id IN ({id_list});" +
                    join_insert + " COMMIT;")
     elif join_insert:
         M.exec_sql("BEGIN; " + insert + join_insert + " COMMIT;")
@@ -126,15 +136,25 @@ def main():
     p.add_argument("--importance")                     # episodic
     p.add_argument("--confirm-baseline", action="store_true")
     p.add_argument("--force", action="store_true", help="store even if a near-duplicate exists")
-    p.add_argument("--supersedes", type=int,
-                   help="id of the semantic row this revises: insert new + mark old superseded_by, one call")
+    p.add_argument("--supersedes",
+                   help="comma-separated id(s) of the semantic row(s) this replaces: inserts the "
+                        "new row and marks all of them superseded_by it, in one transaction. "
+                        "Several ids = merging N memories into one (sleep's consolidation).")
     p.add_argument("--coworker", help="comma-separated coworker name(s) to scope this memory to")
     a = p.parse_args()
+    supersedes = None
+    if a.supersedes:
+        try:
+            supersedes = [int(s.strip()) for s in a.supersedes.split(",") if s.strip()]
+        except ValueError:
+            sys.exit(f"refused: --supersedes '{a.supersedes}' is not a comma-separated id list.")
+        if not supersedes:
+            sys.exit("refused: --supersedes given with no ids.")
     store_memory(a.table, a.text, topic=a.topic, project=a.project, category=a.category,
                  event_type=a.event_type, importance=a.importance, source=a.source,
                  model=a.model, keywords=a.keywords, file_reference=a.file_reference,
                  created_at=a.created_at, confirm_baseline=a.confirm_baseline, force=a.force,
-                 supersedes=a.supersedes, coworker=a.coworker)
+                 supersedes=supersedes, coworker=a.coworker)
     print(f"stored {a.table} memory ({a.topic or '-'})")
 
 

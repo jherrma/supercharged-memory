@@ -12,6 +12,7 @@ Your agent's text is embedded with a local model and stored as a vector in a loc
 - **Fully local & private** — a local embedding model (Ollama) and a local database; nothing is sent to a cloud service.
 - **Multi-instance safe** — several agent sessions can share one database concurrently.
 - **Graceful degradation** — if the embedding model is offline, recall falls back to keyword-only and the DB stays usable.
+- **Sleep & deep sleep** — user-triggered consolidation: sift events into facts, then (deep) purge what you agree is dead, merge near-duplicates, and derive patterns and trends across the whole event log. All of it read by subagents, so the cost doesn't land in your session's context.
 - **Coworkers** — optional named AI personas with scoped memory and trust-gated autonomy.
 - **Backups built in** — validated, gzipped daily dumps with daily + weekly retention.
 
@@ -248,6 +249,9 @@ thin CLIs on top:
   is down. Also `--baseline`, `--status`, `--count`.
 - **`backfill.py`** — import a directory of files for a fresh start (skips files over the cap).
 - **`seed.py`** — scaffold for a one-time bootstrap load (empty by default).
+- **`sleep.py`** — the mechanical write primitives a sleep pass needs, no judgment of
+  its own: `--mark-processed`, `--retire`, `--rebuild-topics`, plus deep sleep's
+  `--purge` (guarded hard delete) and `--cluster` (read-only similarity grouping).
 - **`supercharged-memory-backup.sh`** — the daily backup (below).
 - **`install-claude-md.sh`** — render the template into `~/.claude/CLAUDE.md`, stamping
   the repo commit it rendered from (see *Staying up to date*).
@@ -265,15 +269,25 @@ enforced via `CHECK` (SQLite ignores declared VARCHAR sizes): `memory_text` ≤
 ### `semantic_memory` — facts, timeless, revisable
 
 `id`, `created_at`, `updated_at`, `project` (NULL = global; a tracking-tool
-work-item id), `topic`, `category` ∈ `baseline|user|feedback|project|reference`,
-`source`, `model`, `embed_model`, `memory_text`, `file_reference`,
-`embedding F32_BLOB(1024)`, `superseded_by` (current truth =
-`WHERE superseded_by IS NULL`), `retired_at` (soft-delete set by a sleep pass —
-current truth also requires `retired_at IS NULL`; never a hard `DELETE`).
+work-item id), `topic`, `category` ∈
+`baseline|user|feedback|project|reference|pattern`, `source`, `model`,
+`embed_model`, `memory_text`, `file_reference`, `embedding F32_BLOB(1024)`,
+`superseded_by` (current truth = `WHERE superseded_by IS NULL`), `retired_at`
+(soft-delete set by a sleep pass — current truth also requires
+`retired_at IS NULL`).
 
 `baseline` = must-always-apply rules, loaded every session start
 (`recall.py --baseline`), not by search. **Storing a baseline memory requires
 explicit user confirmation** (`--confirm-baseline`). None are seeded by default.
+
+`pattern` = **derived**, written only by a deep sleep pass: a recurrence or trend
+found across episodic events, carrying the episodic ids it came from so the claim
+can be re-checked rather than trusted. Revised through the normal supersede chain
+when the count changes.
+
+A hard `DELETE` happens in exactly one place — deep sleep's purge gate, on rows
+the user selects, after a backup (see *Deep sleep* above). Everywhere else,
+obsolescence is `retired_at` or a supersede.
 
 ### `episodic_memory` — events, time-anchored, append-only
 
@@ -337,6 +351,72 @@ Keep the *policy* in the template (user-triggered only) and the *procedure* here
   the topic count bounded — `recall.py --topics` warns past 50 topics as a
   nudge to merge harder next sleep, since that many would cost real context
   budget every session.
+
+### Where the reading happens: subagents
+
+Both sleep runbooks push all bulk reading into **subagents**. The orchestrating
+agent queries skinny metadata (ids, topics, dates) and never holds `memory_text`
+in bulk — that cost scales with the corpus, which is precisely what a memory
+system is supposed to grow. Workers get self-contained prompts (their ids, the
+read command, the judgment rule, the exact `remember.py` call) and report one line
+per row.
+
+Who may write is split on risk: episodic-sift workers write via `remember.py`
+themselves (high volume, low stakes), while compaction and pattern workers only
+*propose* and the user approves in one batch. `--mark-processed` stays with the
+orchestrator and covers only ids a worker actually reported back — a worker that
+dies leaves its rows unprocessed, which is the recoverable state.
+
+## Deep sleep
+
+A second, deeper pass — `instructions/DEEP-SLEEP.md`, reached by saying "deep
+sleep" or by answering yes to the offer at the end of a normal sleep. Also
+user-triggered only. It does the three things a normal pass deliberately doesn't:
+
+| Phase | What it does |
+|-------|--------------|
+| D0 | Normal sleep (prerequisite) + `recall.py --status`; stops on `DEGRADED` — nothing can be embedded with Ollama down. |
+| D1 | Backup. Mandatory: D2 is the only operation in this system that destroys a memory. |
+| D2 | **Purge gate.** Lists every superseded/retired semantic row and hard-deletes *the ones the user selects*. No default policy — asked every run. |
+| D3 | **Compaction.** Clusters all current semantic memory and merges same-topic near-duplicates. |
+| D4 | **Pattern mining.** Derives recurrences and trends from the whole episodic log. |
+| D5 | Rebuild `topic_keywords`, report. |
+
+**Purge** (`sleep.py --purge <ids> --confirm-purge`) is the sole exception to the
+never-hard-delete rule, and it is fenced: it refuses a current row, an unknown id,
+a missing `--confirm-purge`, any id whose deletion would strand a surviving row
+that points at it, and any run where the newest backup is older than the DB file.
+It also clears the rows' `memory_coworkers` entries — that table has no FK on
+`memory_id`, so an orphan would silently re-scope a future memory that reuses the
+id. Episodic memory is never purged. Pass all ids in **one** call: a purge is
+itself a write, so a second call in the same pass fails the backup gate.
+
+**Clustering** (`sleep.py --cluster [--table semantic|episodic] [--threshold N]`)
+is mechanical — no LLM, no new embeddings. It runs pairwise
+`vector_distance_cos` over the vectors already stored and emits connected
+components as JSON, plus any rows with no embedding, listed separately rather than
+silently skipped. Semantic defaults to `0.22`, episodic to `0.25` — both measured
+against a real ~230-row corpus, not guessed. The useful range is much tighter than
+intuition suggests, because connected components **chain**: if a–b are close and
+b–c are close, a and c land in the same cluster even when they have nothing to do
+with each other. On this corpus `0.22` yields ~11 pairs and triples, `0.30`
+already produces a 33-row blob, and `0.35` collapses 154 of ~200 rows into one
+"cluster". The script therefore refuses to present that as a finding: when the
+largest cluster exceeds 12 rows *and* a quarter of all clustered rows, the JSON
+carries a `warning` telling you to lower the threshold. Merges then apply via
+`remember.py --supersedes <id1,id2,id3>` — one insert, all listed rows pointed at
+it, one transaction.
+
+**Pattern mining** is two-stage, because there are two kinds of pattern and no
+single worker can see both. A map stage partitioned by *episodic embedding
+cluster* — not by exact `topic`, since episodic topics are near-unique per ticket
+and exact grouping would yield all singletons — catches within-topic recurrence
+("that service restarted four times"). Then one reduce worker reads only the tiny
+per-row digests and catches cross-topic shapes ("a whole class of bug keeps coming
+back") that a topic-scoped worker structurally cannot see. A pattern needs ≥3
+supporting events, a *trend* claim also ≥2 distinct calendar months, and its
+`evidence_ids` go into the memory text so a later session can verify the claim
+instead of trusting it.
 
 ### `topic_keywords` — curated topic index, derived (not a source of truth)
 

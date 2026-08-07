@@ -22,6 +22,14 @@ So editing `CLAUDE.md.template` or `scripts/*` here changes behavior only after 
 
 `instructions/SLEEP.md` is an executable runbook: when the user says "sleep" or "go to sleep", follow it step by step — never run it on a schedule, only when told. It sifts unprocessed episodic memory for actual lessons (discarding bare event sequences), promotes the rest into semantic memory, consolidates/retires overlapping or obsolete semantic facts (soft-delete via `scripts/sleep.py --retire`, never a hard `DELETE`), then rebuilds `topic_keywords` — the agent derives the topic/keyword groupings itself (judgment stays with the LLM); `scripts/sleep.py --rebuild-topics` is a dumb atomic DELETE+INSERT on top. `topic_keywords` is loaded in full at every session start (`recall.py --topics`, same slot as `--baseline`), so keep its row count bounded by consolidating hard — it costs context every session, not just when queried.
 
+## Deep sleep
+
+`instructions/DEEP-SLEEP.md` is the second runbook, reached by "deep sleep" or by answering yes to the offer at the end of `SLEEP.md`. It does the three things a normal pass deliberately doesn't: **D2** hard-deletes superseded/retired semantic rows *the user selects* (`sleep.py --purge`, after a mandatory backup in D1), **D3** clusters *all* current semantic memory (`sleep.py --cluster`, mechanical `vector_distance_cos` + connected components — no LLM) and merges same-topic near-duplicates via `remember.py --supersedes <csv>`, and **D4** mines the whole episodic log for recurrences and trends, storing each as a `category='pattern'` semantic row carrying the episodic ids it was derived from.
+
+D4 is two-stage on purpose: a map stage partitioned by *episodic embedding cluster* (not exact `topic` — episodic topics are near-unique per ticket, so exact grouping finds nothing) catches within-topic recurrence, and one reduce worker over tiny per-row digests catches cross-topic "class of bug" shapes that a topic-scoped worker structurally cannot see.
+
+Both runbooks push all bulk reading into **subagents**: the orchestrator queries skinny metadata (ids, topics, dates) and never holds `memory_text` in bulk, since that cost scales with the corpus. Sift workers write via `remember.py` themselves; compaction and pattern workers only propose, and the user approves in one batch. `--mark-processed` stays with the orchestrator and covers only ids a worker actually reported — a dead worker leaves its rows unprocessed, which is the recoverable state.
+
 ## Keeping an install in sync — and breaking changes
 
 `instructions/UPDATE.md` is an executable runbook: when the user says "update" (or asks to sync this machine with the repo), follow it step by step. It reads the **sync stamp** — `<!-- supercharged-memory: synced-at <sha> -->`, written into the managed block by `install-claude-md.sh` — pulls, applies whatever migration notes landed since that commit, then re-renders the template. The repo's git history is the ledger; there is no separate state file.
@@ -76,6 +84,11 @@ python3 scripts/sleep.py --mark-processed <id1,id2,...>   # episodic_memory.proc
 python3 scripts/sleep.py --retire <id>                     # soft-delete a semantic memory
 echo '[{"topic":"...", "keywords":"..."}]' | python3 scripts/sleep.py --rebuild-topics
 
+# Deep sleep extras (instructions/DEEP-SLEEP.md)
+python3 scripts/sleep.py --cluster [--table semantic|episodic] [--threshold N]  # read-only JSON
+python3 scripts/sleep.py --purge <ids> --confirm-purge      # hard-delete; needs a fresh backup
+python3 scripts/remember.py --table semantic --supersedes <id1,id2,id3> ...     # merge N into 1
+
 # Backup / restore / rebuild
 bash scripts/supercharged-memory-backup.sh
 gzcat "$(ls -1t Backups/*-supercharged-memory*.sql.gz | head -1)" | tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal   # restore into a FRESH db file
@@ -110,7 +123,7 @@ python3 scripts/seed.py                          # empty by default; add SEM/EPI
 - **`BASE_PATH` in `CLAUDE.md.template` is machine-specific** — the one value to update on a new laptop (the installer defaults it to the repo's parent dir).
 - When rebuilding schema, **pipe** `schema.sql` — `tursodb "$(cat schema.sql)"` fails because the leading `--` comment parses as a CLI flag.
 - Don't hand-edit `superseded_by` — use `remember.py --supersedes` (semantic) / the appraisal flow (coworkers), which insert + supersede in one transaction.
-- **Never hard-delete a memory** — `retired_at` (semantic) is soft-delete only, set via `sleep.py --retire`; same never-delete philosophy as coworkers' `active=0`. Ask the user when obsolescence isn't clear-cut.
+- **Never hard-delete a memory outside deep sleep's purge gate** — `retired_at` (semantic) is soft-delete only, set via `sleep.py --retire`; same never-delete philosophy as coworkers' `active=0`. Ask the user when obsolescence isn't clear-cut. The single exception is `sleep.py --purge`, which deletes **only** superseded/retired semantic rows the user explicitly selected in deep sleep's D2, only with `--confirm-purge`, and only with a backup newer than the DB. Episodic memory is never purged. Pass all ids in ONE `--purge` call — a purge is itself a write, so the second call in a pass fails the backup gate.
 - **Never create, restore, or overwrite a DB unprompted.** `MISSING` almost always means a wrong path, not lost data. Run `recall.py --candidates`, show the user what was found, and ask — creating an empty DB strands the real one, and restoring a backup over a live DB loses everything since that backup. `require_db()` enforces the no-auto-create half; the rest is instruction-level in `CLAUDE.md.template`.
 - **`SUPERCHARGED_MEMORY_TURSO_PATH` must live in `~/.claude/settings.json` under `env`** — Claude Code's Bash tool is non-interactive and never sources `~/.zshrc`/`~/.bashrc`, so a profile export alone leaves the scripts on the default path. Default is XDG: `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db`.
 - `sleep.py --rebuild-topics` is a **full replace**, not an upsert — always pass the complete current topic set on stdin, or you'll silently drop the topics you omit.

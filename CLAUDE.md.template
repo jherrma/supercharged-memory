@@ -104,5 +104,8 @@ via the turso MCP; writes go through `coworkers.py` / `remember.py --coworker`.
 
 ## On user request only — never scheduled, never proactive
 - "sleep" / "go to sleep" → follow `{{BASE_PATH}}/instructions/SLEEP.md` step by step.
+- "deep sleep" → follow `{{BASE_PATH}}/instructions/DEEP-SLEEP.md` (normal sleep first, then it
+  purges memories the user picks, compacts, and mines patterns). Both sleeps run their reading in
+  subagents — never read the whole corpus into your own context.
 - "backup" → `bash "{{BASE_PATH}}/scripts/supercharged-memory-backup.sh"` (writes `{{BASE_PATH}}/Backups/`).
 - "update" (sync this machine with the repo) → follow `{{BASE_PATH}}/instructions/UPDATE.md` step by step.

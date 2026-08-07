@@ -128,9 +128,12 @@ def search(query, table, k, project, coworker):
                     f"OR id IN (SELECT memory_id FROM memory_coworkers WHERE memory_table={M.q(t)} AND coworker_id={coworker_id}))")
         meta = "category" if t == "semantic" else "event_type || '/' || importance"
         if have_ollama:
+            # embedding IS NOT NULL: vector_distance_cos raises "Invalid vector type"
+            # on a NULL, which would take down the whole query over one bad row.
             sql = (f"SELECT round(vector_distance_cos(embedding,{vlit}),4) AS dist, "
                    f"({kw}) AS kw, created_at, {meta} AS meta, project, topic, memory_text "
-                   f"FROM {t}_memory WHERE {base} ORDER BY kw DESC, dist ASC LIMIT {k};")
+                   f"FROM {t}_memory WHERE {base} AND embedding IS NOT NULL "
+                   f"ORDER BY kw DESC, dist ASC LIMIT {k};")
             print(f"===== {t} (top {k}; kw = # matching keywords, boosted) =====")
         else:                                    # DEGRADED: keyword-only
             sql = (f"SELECT ({kw}) AS kw, created_at, {meta} AS meta, project, topic, memory_text "

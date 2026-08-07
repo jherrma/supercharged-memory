@@ -21,7 +21,12 @@ IF NOT EXISTS semantic_memory
 (topic) <= 128),     -- short headline/subject
   category       TEXT NOT NULL CHECK
 (category IN
-('baseline','user','feedback','project','reference')),
+('baseline','user','feedback','project','reference','pattern')),
+  -- 'pattern' rows are DERIVED, written only by a deep sleep pass: a recurrence or
+  -- trend found across episodic events ("this class of bug came back 4x"). They
+  -- carry the episodic ids they were derived from, so a later session can verify
+  -- the claim instead of trusting it, and are revised via the supersede chain when
+  -- the count changes. See instructions/DEEP-SLEEP.md.
   source         TEXT CHECK
 (length
 (source) <= 128),
