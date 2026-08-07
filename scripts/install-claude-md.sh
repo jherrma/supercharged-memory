@@ -29,6 +29,18 @@ esac
 BEGIN="<!-- BEGIN agentic-memory (managed by install-claude-md.sh) -->"
 END="<!-- END agentic-memory -->"
 
+# Sync stamp — which repo commit this install was rendered from. It is the ledger
+# instructions/UPDATE.md reads back: `git log <stamp>..HEAD` yields both the template
+# changes to explain and the pending breaking-change notes in migration-steps/. Keeping
+# it inside the managed block means no separate state file to drift.
+if SYNC_SHA="$(git -C "$BASE_PATH" rev-parse HEAD 2>/dev/null)"; then
+  # Tracked-file modifications only; an untracked file can't change rendered behavior.
+  git -C "$BASE_PATH" diff --quiet HEAD 2>/dev/null || SYNC_SHA="${SYNC_SHA}-dirty"
+else
+  SYNC_SHA="unknown"   # BASE_PATH is not a git work tree (copied files, or no git)
+fi
+STAMP="<!-- supercharged-memory: synced-at $SYNC_SHA -->"
+
 [ -f "$TEMPLATE" ] || { echo "template not found: $TEMPLATE" >&2; exit 1; }
 mkdir -p "$(dirname "$TARGET")"
 touch "$TARGET"
@@ -55,6 +67,7 @@ mv "$tmp2" "$TARGET"
 # EPISODIC_MODE is validated to a fixed keyword set above, so it's sed-safe ).
 {
   printf '\n%s\n' "$BEGIN"
+  printf '%s\n' "$STAMP"
   sed -e "s|{{BASE_PATH}}|$BASE_PATH|g" \
       -e "s|{{SUPERCHARGED_MEMORY_TURSO_PATH}}|$SUPERCHARGED_MEMORY_TURSO_PATH|g" \
       -e "s|{{EPISODIC_MODE}}|$EPISODIC_MODE|g" \
@@ -66,4 +79,5 @@ echo "installed agentic-memory block into $TARGET"
 echo "BASE_PATH                      = $BASE_PATH"
 echo "SUPERCHARGED_MEMORY_TURSO_PATH = $SUPERCHARGED_MEMORY_TURSO_PATH"
 echo "EPISODIC_MODE                  = $EPISODIC_MODE"
+echo "synced-at                      = $SYNC_SHA"
 echo "Restart your Claude Code session to pick it up."

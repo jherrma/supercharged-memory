@@ -1,6 +1,6 @@
 # Long-term memory — Turso vector DB (supercharged-memory)
 
-ALL cross-session memory goes here, through the scripts (not raw MCP calls).
+ALL cross-session memory goes here, through the scripts (not raw MCP calls). DO NOT USE THE BUILT IN MEMORY MECHANISMS USING MARKDOWN FILES!
 Details: `{{BASE_PATH}}/README.md`. Commands below omit their prefix — always run
 them as `python3 "{{BASE_PATH}}/scripts/<cmd>"`.
 
@@ -105,3 +105,4 @@ via the turso MCP; writes go through `coworkers.py` / `remember.py --coworker`.
 ## On user request only — never scheduled, never proactive
 - "sleep" / "go to sleep" → follow `{{BASE_PATH}}/instructions/SLEEP.md` step by step.
 - "backup" → `bash "{{BASE_PATH}}/scripts/supercharged-memory-backup.sh"` (writes `{{BASE_PATH}}/Backups/`).
+- "update" (sync this machine with the repo) → follow `{{BASE_PATH}}/instructions/UPDATE.md` step by step.

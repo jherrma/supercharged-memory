@@ -125,6 +125,56 @@ gotchas, or corrections — those are always stored autonomously):
 Change it later by re-running `install-claude-md.sh` with a different
 `EPISODIC_MODE`.
 
+## Staying up to date
+
+The runtime state lives *outside* this repo — the database, `~/.claude/CLAUDE.md`,
+`~/.claude/settings.json` — so pulling new commits does not update a machine on its
+own, and some commits need a manual step. `instructions/UPDATE.md` is the runbook
+that closes that gap. In a session:
+
+> update the memory system
+
+It reads the sync stamp, pulls, applies any pending migration notes, shows you what
+changed in the instructions, and re-renders `~/.claude/CLAUDE.md`. Nothing is applied
+without asking.
+
+### The sync stamp
+
+`install-claude-md.sh` writes the repo commit it rendered from as the first line
+inside the managed block:
+
+```
+<!-- BEGIN agentic-memory (managed by install-claude-md.sh) -->
+<!-- supercharged-memory: synced-at 9f3c1ab… -->
+```
+
+That one line is the whole ledger — the repo's git history supplies the rest, so
+there is no separate state file to drift out of sync. `git log <stamp>..HEAD` yields
+both the template changes worth explaining and the migrations still pending. Two
+special values: a `-dirty` suffix means the install was rendered from an uncommitted
+working tree, and `unknown` means `BASE_PATH` was not a git work tree (a plain file
+copy). An install predating this feature has no stamp at all; UPDATE.md then lists
+every migration note and asks which ones already apply, rather than guessing a base
+commit.
+
+### `migration-steps/` — breaking-change notes
+
+Every change that breaks an existing install ships a note here: schema changes,
+script CLI changes, renamed env vars or paths, changed instruction contracts,
+anything needing a manual step. One file per change,
+`migration-steps/YYYY-MM-DD-<slug>.md`:
+
+| Part | Purpose |
+|------|---------|
+| `commit: <sha>` (first line) | The commit that **introduced** the break. UPDATE.md classifies notes with `git merge-base --is-ancestor`, so a missing or unreachable sha is reported as malformed instead of silently applied. |
+| **What broke** | Schema / CLI / instruction contract / on-disk runtime state. |
+| **How to resolve** | Concrete commands, in order. |
+| **Verification** | What to run afterwards, and what output proves it worked. |
+
+Because a commit cannot reference its own sha, **the note lands in the commit right
+after the breaking one** and points back at it — pushed together, so no `git pull`
+can leave a machine between the break and its instructions.
+
 ## Usage
 
 Memory operations go through the helper scripts in `scripts/` (a 1024-float
@@ -199,7 +249,8 @@ thin CLIs on top:
 - **`backfill.py`** — import a directory of files for a fresh start (skips files over the cap).
 - **`seed.py`** — scaffold for a one-time bootstrap load (empty by default).
 - **`supercharged-memory-backup.sh`** — the daily backup (below).
-- **`install-claude-md.sh`** — render the template into `~/.claude/CLAUDE.md`.
+- **`install-claude-md.sh`** — render the template into `~/.claude/CLAUDE.md`, stamping
+  the repo commit it rendered from (see *Staying up to date*).
 - **`coworkers.py`** — manage AI personas (below).
 
 ## Database schema

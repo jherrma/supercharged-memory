@@ -12,7 +12,7 @@ The **source-controlled bootstrap** for a local, Turso-only long-term memory sys
 
 So editing `CLAUDE.md.template` or `scripts/*` here changes behavior only after re-running the installer / the next session. There is **no build, lint, or test tooling** — the scripts are plain Python 3 stdlib (no dependencies) plus bash.
 
-`README.md` is the canonical design doc; `docs/2026-07-23-ai-coworkers-design.md` covers the coworkers layer. `CLAUDE.md.template` is what agents actually follow at runtime — keep it and `README.md` consistent when changing behavior.
+`README.md` is the canonical design doc. `CLAUDE.md.template` is what agents actually follow at runtime — keep it and `README.md` consistent when changing behavior.
 
 ## Machine setup
 
@@ -21,6 +21,21 @@ So editing `CLAUDE.md.template` or `scripts/*` here changes behavior only after 
 ## Sleep cycle
 
 `instructions/SLEEP.md` is an executable runbook: when the user says "sleep" or "go to sleep", follow it step by step — never run it on a schedule, only when told. It sifts unprocessed episodic memory for actual lessons (discarding bare event sequences), promotes the rest into semantic memory, consolidates/retires overlapping or obsolete semantic facts (soft-delete via `scripts/sleep.py --retire`, never a hard `DELETE`), then rebuilds `topic_keywords` — the agent derives the topic/keyword groupings itself (judgment stays with the LLM); `scripts/sleep.py --rebuild-topics` is a dumb atomic DELETE+INSERT on top. `topic_keywords` is loaded in full at every session start (`recall.py --topics`, same slot as `--baseline`), so keep its row count bounded by consolidating hard — it costs context every session, not just when queried.
+
+## Keeping an install in sync — and breaking changes
+
+`instructions/UPDATE.md` is an executable runbook: when the user says "update" (or asks to sync this machine with the repo), follow it step by step. It reads the **sync stamp** — `<!-- supercharged-memory: synced-at <sha> -->`, written into the managed block by `install-claude-md.sh` — pulls, applies whatever migration notes landed since that commit, then re-renders the template. The repo's git history is the ledger; there is no separate state file.
+
+**Any change that breaks an existing install must ship a note in `migration-steps/`.** That means a schema change, a script CLI/flag change, a renamed env var or path, a changed instruction contract, or anything the user must run by hand. The runtime state lives *outside* this repo (the DB, `~/.claude/CLAUDE.md`, `~/.claude/settings.json`), so a commit here can leave a machine broken with no way to find out what happened.
+
+One markdown file per breaking change, `migration-steps/YYYY-MM-DD-<slug>.md`:
+
+- `commit:` — the git sha that **introduced** the break, as the first line. UPDATE.md classifies notes with `git merge-base --is-ancestor`, so a note without a resolvable sha is reported as malformed rather than applied.
+- **What broke** — schema / CLI / instruction contract / on-disk runtime state
+- **How to resolve** — concrete commands, in order
+- **Verification** — what to run afterwards, and what output proves it worked
+
+A commit cannot reference its own sha, so **the note goes in the commit immediately after** the breaking one and points back at it. Push both together — otherwise a `git pull` can land a machine between the break and its instructions.
 
 ## Runtime dependencies (not installed by this repo)
 
@@ -99,3 +114,5 @@ python3 scripts/seed.py                          # empty by default; add SEM/EPI
 - **Never create, restore, or overwrite a DB unprompted.** `MISSING` almost always means a wrong path, not lost data. Run `recall.py --candidates`, show the user what was found, and ask — creating an empty DB strands the real one, and restoring a backup over a live DB loses everything since that backup. `require_db()` enforces the no-auto-create half; the rest is instruction-level in `CLAUDE.md.template`.
 - **`SUPERCHARGED_MEMORY_TURSO_PATH` must live in `~/.claude/settings.json` under `env`** — Claude Code's Bash tool is non-interactive and never sources `~/.zshrc`/`~/.bashrc`, so a profile export alone leaves the scripts on the default path. Default is XDG: `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db`.
 - `sleep.py --rebuild-topics` is a **full replace**, not an upsert — always pass the complete current topic set on stdin, or you'll silently drop the topics you omit.
+- **The sync stamp is load-bearing** — `install-claude-md.sh` writes `<!-- supercharged-memory: synced-at <sha> -->` as the first line inside the managed block, and `instructions/UPDATE.md` is built entirely on reading it back. Don't drop it, move it outside the markers, or change its wording without updating UPDATE.md's `grep`. A `-dirty` suffix means the install was rendered from uncommitted work; `unknown` means `BASE_PATH` wasn't a git work tree.
+- **A breaking change ships its `migration-steps/` note in the NEXT commit** — a commit can't contain its own sha, and the note's `commit:` anchor is what makes it verifiable. Push the pair together so no `git pull` lands between the break and its instructions.
