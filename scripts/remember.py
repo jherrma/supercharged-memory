@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Store ONE memory (no chunking). Hard cap 2000 chars (schema CHECK + here).
 
-Guards: baseline needs --confirm-baseline; refuses a near-duplicate (cosine <
-0.10) unless --force; refuses if the table already holds rows embedded with a
-different model (mixed vector spaces break recall). NEVER pass PII — anonymize.
+Guards: refuses an empty --text (a lost command substitution would otherwise store
+a row holding only its keywords); baseline needs --confirm-baseline; refuses a
+near-duplicate (cosine < 0.10) unless --force; refuses if the table already holds
+rows embedded with a different model (mixed vector spaces break recall).
+NEVER pass PII — anonymize.
 
 --coworker NAME[,NAME...] tags the memory to one or more coworkers (see
 coworkers.py) instead of leaving it global. Dedup then scopes its
@@ -25,6 +27,15 @@ def store_memory(table, text, *, topic=None, project=None, category=None,
                  confirm_baseline=False, force=False, supersedes=None,
                  coworker=None):
     text = text.strip()
+    # Checked BEFORE keywords are appended: --keywords alone makes text non-empty, so a
+    # lost body would sail through as a row holding nothing but its 'Keywords:' line.
+    # How that happens in practice: --text "$(cat some-file)" where the file is missing
+    # or empty (a scratchpad wiped between turns) expands to the empty string, and the
+    # shell reports nothing. Episodic memory is append-only and never purged, so such a
+    # row is permanent — refuse the write instead.
+    if not text:
+        sys.exit("refused: --text is empty. If you passed a command substitution such as "
+                 '--text "$(cat file)", the file is missing or empty — nothing was stored.')
     if keywords:                                     # keywords live INSIDE the text
         text = f"{text}\n\nKeywords: {keywords}".strip()
     if category == "baseline" and not confirm_baseline:
