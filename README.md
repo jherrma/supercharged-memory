@@ -447,9 +447,12 @@ scripts retry with backoff). A process without the flag is refused. The flag is
   so keep them together rather than scattering them per-machine. Taking a backup is
   additive and non-destructive; **restoring is neither** — never restore without the
   user's explicit ok.
-- **Restore** (into a fresh DB file):
+- **Restore** (into a fresh DB file). Decompress with whatever your platform ships —
+  `gunzip -c` exists on both macOS and Linux, macOS also has `gzcat`, Linux also has
+  `zcat` (Linux's `gzip` package installs no `gzcat`, so a copy-pasted `gzcat` fails
+  there even though the archive is fine):
   ```bash
-  gzcat "$(ls -1t Backups/*-supercharged-memory*.sql.gz | head -1)" \
+  gunzip -c "$(ls -1t Backups/*-supercharged-memory*.sql.gz | head -1)" \
     | tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal
   ```
 - **Rebuild empty schema** — **pipe** the file; don't pass it as a SQL argument

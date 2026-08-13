@@ -115,7 +115,8 @@ python3 scripts/remember.py --table semantic --category pattern \
 If step 2 disagrees, **stop and restore** rather than continuing:
 
 ```bash
-gzcat "$(ls -1t Backups/*-supercharged-memory*.sql.gz | head -1)" \
+# gunzip -c works on macOS and Linux; macOS also has gzcat, Linux also has zcat
+gunzip -c "$(ls -1t Backups/*-supercharged-memory*.sql.gz | head -1)" \
   | tursodb <a FRESH db path> --experimental-multiprocess-wal
 ```
 

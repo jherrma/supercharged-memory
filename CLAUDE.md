@@ -91,7 +91,8 @@ python3 scripts/remember.py --table semantic --supersedes <id1,id2,id3> ...     
 
 # Backup / restore / rebuild
 bash scripts/supercharged-memory-backup.sh
-gzcat "$(ls -1t Backups/*-supercharged-memory*.sql.gz | head -1)" | tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal   # restore into a FRESH db file
+# restore into a FRESH db file — decompress with what the platform ships: gunzip -c works on macOS + Linux (macOS also gzcat, Linux also zcat)
+gunzip -c "$(ls -1t Backups/*-supercharged-memory*.sql.gz | head -1)" | tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal
 tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql   # rebuild empty schema — PIPE it, don't pass as arg
 python3 scripts/seed.py                          # empty by default; add SEM/EPI entries first
 ```

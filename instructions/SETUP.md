@@ -176,7 +176,9 @@ python3 scripts/recall.py --candidates    # any DB/backup elsewhere?
   creating a new one.
 - **Only a `CANDIDATE BACKUP` is listed** → ask whether to restore it rather than
   start empty:
-  `gzcat "<newest-backup>" | tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal`
+  `gunzip -c "<newest-backup>" | tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal`
+  (use whichever decompressor this platform ships: `gunzip -c` works on macOS and
+  Linux, macOS also has `gzcat`, Linux also has `zcat`.)
 - **Nothing found, and the file doesn't exist** → confirm with the user that they
   are starting from zero, then create it:
 
