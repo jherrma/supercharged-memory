@@ -142,7 +142,7 @@ episodic only — semantic facts, gotchas, and corrections are always stored
 autonomously either way):
 
 1. **`every-prompt`** — store an episodic note for *every* prompt / turn.
-2. **`major-actions`** — store every substantive action, but skip quick questions
+2. **`major-actions`** — recommended, store every substantive action, but skip quick questions
    and clarifications.
 3. **`major-events`** — store only major events: a feature completed, a bug
    resolved, a decision, a milestone or incident. *(Default / recommended.)*
