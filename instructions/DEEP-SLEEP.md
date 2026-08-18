@@ -208,3 +208,118 @@ Then one report:
 - patterns added / refreshed, and how many candidates fell below the ≥3 threshold
 - resulting topic count and char total against the cap
 - any worker that died, and any row skipped for having no embedding
+
+## D6 — Recall check and eval-set upkeep
+
+Runs **after** D2 and D3 on purpose: those two phases are what break an eval set.
+D2 hard-deletes rows, D3 merges rows into a survivor and marks the originals
+superseded — and a case whose `expect` id was purged or superseded looks exactly
+like a ranking regression while being nothing of the sort.
+
+Mechanical throughout. The harness measures; **you never change a ranking constant
+on your own.**
+
+**Where the eval set lives:** in the DB — `eval_cases` (authored cases, soft-deleted
+via `retired_at`) and `eval_runs` (one row per run). Both are covered by the `.dump`
+backup, which is the point: the cases are authored and cannot be regenerated, and a
+past corpus cannot be re-measured. The only thing still on disk is the
+query-embedding cache at `<db parent>/eval/qvec.json`
+(`SUPERCHARGED_MEMORY_EVAL_DIR` overrides) — pure derived data, delete it freely.
+
+**If `eval_cases` is empty: skip D6 and say so.** Do NOT generate one automatically.
+An LLM writing a query while looking at the row it should retrieve produces lexical
+overlap a real user never produces, which biases the whole exercise toward the
+keyword layer — see `investigations/2026-08-18-recall-keyword-layer.md`.
+
+### D6.1 — Validate
+
+```bash
+python3 <repo>/investigations/eval-harness.py --validate
+```
+
+Exit 0 = every case points at a live, current row; go to D6.2. Otherwise it prints
+each broken case with a proposed replacement from the supersede chain.
+
+- `<old> -> <new>` — the target was merged in D3. Repointing is correct: same fact,
+  new row id. Apply it, and refresh that target's stamp:
+  `UPDATE eval_cases SET expect_ids='...', expect_stamps=(SELECT created_at FROM
+  semantic_memory WHERE id=<new>) WHERE id='<case>';`
+- `<old> -> GONE` — purged in D2 or retired. **Retire the case**
+  (`UPDATE eval_cases SET retired_at=CURRENT_TIMESTAMP WHERE id='<case>';`). Do not
+  repoint it at a loosely-related row; that quietly changes what the metric measures,
+  and a metric whose definition drifts is worse than no metric.
+- `<old> -> ID REUSED` — the row id came back attached to a different memory.
+  `semantic_memory.id` is a rowid alias with **no AUTOINCREMENT**, so SQLite hands a
+  purged high id to the next insert; the stored `expect_stamps` is the only thing
+  that sees it. Retire the case — the target it was written for is gone.
+
+All three are proposals — show them, let the user confirm, then write.
+
+### D6.2 — Regression report
+
+```bash
+python3 <repo>/investigations/eval-harness.py --report
+```
+
+Scores the shipped `recall.py` at the configured `RECALL_ALPHA`, appends one row to
+`eval_runs`, and diffs against the previous run. Report the three numbers and the
+delta. Note the noise floor it prints — with a small set one case is several points,
+so a one-case swing is **not** a finding.
+
+The harness flags a regression when recall@5 drops by more than one case. If it does,
+and D6.1 was clean, the cause is external: an embedding-model change, or the corpus
+becoming much narrower or much broader. Say which you suspect; do not guess in the
+report as if it were measured.
+
+### D6.3 — Grow the eval set (propose only, ≤3 cases)
+
+The set's value is its size — one case is `100/N` percentage points of every metric,
+and that noise floor is what limits every conclusion drawn from it.
+
+Dispatch **one** worker over semantic rows created since the newest `eval_runs.ran_at`. Its contract:
+
+- It reads `id`, `topic` and `keywords` for its candidate rows — **never
+  `memory_text`.**
+- It drafts a query a real user would type to find that memory, and it **must not
+  reuse a distinctive token that appears in the row's topic or keywords.** Force
+  paraphrase. A query built from the row's own wording tests the keyword layer
+  against itself and will drag any future alpha upward.
+- It returns JSON only: `{"id","class","table","query","expect"}` per case, with
+  `class` drawn from the classes already present in `eval_cases`.
+- It proposes at most 3.
+
+Show the drafts to the user, then insert each approved one — stamping the targets so
+a later id reuse is detectable:
+
+```sql
+INSERT INTO eval_cases (id, class, memory_table, query, expect_ids, expect_stamps)
+VALUES ('s09','semantic','semantic','<query>','288',
+        (SELECT created_at FROM semantic_memory WHERE id=288));
+```
+
+For a multi-target case, `expect_ids` and `expect_stamps` are comma-separated **in
+the same order**. Re-run D6.1 afterwards to confirm.
+
+### D6.4 — Alpha: ask, never change
+
+Run the sweep **only** if D6.2 flagged a regression, or the user asks:
+
+```bash
+python3 <repo>/investigations/eval-harness.py --sweep 0.05,0.1,0.15,0.2,0.3,0.5
+```
+
+It prints the recall@5 plateau, the best value inside it, and whether the configured
+`RECALL_ALPHA` still sits in that plateau.
+
+- **Inside the plateau → report "no change needed" and stop.** Do not nudge alpha
+  toward the argmax; within a plateau the differences are noise.
+- **Outside the plateau → ASK the user**, showing the sweep table and the proposed
+  value. Changing it is their call, never yours.
+
+If they accept, the persistent place for it is `env` in `~/.claude/settings.json`
+(Claude Code's Bash tool never sources `~/.zshrc`, so a profile export would not
+reach the scripts). Editing the default in `recall.py` instead is a repo change that
+would need a `migration-steps/` note; per-machine calibration belongs in settings.
+
+Record in the report: the numbers, the plateau, what was asked, and what the user
+decided.

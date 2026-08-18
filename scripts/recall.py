@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
-"""Recall memories. Hybrid ranking: query keywords (meaningful tokens matched in
-a memory's text) boost it above pure cosine order — boost is the COUNT of distinct
-matching tokens, so more overlap ranks higher (not a binary any-match tie).
-Stopwords are dropped; digit-bearing tokens (ids/codes) always count.
+"""Recall memories. Hybrid ranking: rows are scored
+
+    score = cosine_distance - RECALL_ALPHA * keyword_credit    (lower is better)
+
+where keyword_credit is the IDF-weighted share of the query's tokens present in the
+memory, normalised to 0..1. IDF is measured per query against the same rows the
+search ranks, so common words demote themselves and no stopword list is needed.
+The tokens carried into the score are the 8 RAREST in the query, not the first 8.
+
+RECALL_ALPHA (default 0.15) is corpus-calibrated, not universal — re-measure it with
+investigations/eval-harness.py after an embedding-model change or a big topic shift.
+
+This replaced an "ORDER BY kw DESC, dist ASC" lexicographic sort, which measured
+WORSE than using no keyword layer at all. See
+investigations/2026-08-18-recall-keyword-layer.md for the numbers.
 
 If Ollama is down, recall degrades to keyword-only (no embedding needed).
 
@@ -19,42 +30,63 @@ coworker's current profile (that's ad-hoc SQL, see README.md - Coworkers).
   recall.py --candidates      # other memory DBs/backups found — check before creating one
   recall.py --count
 """
-import argparse, re, sys
+import argparse, math, os, re, sys
 sys.dont_write_bytecode = True
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import memlib as M  # noqa: E402
 
-STOP = {
-    "the","and","for","you","with","this","that","are","was","not","but","can",
-    "how","why","what","when","does","should","into","from","your","have","has",
-    "will","would","about","them","then","there","here","which","were","been",
-    "und","der","die","das","den","dem","ein","eine","ist","wie","was","mit",
-    "für","nicht","auch","oder","aber","wird","sich","dass","man","noch","nur",
-}
+MAX_CANDIDATES = 24     # bound the df probe; longer queries than this are rare
+MAX_TOKENS = 8          # tokens carried into the score, chosen by IDF
+ALPHA = float(os.environ.get("RECALL_ALPHA", "0.15"))
 
 
-def tokens(query):
-    out = []
+def candidate_tokens(query):
+    """Every distinct word token, in query order, capped. Deliberately no length
+    filter and no stopword list — IDF demotes common words on its own, and the old
+    len>=4 rule was throwing away sql/wal/api/ef/pr."""
+    seen, out = set(), []
     for t in re.findall(r"\w+", query.lower()):
-        if any(c.isdigit() for c in t):        # ids / codes: keep regardless
-            out.append(t)
-        elif len(t) >= 4 and t not in STOP:
-            out.append(t)
-    # dedupe, preserve order, cap
-    seen, uniq = set(), []
-    for t in out:
         if t not in seen:
-            seen.add(t); uniq.append(t)
-    return uniq[:8]
+            seen.add(t)
+            out.append(t)
+    # If the cap has to bite, cut the least promising rather than the last-typed:
+    # real IDF isn't known yet, but digit-bearing and longer tokens are the cheap
+    # proxy for "rare". Order is otherwise irrelevant — token_weights re-sorts by IDF.
+    if len(out) > MAX_CANDIDATES:
+        out.sort(key=lambda t: (not any(c.isdigit() for c in t), -len(t)))
+    return out[:MAX_CANDIDATES]
 
 
-def kw_expr(toks):
+def token_weights(cands, table, base):
+    """IDF per candidate token, measured against exactly the rows this search will
+    rank (same base predicate), then keep the MAX_TOKENS rarest. One extra scan."""
+    if not cands:
+        return [], {}
+    sums = ", ".join(
+        f"SUM(CASE WHEN lower(memory_text) LIKE {M.like_lit(t)} THEN 1 ELSE 0 END)"
+        for t in cands)
+    out = M.exec_sql(f"SELECT {sums}, COUNT(*) FROM {table}_memory WHERE {base};",
+                     mode="list").strip().splitlines()
+    vals = [int(x) for x in out[0].split("|")] if out else []
+    if len(vals) != len(cands) + 1:          # unexpected shape: fall back to flat weights
+        toks = cands[:MAX_TOKENS]
+        return toks, {t: 1.0 for t in toks}
+    n = vals[-1]
+    w = {t: math.log((n + 1) / (df + 1)) for t, df in zip(cands, vals[:-1])}
+    return sorted(cands, key=lambda t: -w[t])[:MAX_TOKENS], w
+
+
+def kw_expr(toks, w):
+    """IDF-weighted share of the query's tokens found in the row, normalised to 0..1
+    so ALPHA means the same thing regardless of how many tokens the query has."""
     if not toks:
         return "0"
-    return " + ".join(
-        f"(CASE WHEN lower(memory_text) LIKE {M.like_lit(t)} THEN 1 ELSE 0 END)"
+    total = sum(w[t] for t in toks) or 1.0
+    terms = " + ".join(
+        f"(CASE WHEN lower(memory_text) LIKE {M.like_lit(t)} THEN {w[t]:.6f} ELSE 0 END)"
         for t in toks)
+    return f"(({terms}) / {total:.6f})"
 
 
 def status():
@@ -116,8 +148,7 @@ def topics():
 def search(query, table, k, project, coworker):
     M.require_db()
     coworker_id = M.resolve_coworker(coworker) if coworker else None
-    toks = tokens(query)
-    kw = kw_expr(toks)
+    cands = candidate_tokens(query)
     proj = f" AND project = {M.q(project)}" if project else ""
     have_ollama = M.ollama_up()
     vlit = M.fmt_vec(M.embed(query)) if have_ollama else None
@@ -126,18 +157,24 @@ def search(query, table, k, project, coworker):
         if coworker_id is not None:
             base += (f" AND (id NOT IN (SELECT memory_id FROM memory_coworkers WHERE memory_table={M.q(t)}) "
                     f"OR id IN (SELECT memory_id FROM memory_coworkers WHERE memory_table={M.q(t)} AND coworker_id={coworker_id}))")
+        toks, w = token_weights(cands, t, base)
+        kw = kw_expr(toks, w)
         meta = "category" if t == "semantic" else "event_type || '/' || importance"
         if have_ollama:
             # embedding IS NOT NULL: vector_distance_cos raises "Invalid vector type"
             # on a NULL, which would take down the whole query over one bad row.
             sql = (f"SELECT round(vector_distance_cos(embedding,{vlit}),4) AS dist, "
-                   f"({kw}) AS kw, created_at, {meta} AS meta, project, topic, memory_text "
+                   f"round({kw},3) AS kw, "
+                   f"round(vector_distance_cos(embedding,{vlit}) - {ALPHA}*({kw}),4) AS score, "
+                   f"created_at, {meta} AS meta, project, topic, memory_text "
                    f"FROM {t}_memory WHERE {base} AND embedding IS NOT NULL "
-                   f"ORDER BY kw DESC, dist ASC LIMIT {k};")
-            print(f"===== {t} (top {k}; kw = # matching keywords, boosted) =====")
+                   f"ORDER BY score ASC LIMIT {k};")
+            print(f"===== {t} (top {k}; score = dist - {ALPHA}*kw, lower is better; "
+                  f"kw = IDF-weighted keyword share 0..1) =====")
         else:                                    # DEGRADED: keyword-only
-            sql = (f"SELECT ({kw}) AS kw, created_at, {meta} AS meta, project, topic, memory_text "
-                   f"FROM {t}_memory WHERE {base} AND ({kw}) > 0 ORDER BY kw DESC, created_at DESC LIMIT {k};")
+            sql = (f"SELECT round({kw},3) AS kw, created_at, {meta} AS meta, project, topic, memory_text "
+                   f"FROM {t}_memory WHERE {base} AND ({kw}) > 0 "
+                   f"ORDER BY kw DESC, created_at DESC LIMIT {k};")
             print(f"===== {t} (Ollama down — keyword-only, top {k}) =====")
         print(M.exec_sql(sql))
 

@@ -2,7 +2,7 @@
 
 A bootstrap for **local, embedded, long-term memory for AI coding agents** (built for [Claude Code](https://claude.com/claude-code)).
 
-Your agent's text is embedded with a local model and stored as a vector in a local [Turso](https://github.com/tursodatabase/turso) (SQLite-compatible) database, so it recalls memories by *meaning* — with a keyword boost so exact ids and error strings still surface. Everything runs on your machine: no cloud, no API cost, no data leaving your laptop. The database is the single source of truth; a daily job backs it up locally, and a multiprocess flag lets several agent instances share it at once.
+Your agent's text is embedded with a local model and stored as a vector in a local [Turso](https://github.com/tursodatabase/turso) (SQLite-compatible) database, so it recalls memories by *meaning* — with an IDF-weighted keyword credit so exact ids and error strings still surface. Everything runs on your machine: no cloud, no API cost, no data leaving your laptop. The database is the single source of truth; a daily job backs it up locally, and a multiprocess flag lets several agent instances share it at once.
 
 ## Features
 
@@ -99,7 +99,9 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 | `TURSO_BIN` | `~/.turso/tursodb` | Path to the `tursodb` binary. |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint. |
 | `EMBED_MODEL` | `bge-m3` | Embedding model; one per DB. |
+| `RECALL_ALPHA` | `0.15` | Keyword weight in recall ranking. Corpus-calibrated — see below. |
 | `BACKUP_DIR` | `./Backups` | Where daily dumps are written. |
+| `SUPERCHARGED_MEMORY_EVAL_DIR` | `<db parent>/eval` | Query-embedding cache for the eval harness. Derived data; the cases themselves live in the DB. |
 
 `install-claude-md.sh` reads two more env vars and bakes them into the rendered
 `~/.claude/CLAUDE.md` (they are template placeholders, not runtime script config):
@@ -243,10 +245,12 @@ thin CLIs on top:
   semantic refuses a near-duplicate (cosine < 0.10) unless `--force` (episodic is
   exempt — events recur); `--supersedes <id>` inserts a revision and marks the old
   row superseded in one call; refuses a DB embedded with a different model.
-- **`recall.py`** — hybrid search: `vector_distance_cos` (brute force) plus a
-  keyword boost equal to the count of meaningful query tokens found in the text
-  (stopwords dropped, ids/error strings kept). Degrades to keyword-only if Ollama
-  is down. Also `--baseline`, `--status`, `--count`.
+- **`recall.py`** — hybrid search, scored `dist - RECALL_ALPHA * kw` (lower wins):
+  brute-force `vector_distance_cos` minus an IDF-weighted keyword credit, normalised
+  to 0..1. IDF is measured per query against the rows being ranked, so common words
+  demote themselves — there is no stopword list, and the 8 *rarest* query tokens are
+  the ones that count. Degrades to keyword-only if Ollama is down. Also `--baseline`,
+  `--status`, `--count`.
 - **`backfill.py`** — import a directory of files for a fresh start (skips files over the cap).
 - **`seed.py`** — scaffold for a one-time bootstrap load (empty by default).
 - **`sleep.py`** — the mechanical write primitives a sleep pass needs, no judgment of
@@ -381,6 +385,28 @@ user-triggered only. It does the three things a normal pass deliberately doesn't
 | D3 | **Compaction.** Clusters all current semantic memory and merges same-topic near-duplicates. |
 | D4 | **Pattern mining.** Derives recurrences and trends from the whole episodic log. |
 | D5 | Rebuild `topic_keywords`, report. |
+| D6 | **Recall check.** Validate `eval_cases`, report `recall@1/@5/MRR` vs the last `eval_runs` row, propose up to 3 new cases, and — only on a flagged regression — sweep `RECALL_ALPHA` and *ask* whether to change it. |
+
+D6 runs last for a reason: D2 and D3 are what break an eval set. A purged row is
+gone and a merged row is superseded, so a case pointing at either looks exactly like
+a ranking regression while being nothing of the sort — validation has to happen after
+them, not before.
+
+The eval set is **runtime state, not repo content** — its `expect` values are live row
+ids — so it lives in the DB, in `eval_cases` (authored cases, soft-deleted via
+`retired_at`) and `eval_runs` (one row per run). That puts it inside the `.sql` dump,
+which is deliberate: cases are authored and cannot be regenerated from the corpus, and
+a past corpus cannot be re-measured. The only file left on disk is the query-embedding
+cache `<db parent>/eval/qvec.json` (`SUPERCHARGED_MEMORY_EVAL_DIR` overrides) — pure
+derived data, excluded on purpose. There is no auto-generated eval set: an LLM writing a
+query while looking at the row it should retrieve produces lexical overlap a real user
+never produces, which would bias every future alpha upward. Cases are drafted from a
+row's `topic` and `keywords` only, never its text, and the user approves each one.
+
+`RECALL_ALPHA` is never changed unattended. The harness reports the recall@5 plateau
+and whether the configured value still sits inside it; if it doesn't, the agent asks.
+Per-machine calibration belongs in `env` in `~/.claude/settings.json`, not in the
+repo default.
 
 **Purge** (`sleep.py --purge <ids> --confirm-purge`) is the sole exception to the
 never-hard-delete rule, and it is fenced: it refuses a current row, an unknown id,

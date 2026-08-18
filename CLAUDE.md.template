@@ -23,8 +23,9 @@ them as `python3 "{{BASE_PATH}}/scripts/<cmd>"`.
 
 Read memory at the start of a task that may depend on prior context, whenever the user cites
 a past decision, BEFORE non-trivial debugging (a past session may have hit the same gotcha),
-and BEFORE storing (dedup / supersede check). Ranking is hybrid — query tokens matched in the
-text outrank pure cosine, so exact ids and error strings surface. The topic index is the
+and BEFORE storing (dedup / supersede check). Ranking is hybrid — cosine distance minus an
+IDF-weighted keyword credit, so a rare token (an id, an error string) pulls its row up
+while common words barely move it. The topic index is the
 "don't know what to search for" tool; it goes stale between sleeps, so re-run `--topics` or
 query directly: `SELECT topic, keywords FROM topic_keywords WHERE topic LIKE '%x%';`
 

@@ -188,3 +188,42 @@ IF NOT EXISTS idx_appr_coworker ON appraisals
 CREATE INDEX
 IF NOT EXISTS idx_appr_current  ON appraisals
 (superseded_by);
+
+-- ---------------------------------------------------------------------------
+-- Recall evaluation (deep sleep D6). Lives in the DB so the .dump backup covers
+-- it: the cases are AUTHORED, not derived, and cannot be regenerated from the
+-- corpus — a query written from the row it should retrieve is the biased kind.
+-- The query-embedding cache is deliberately NOT here; it is pure derived data.
+CREATE TABLE IF NOT EXISTS eval_cases (
+  id            TEXT PRIMARY KEY,                                   -- stable label, e.g. 'x01'
+  created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  class         TEXT NOT NULL CHECK (length(class) <= 32),          -- exact-id, semantic, ...
+  memory_table  TEXT NOT NULL CHECK (memory_table IN ('semantic','episodic')),
+  query         TEXT NOT NULL CHECK (length(query) BETWEEN 1 AND 512),
+  -- Targets as CSV, deliberately NOT a child table with an FK: a child table
+  -- would be one more thing sleep.py --purge has to clean (see memory_coworkers),
+  -- whereas a dangling id here is inert and is exactly what --validate looks for.
+  expect_ids    TEXT NOT NULL CHECK (length(expect_ids) <= 256),
+  -- created_at of each target AT AUTHORING TIME, same order as expect_ids.
+  -- `id INTEGER PRIMARY KEY` is a rowid alias with no AUTOINCREMENT, so SQLite
+  -- REUSES an id after the highest row is deleted — and D2 deletes rows. Without
+  -- this stamp a purged-then-reused id still looks "live and current" while the
+  -- case now points at an unrelated memory, corrupting the metric silently.
+  expect_stamps TEXT NOT NULL CHECK (length(expect_stamps) <= 512),
+  retired_at    TEXT                                                -- soft-delete, never DELETE
+);
+CREATE INDEX IF NOT EXISTS idx_eval_case_live ON eval_cases (retired_at);
+
+-- One row per harness run; the baseline D6's regression check diffs against.
+-- Derivable from nothing — a past corpus cannot be re-measured.
+CREATE TABLE IF NOT EXISTS eval_runs (
+  id           INTEGER PRIMARY KEY,
+  ran_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  alpha        REAL NOT NULL,
+  embed_model  TEXT NOT NULL CHECK (length(embed_model) <= 128),
+  n_cases      INTEGER NOT NULL,
+  r1           REAL NOT NULL,
+  r5           REAL NOT NULL,
+  mrr          REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_time ON eval_runs (ran_at);
