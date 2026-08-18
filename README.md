@@ -257,6 +257,9 @@ thin CLIs on top:
   its own: `--mark-processed`, `--retire`, `--rebuild-topics`, plus deep sleep's
   `--purge` (guarded hard delete) and `--cluster` (read-only similarity grouping).
 - **`supercharged-memory-backup.sh`** — the daily backup (below).
+- **`restore.py`** — replay a dump into a fresh DB and *verify* it, splitting on real
+  statement boundaries because piping a dump into `tursodb` restores only a fraction
+  of the rows (below). Refuses an existing target; exits non-zero on any row mismatch.
 - **`install-claude-md.sh`** — render the template into `~/.claude/CLAUDE.md`, stamping
   the repo commit it rendered from (see *Staying up to date*).
 - **`coworkers.py`** — manage AI personas (below).
@@ -473,14 +476,25 @@ scripts retry with backoff). A process without the flag is refused. The flag is
   so keep them together rather than scattering them per-machine. Taking a backup is
   additive and non-destructive; **restoring is neither** — never restore without the
   user's explicit ok.
-- **Restore** (into a fresh DB file). Decompress with whatever your platform ships —
-  `gunzip -c` exists on both macOS and Linux, macOS also has `gzcat`, Linux also has
-  `zcat` (Linux's `gzip` package installs no `gzcat`, so a copy-pasted `gzcat` fails
-  there even though the archive is fine):
+- **Restore** — `scripts/restore.py`, into a fresh DB file:
   ```bash
-  gunzip -c "$(ls -1t Backups/*-supercharged-memory*.sql.gz | head -1)" \
-    | tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal
+  python3 scripts/restore.py --out /path/to/new.db        # newest backup by default
+  python3 scripts/restore.py --dump Backups/<file>.sql.gz --out /path/to/new.db
   ```
+  It refuses a target that already exists (pass `--force` to override), reads `.sql`
+  and `.sql.gz` alike, and prints a per-table `in dump` vs `restored` comparison,
+  exiting non-zero if any row is missing. **A restore that was not counted is not a
+  restore.**
+
+  **Do not pipe a dump into `tursodb`**, and do not use its `.read`. The CLI splits
+  its input on **line** boundaries, but `memory_text` contains newlines, so most of a
+  dump's lines are continuations *inside string literals* — in one measured dump, 4378
+  of 5034. The first multi-line `INSERT` ends its statement mid-value and everything
+  after it is parsed as garbage until something happens to parse again. The result is
+  an arbitrary **fraction** of the rows (98 of 389 in the observed case) together with
+  a misleading `Parse error: table 'eval_cases' does not exist` — a partial restore
+  that looks like it mostly worked. The dumps themselves are fine; only the replay was
+  broken.
 - **Rebuild empty schema** — **pipe** the file; don't pass it as a SQL argument
   (`tursodb "$(cat schema.sql)"` fails: the leading `--` comment parses as a CLI flag):
   ```bash
