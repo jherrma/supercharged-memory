@@ -131,10 +131,10 @@ IF NOT EXISTS coworkers
 (name) <= 64),
   expertise    TEXT NOT NULL CHECK
 (length
-(expertise) <= 256),
+(expertise) <= 3000),
   personality  TEXT NOT NULL CHECK
 (length
-(personality) <= 1000),
+(personality) <= 3000),
   trust_level  TEXT NOT NULL DEFAULT 'supervised'
                CHECK
 (trust_level IN
