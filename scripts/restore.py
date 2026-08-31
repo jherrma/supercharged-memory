@@ -9,6 +9,11 @@ is parsed as garbage until something happens to parse again, and you are left wi
 arbitrary fraction of the rows plus a misleading "table ... does not exist" error.
 `.read` has the same defect.
 
+A dump from a database that has an AUTOINCREMENT column carries a second trap: the
+`.dump` faithfully emits the `__turso_internal_seq_...` table backing it, and tursodb
+then REFUSES its own output with "Object name reserved for internal use". Those
+statements are skipped -- the table is recreated implicitly with its parent.
+
 So: split on ';' that is OUTSIDE any quoted string, hand each statement to tursodb as
 an argv argument, then COUNT what landed against what the dump contained. A restore
 that is not counted is not a restore.
@@ -28,6 +33,18 @@ import memlib as M  # noqa: E402
 # Meaningless when every statement runs in its own process, and COMMIT without an
 # open transaction is a hard error that would otherwise look like a real failure.
 SKIP = re.compile(r"^\s*(BEGIN|COMMIT|END|ROLLBACK|PRAGMA)\b", re.I)
+
+# tursodb emits the internal sequence table behind an AUTOINCREMENT column into its
+# dump, then refuses to execute it ("Object name reserved for internal use"), so
+# without this every such dump reports RESTORE INCOMPLETE. Creating the parent table
+# recreates it, so dropping these statements loses nothing.
+#
+# Anchored to the object NAME, never a substring search: memory_text legitimately
+# contains strings like "__turso_internal_seq", and a looser match would silently
+# drop a real memory row.
+INTERNAL = re.compile(
+    r'^\s*(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+|UNIQUE\s+)*\w+|INSERT\s+INTO|REPLACE\s+INTO'
+    r'|DELETE\s+FROM|UPDATE|DROP\s+\w+|ALTER\s+TABLE)\s+"?__turso_internal_', re.I)
 
 
 def split_statements(sql):
@@ -111,11 +128,16 @@ def main():
                 p.unlink()
 
     dump = Path(a.dump) if a.dump else newest_backup()
-    stmts = [s for s in split_statements(read_dump(dump)) if not SKIP.match(s)]
+    parsed = [s for s in split_statements(read_dump(dump)) if not SKIP.match(s)]
+    stmts = [s for s in parsed if not INTERNAL.match(s)]
+    internal = len(parsed) - len(stmts)
     want = expected_counts(stmts)
     print(f"dump   : {dump}")
     print(f"target : {out}")
     print(f"{len(stmts)} statements, {sum(want.values())} rows across {len(want)} table(s)")
+    if internal:
+        print(f"skipped {internal} statement(s) for tursodb-internal AUTOINCREMENT "
+              f"sequence tables (recreated implicitly)")
 
     failures = []
     for k, s in enumerate(stmts, 1):
