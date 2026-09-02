@@ -124,6 +124,19 @@ verbatim:
 > `{"merge":[ids],"topic":"...","category":"...","keywords":"...","merged_text":"...","why_safe":"one line"}`
 > or `{"no_merge":"reason"}` if they should stay separate.
 
+The "preserve every concrete detail" clause in that rule is the load-bearing part.
+Compression drifts: each pass silently drops low-frequency details, and after enough
+passes the corpus remembers a sanitized, generic version of events — precisely the
+version that fails on the edge case someone actually hits. In *this* corpus the
+low-frequency details are the whole value: exact error strings, row ids, CLI flags,
+paths, version numbers. A merge that reads more smoothly than its inputs while
+holding fewer identifiers is a bad merge.
+
+So treat a row that has been merged **repeatedly** as a smell rather than a win.
+Check before proposing: if a cluster member is itself the survivor of an earlier
+merge (it supersedes several rows) and it is being merged again, say so in
+`why_safe` and prefer leaving it alone.
+
 **3. Present the batch.** One compact table: cluster, ids, proposed topic, merged
 length, `why_safe` — **not** the full texts. Ask the user which to apply ("do
 1,3,4"). Then per approved merge:
@@ -323,3 +336,110 @@ would need a `migration-steps/` note; per-machine calibration belongs in setting
 
 Record in the report: the numbers, the plateau, what was asked, and what the user
 decided.
+
+### D6.5 — Memory-quality metrics
+
+`recall@k` and MRR measure the *retrieval* layer only. The memory-quality layer is
+two more numbers, and both are computable from what the DB already holds:
+
+```bash
+python3 scripts/sleep.py --staleness
+python3 scripts/sleep.py --contradiction-candidates
+```
+
+**Staleness distribution** is the age profile of current rows. Age is not wrongness
+— an old row about a stable fact is fine — so read it next to D7's confirmed-stale
+count, never alone. What matters is the *trend* across passes: a growing `180d+`
+bucket with a flat stale count means the corpus is aging well; growing together
+means Verify is falling behind.
+
+**Contradiction rate** needs adjudication, because distance cannot tell "same
+subject, disagreeing" from "same subject, complementary". Dispatch **one worker per
+≤12 pairs**, ids only:
+
+> For each pair, read both rows and decide: do they make claims that cannot both be
+> true right now? Sharing vocabulary is not contradiction; adding detail is not
+> contradiction; being about the same tool is not contradiction. Return
+> `{"ids":[a,b],"verdict":"contradiction|compatible","one_line":"..."}` and nothing
+> else.
+
+Report `contradiction rate = confirmed / candidates` with both raw counts, because
+the rate alone hides how big the shortlist was. A confirmed contradiction is fixed
+the normal way — `remember.py --supersedes` with text that resolves it — and that is
+the user's call, not the worker's.
+
+**Neither number is persisted.** `eval_runs` has fixed columns and this work adds no
+schema, so there is no stored baseline to diff against: carry the numbers in the
+report and compare by eye. If they prove worth trending, that is a schema change and
+a `migration-steps/` note of its own.
+
+## D7 — Verify (staleness check)
+
+The one thing ranking cannot tell you: whether a row is still **true**. D6 measures
+whether the right row comes back; a row can come back first and still name a flag
+that was renamed, a script that moved, or a version nobody runs any more. Steps 1–3
+of the Keep / Remove / Move / **Verify** review framework are already covered
+(leave it / D2+`--retire` / D3+promotion) — this is the fourth.
+
+Runs **last** on purpose. It is the heaviest phase per unit of value, and unlike D2
+and D3 it does not invalidate the eval set *before* D6 measures it. The cost of that
+placement: **if you retire anything here, re-run `eval-harness.py --validate`
+afterwards** (D6.1's command) so no case is left pointing at a row you just retired.
+
+**1. Get the candidate list.** Read-only, no LLM, no embeddings — this works with
+Ollama down:
+
+```bash
+python3 scripts/sleep.py --verify-candidates --limit 40
+```
+
+Returns `{"table","n_current","n_candidates","n_no_artifacts","limit","candidates":[...]}`,
+each candidate carrying `id`, `topic`, `created_at`, `age_days`, `artifacts` (which
+classes it mentions: `paths`, `flags`, `env`, `versions`) and `artifact_classes`.
+Oldest first, artifact-class count as tiebreak. `n_no_artifacts` is the remainder
+that quotes nothing checkable — those rows are not unverifiable, they are simply
+**out of scope for a mechanical pass**, and saying so is part of the report.
+
+There is deliberately no "most-retrieved" ordering: a frequently-recalled stale row
+is the worst case, but the only way to know which rows those are is to make
+`recall.py` write on every query, and keeping recall a pure reader was judged the
+better trade. Age plus artifact density is the accepted proxy.
+
+**2. One worker per batch of ≤12 candidates**, spawned in one message. The
+orchestrator passes ids only — the worker reads the text itself. Give each worker
+this rule verbatim:
+
+> For each memory id you own: read the row, extract every concrete artifact it
+> tells a reader to use — script paths, CLI flags, env var names, file paths,
+> version numbers, model ids — and CHECK EACH ONE against the repo and the machine
+> as it is today. A path: does the file exist? A flag: does `--help` still list it,
+> or does the script's argparse still define it? An env var: is it still read
+> anywhere? A version: is that still what is installed?
+> Report per id, and NOTHING else: `{"id":N,"checked":["--flag","path/x.py"],
+> "stale":["--old-flag"],"verdict":"current|stale|unverifiable","evidence":"one line
+> naming what you ran or read"}`. `stale` lists only artifacts you CONFIRMED are
+> gone or renamed — an artifact you could not check is `unverifiable`, never
+> `stale`. Do not propose replacement text and do not retire anything.
+
+**3. Present the batch.** One compact table: id, topic, age, verdict, the stale
+artifact, and the worker's evidence line — **not** the full texts. Then ask the user
+per stale row which action they want, and never pick for them:
+
+- the fact still holds, only the artifact was renamed → **supersede** with corrected
+  text (`remember.py --supersedes <id>`), which is the normal fix
+- the fact itself no longer applies → **retire** (`sleep.py --retire <id>`)
+- unclear → **leave it and say so in the report**
+
+A `stale` verdict is never grounds to retire on your own authority. `SLEEP.md`
+Step 6's rule holds here: when it is not clear-cut, ask.
+
+**4. If anything was retired or superseded**, re-run D6.1's validation and rebuild
+the topic index (D5's command), because the corpus changed after both ran:
+
+```bash
+python3 <repo>/investigations/eval-harness.py --validate
+```
+
+**5. Report:** candidates listed vs. checked, rows found stale, what the user chose
+per row, workers that died (a gap, not a silent omission), and the `n_no_artifacts`
+remainder that a mechanical pass cannot reach.

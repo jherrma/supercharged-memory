@@ -51,6 +51,8 @@ ticket-bound. `--model` = your own exact model id.
 5. **Milestone** — project start, feature complete, incident → episodic, matching event type.
 6. **Hard-won context** — non-obvious constraint or environment quirk written down nowhere →
    semantic `project` / `reference`.
+   Two shapes worth naming: **authoritative command** (the definitive path, stored
+   *because* the obvious one is incomplete) and **pointer** (where truth lives — link it).
 
 **Episodic policy on this machine — `{{EPISODIC_MODE}}`: {{EPISODIC_RULE}}** This governs
 episodic writes only; semantic capture always follows the triggers above.
@@ -66,6 +68,10 @@ code/git/tickets, session-local state, and generic best practices.
 ### Writing it
 - Self-contained — the reader has no session context. Situation → what's true → how to apply.
   Quote exact error messages. Stay well under the 2000-char cap.
+- Store the falsifier — name the evidence and date you verified it on, so a later
+  reader can re-test the claim instead of obeying it. Nothing else re-checks.
+- Concrete enough to act on without further judgment, general enough not to be a
+  brittle if-else. "Handle errors" fails the first test; a 20-branch table the second.
 - `--keywords` are appended into the text itself: ids, exact error strings, library + version,
   synonyms, EN *and* DE phrasings someone would search by. They sharpen both search modes.
 - Recall first. Covered but now wrong/incomplete → `--supersedes <id>` (inserts + supersedes in

@@ -389,11 +389,40 @@ user-triggered only. It does the three things a normal pass deliberately doesn't
 | D4 | **Pattern mining.** Derives recurrences and trends from the whole episodic log. |
 | D5 | Rebuild `topic_keywords`, report. |
 | D6 | **Recall check.** Validate `eval_cases`, report `recall@1/@5/MRR` vs the last `eval_runs` row, propose up to 3 new cases, and — only on a flagged regression — sweep `RECALL_ALPHA` and *ask* whether to change it. |
+| D6.5 | **Memory-quality metrics.** Age profile of current rows plus an adjudicated contradiction rate — the two numbers ranking metrics cannot express. Reported, never persisted. |
+| D7 | **Verify.** Lists current rows quoting a checkable artifact and has workers check each one against the repo as it stands. Staleness is invisible to retrieval metrics. |
 
-D6 runs last for a reason: D2 and D3 are what break an eval set. A purged row is
-gone and a merged row is superseded, so a case pointing at either looks exactly like
-a ranking regression while being nothing of the sort — validation has to happen after
-them, not before.
+D6 runs after D2 and D3 for a reason: those two are what break an eval set. A purged
+row is gone and a merged row is superseded, so a case pointing at either looks exactly
+like a ranking regression while being nothing of the sort — validation has to happen
+after them, not before. D7 is the one phase that follows D6, and only because it
+must: it is the sole remaining phase that can retire a row, so putting it earlier
+would reintroduce the very problem D6's placement solves. The price is that a
+retirement in D7 has to be followed by re-running `eval-harness.py --validate` by
+hand.
+
+Two things a consolidation pass structurally cannot do are split out into their own
+phases. **D6.5** reports the memory-quality metrics that ranking cannot express: the
+age profile of current rows (`sleep.py --staleness`) and a contradiction rate
+adjudicated by workers over a mechanically-built shortlist
+(`sleep.py --contradiction-candidates`, which reuses the `--cluster` grouping at a
+tighter 0.15 threshold — just above `remember.py`'s own 0.10 dedup cutoff, because
+two rows that disagree about the same subject are near-identical in vector space
+without being duplicates). **D7** is the Verify stage: staleness of a stored fact is
+invisible to retrieval metrics, since a row can rank first and still name a renamed
+flag, so `sleep.py --verify-candidates` lists current rows quoting a checkable
+artifact — a script path, a CLI flag, an env var, a version — oldest first with
+artifact-class count as tiebreak, and workers check each artifact against the repo as
+it stands. Both primitives are read-only and decide nothing; retiring or superseding
+stays a user call, exactly as in D2 and D3. The patterns are deliberately narrow:
+measured on the live corpus, loose first drafts flagged 502 of 561 rows (89%), which
+makes the tiebreak meaningless — tightened, 236 of 561 (42%).
+
+Ordering candidates by how *often* a row is actually recalled would be the better
+signal — a frequently-retrieved stale row is the worst case — but the only way to
+know that is to increment a counter on every search, which makes `recall.py` a writer
+on the read path. Keeping recall a pure reader won that trade; age plus artifact
+density is the accepted proxy.
 
 The eval set is **runtime state, not repo content** — its `expect` values are live row
 ids — so it lives in the DB, in `eval_cases` (authored cases, soft-deleted via
