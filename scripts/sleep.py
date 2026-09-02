@@ -29,6 +29,31 @@ consolidating semantic memory, both reuse remember.py (--table semantic and
                                   map stage (episodic, looser). Rows with no
                                   embedding are listed separately, never dropped.
 
+--verify-candidates              Read-only: current rows that quote a CHECKABLE
+        [--table T] [--limit N]   artifact (a script path, a CLI flag, an env var,
+                                  a version) and are therefore the rows a Verify
+                                  pass should re-check for staleness — oldest
+                                  first, artifact-class count as tiebreak. Prints
+                                  JSON; decides nothing. Feeds deep sleep's D7.
+                                  Class PRESENCE is computed in SQL, never by
+                                  pulling memory_text — the orchestrator must not
+                                  hold text in bulk, and memory_text contains
+                                  newlines that line-mode output cannot carry.
+
+--contradiction-candidates       Read-only: pairs of CURRENT rows close enough in
+        [--table T]               vector space to be about the same subject, and
+        [--threshold N]           therefore able to contradict each other. Reuses
+                                  --cluster's grouping at a tighter default
+                                  (0.15 — just above remember.py's 0.10 dedup
+                                  threshold), then expands clusters to pairs.
+                                  Shortlist only; an LLM decides whether a pair
+                                  actually disagrees. Feeds D6.5.
+
+--staleness [--table T]          Read-only: age profile of current rows in four
+                                  buckets, plus the oldest current row. Pure SQL.
+                                  Reported, never persisted — eval_runs has fixed
+                                  columns and this work adds no schema. Feeds D6.5.
+
 --rebuild-topics                 atomically replaces topic_keywords wholesale
                                   (DELETE + re-INSERT, never accumulated) from
                                   a JSON array on stdin:
@@ -74,6 +99,35 @@ BLOB_MIN, BLOB_SHARE = 12, 0.25
 TOTAL_CHAR_CAP = 500  # hard cap on topic_keywords' total content size (topic+keywords
                       # across all rows) — it's loaded into every session's context,
                       # not queried on demand, so this bounds a fixed per-session cost.
+
+# --verify-candidates: what counts as a CHECKABLE artifact. Each entry is a SQL
+# predicate over memory_text, evaluated in the DB on purpose — the orchestrator
+# must never pull memory_text in bulk (see instructions/DEEP-SLEEP.md, Subagent
+# contract), and memory_text contains newlines, which line-mode output cannot
+# carry back safely. So the script reports WHICH CLASSES a row mentions and lets
+# a worker read the row itself to extract the actual strings.
+# Each pattern is deliberately NARROW. Measured on the live corpus while building
+# this: the loose first drafts matched 502 of 561 rows (89%), which makes the
+# artifact-density tiebreak meaningless — "--" alone hits prose dashes, a run of
+# six capitals hits ordinary emphasis (ALWAYS, NEVER, WHAT WAS ACTUALLY BAD), and
+# '[0-9].[0-9]' hits any decimal including scores like 0.96875. So: a flag must be
+# '--' followed by a lowercase letter, an env var must carry an underscore between
+# capitals, and a version needs two dots or a 'v' prefix.
+ARTIFACT_CLASSES = {
+    "paths":    ("memory_text LIKE '%scripts/%' OR memory_text LIKE '%instructions/%' "
+                 "OR memory_text LIKE '%investigations/%' OR memory_text LIKE '%migration-steps/%'"),
+    "flags":    "memory_text GLOB '*--[a-z]*'",
+    "env":      "memory_text GLOB '*[A-Z][A-Z]_[A-Z]*'",
+    "versions": ("memory_text GLOB '*[0-9].[0-9].[0-9]*' "
+                 "OR memory_text GLOB '*v[0-9].[0-9]*'"),
+}
+
+# Contradictions live just ABOVE remember.py's own duplicate threshold (0.10):
+# two rows about the same subject that state different things are near-identical
+# in vector space but not duplicates. 0.22 (the merge-candidate default) is far
+# too loose for this. NOT yet measured on this corpus — override with --threshold
+# and record what worked.
+CONTRADICTION_THRESHOLD = 0.15
 
 
 def mark_processed(ids_csv):
@@ -168,8 +222,13 @@ def purge(ids_csv, confirm):
     print(f"backup verified: {dump}")
 
 
-def cluster(table, threshold):
-    """Connected components over pairwise cosine distance. Read-only, no LLM."""
+def cluster(table, threshold, emit=True):
+    """Connected components over pairwise cosine distance. Read-only, no LLM.
+
+    Returns the result dict so other primitives can re-use the grouping
+    (--contradiction-candidates) instead of duplicating the SQL; `emit` controls
+    whether it also prints, so --cluster's output is byte-identical to before.
+    """
     M.require_db()
     tbl = f"{table}_memory"
 
@@ -225,6 +284,124 @@ def cluster(table, threshold):
             f"threshold distance is chaining unrelated rows together (a-b close, b-c "
             f"close pulls in a-c). Re-run with a lower --threshold before treating "
             f"these as merge candidates.")
+    if emit:
+        print(json.dumps(out, indent=1))
+    return out
+
+
+def contradiction_candidates(table, threshold):
+    """Read-only: pairs of current rows close enough to possibly CONTRADICT.
+
+    Issue #10 item E. A contradiction is two current rows about the same subject
+    that state different things — near-identical in vector space, but not
+    duplicates. This finds the shortlist mechanically and judges nothing: an LLM
+    adjudicates only these pairs, so the cost does not scale with the corpus.
+
+    Reuses --cluster's grouping at a tighter threshold, then expands each cluster
+    into pairs, because "which two rows disagree" is the question a judge can
+    actually answer.
+    """
+    grouped = cluster(table, threshold, emit=False)
+    pairs = []
+    for c in grouped["clusters"]:
+        ids = c["ids"]
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                pairs.append({"ids": [ids[i], ids[j]]})
+    out = {"table": table, "threshold": float(threshold), "n_pairs": len(pairs),
+           "pairs": pairs, "no_embedding": grouped["no_embedding"],
+           "note": "candidates only — a pair here shares a subject; whether the two "
+                   "rows CONTRADICT is a judgment call, not a distance."}
+    if "warning" in grouped:
+        out["warning"] = grouped["warning"]
+    print(json.dumps(out, indent=1))
+
+
+def staleness(table):
+    """Read-only: age profile of current rows. Pure SQL, no LLM, no embeddings.
+
+    Issue #10 item E. Reported, never persisted: eval_runs has fixed columns and
+    adding one would be a schema change this work deliberately avoids, so there
+    is no trend baseline for this number yet — compare it by eye across passes.
+    """
+    M.require_db()
+    tbl = f"{table}_memory"
+    live_sql = ("superseded_by IS NULL AND retired_at IS NULL"
+                if table == "semantic" else "1=1")
+    rows = M.exec_sql(
+        "SELECT CASE "
+        "  WHEN julianday('now') - julianday(created_at) < 30  THEN '0-30d' "
+        "  WHEN julianday('now') - julianday(created_at) < 90  THEN '30-90d' "
+        "  WHEN julianday('now') - julianday(created_at) < 180 THEN '90-180d' "
+        "  ELSE '180d+' END AS bucket, count(*) "
+        f"FROM {tbl} WHERE {live_sql} GROUP BY bucket;", mode="list")
+    buckets = {"0-30d": 0, "30-90d": 0, "90-180d": 0, "180d+": 0}
+    for line in rows.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        name, n = line.split("|", 1)
+        buckets[name.strip()] = int(n.strip())
+    total = sum(buckets.values())
+    oldest = M.scalar(f"SELECT min(created_at) FROM {tbl} WHERE {live_sql};") or ""
+    print(json.dumps({"table": table, "n_current": total, "buckets": buckets,
+                      "oldest_current": oldest,
+                      "note": "age is not wrongness — an old row about a stable fact is "
+                              "fine. Read this next to D7's stale count, not alone."},
+                     indent=1))
+
+
+def verify_candidates(table, limit):
+    """Read-only: current rows quoting a checkable artifact, oldest first.
+
+    Issue #10 item A. Staleness cannot be found by ranking — a row can rank
+    first and still name a flag that was renamed months ago — so this lists what
+    a Verify pass should re-check and in what order. It decides nothing:
+    retiring stays a user call via --retire.
+
+    Priority is age first (staleness risk grows with age), then how many
+    artifact CLASSES the row mentions as a tiebreak. There is deliberately no
+    retrieval-frequency signal: adding one would make recall.py a writer on
+    every query, which is a worse trade than a coarser ordering here.
+    """
+    M.require_db()
+    tbl = f"{table}_memory"
+    live = ["1=1"]
+    if table == "semantic":
+        live = ["superseded_by IS NULL", "retired_at IS NULL"]
+    live_sql = " AND ".join(live)
+
+    flags = ", ".join(f"({pred}) AS has_{name}" for name, pred in ARTIFACT_CLASSES.items())
+    any_artifact = " OR ".join(f"({pred})" for pred in ARTIFACT_CLASSES.values())
+
+    # topic is selected LAST so that a stray '|' inside it can only split the
+    # tail, which is re-joined below rather than silently dropping a column.
+    rows = M.exec_sql(
+        f"SELECT id, created_at, "
+        f"CAST(julianday('now') - julianday(created_at) AS INTEGER) AS age_days, "
+        f"{flags}, topic FROM {tbl} "
+        f"WHERE {live_sql} AND ({any_artifact}) ORDER BY created_at ASC;",
+        mode="list")
+
+    names = list(ARTIFACT_CLASSES)
+    candidates = []
+    for line in rows.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|", 3 + len(names))
+        rid, created_at, age_days = parts[0], parts[1], parts[2]
+        present = [n for n, v in zip(names, parts[3:3 + len(names)]) if v.strip() == "1"]
+        topic = parts[3 + len(names)] if len(parts) > 3 + len(names) else ""
+        candidates.append({"id": int(rid), "topic": topic, "created_at": created_at,
+                           "age_days": int(age_days or 0),
+                           "artifacts": present, "artifact_classes": len(present)})
+
+    candidates.sort(key=lambda c: (c["created_at"], -c["artifact_classes"]))
+    n_current = int(M.scalar(f"SELECT count(*) FROM {tbl} WHERE {live_sql};") or 0)
+    out = {"table": table, "n_current": n_current, "n_candidates": len(candidates),
+           "n_no_artifacts": n_current - len(candidates), "limit": limit,
+           "candidates": candidates[:limit] if limit else candidates}
     print(json.dumps(out, indent=1))
 
 
@@ -265,10 +442,20 @@ def main():
                    help="print embedding-similarity clusters as JSON (read-only)")
     p.add_argument("--table", choices=["semantic", "episodic"], default="semantic",
                    help="--cluster: which table (default semantic)")
+    p.add_argument("--contradiction-candidates", dest="contradiction_candidates",
+                   action="store_true",
+                   help="print pairs of current rows close enough to possibly contradict (read-only)")
+    p.add_argument("--staleness", action="store_true",
+                   help="print the age profile of current rows (read-only)")
+    p.add_argument("--verify-candidates", dest="verify_candidates", action="store_true",
+                   help="print current rows quoting a checkable artifact, oldest first (read-only)")
+    p.add_argument("--limit", type=int, default=0,
+                   help="--verify-candidates: cap the list (0 = all)")
     p.add_argument("--threshold", type=float,
                    help="--cluster: max cosine distance within a cluster "
                         f"(default {DEFAULT_THRESHOLD['semantic']} semantic / "
-                        f"{DEFAULT_THRESHOLD['episodic']} episodic; lower = tighter)")
+                        f"{DEFAULT_THRESHOLD['episodic']} episodic; lower = tighter). "
+                        f"--contradiction-candidates: default {CONTRADICTION_THRESHOLD}")
     a = p.parse_args()
     if a.mark_processed:
         mark_processed(a.mark_processed)
@@ -280,9 +467,17 @@ def main():
         purge(a.purge, a.confirm_purge)
     elif a.cluster:
         cluster(a.table, a.threshold if a.threshold is not None else DEFAULT_THRESHOLD[a.table])
+    elif a.verify_candidates:
+        verify_candidates(a.table, a.limit)
+    elif a.contradiction_candidates:
+        contradiction_candidates(
+            a.table, a.threshold if a.threshold is not None else CONTRADICTION_THRESHOLD)
+    elif a.staleness:
+        staleness(a.table)
     else:
         sys.exit("provide one of --mark-processed / --retire / --rebuild-topics / "
-                 "--purge / --cluster")
+                 "--purge / --cluster / --verify-candidates / "
+                 "--contradiction-candidates / --staleness")
 
 
 if __name__ == "__main__":

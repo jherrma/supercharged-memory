@@ -122,6 +122,14 @@ python3 scripts/remember.py --table semantic --supersedes <id[,id...]> --text "<
 
 Several ids merge N memories into one row in a single transaction.
 
+A merge must carry over every concrete identifier from its inputs **verbatim** —
+exact error strings, row ids, CLI flags, paths, version numbers. Compression drifts:
+each pass drops low-frequency details, and here those details are the value; a merged
+row that reads better than its inputs while holding fewer identifiers has lost the
+thing worth keeping. A row that has already survived an earlier merge and is being
+merged again is a smell, not progress — leave it alone unless the overlap is
+undeniable.
+
 ## Step 6 — Retire obsolete memories
 
 "Obsolete" has no fixed definition — a memory can be superseded by newer info,
