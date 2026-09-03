@@ -209,7 +209,11 @@ On session start the agent runs `recall.py --status` first:
 - **`EMPTY`** — DB exists but holds no memories → check `--candidates`, then offer to **backfill** from a directory.
 - **`DEGRADED n`** — Ollama down, DB fine → still load baseline and use keyword-only recall, but don't store new memories.
 - **`ERROR`** — fall back to the agent's built-in memory store.
-- **`READY n`** — load baseline and proceed.
+- **`READY n`** — load baseline and proceed. `n` is a liveness signal, not a corpus size:
+  it counts *all* `semantic_memory` rows (superseded and retired included) plus *all*
+  `episodic_memory` rows. Never compare it against a current-rows count such as
+  `sleep.py --staleness`'s `n_current`, and never diff it across time — the DB is shared,
+  so it moves on its own.
 
 ### Never lose a database by accident
 

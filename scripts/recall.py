@@ -27,6 +27,7 @@ coworker's current profile (that's ad-hoc SQL, see README.md - Coworkers).
   recall.py --baseline        # baseline memories (pure SQL, works without Ollama)
   recall.py --topics          # topic_keywords index (pure SQL, load every session)
   recall.py --status          # MISSING | EMPTY | DEGRADED n | READY n
+                              # n = all semantic (incl. superseded/retired) + all episodic
   recall.py --candidates      # other memory DBs/backups found — check before creating one
   recall.py --count
 """

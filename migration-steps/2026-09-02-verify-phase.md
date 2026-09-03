@@ -54,9 +54,22 @@ python3 scripts/sleep.py --staleness
 python3 scripts/sleep.py --verify-candidates --limit 3
 ```
 
-`--staleness` must print JSON with an `n_current` matching the count in
-`recall.py --status`, and four `buckets` summing to it. `--verify-candidates` must print
-at most 3 candidates, oldest `created_at` first, each with a non-empty `artifacts` list.
+`--staleness` must print JSON whose four `buckets` sum to `n_current`, and whose
+`n_current` matches
+
+```sql
+SELECT count(*) FROM semantic_memory WHERE superseded_by IS NULL AND retired_at IS NULL;
+```
+
+Do **not** compare it against `recall.py --status`. That prints
+`count(semantic_memory) + count(episodic_memory)` — every semantic row including
+superseded and retired ones, plus the whole episodic log — so the two agree only on a DB
+with no episodic rows and no supersede chain. Measured 2026-09-03: `READY 194`
+(126 semantic + 68 episodic) against `n_current` 109. A low `n_current` is the supersede
+chain doing its job, not a wrong DB path.
+
+`--verify-candidates` must print at most 3 candidates, oldest `created_at` first, each with
+a non-empty `artifacts` list.
 
 Sanity-check the candidate share while you are there: `n_candidates / n_current` should sit
 well under half. Measured at 236 of 561 (42%) on the corpus this shipped against. If it
@@ -90,4 +103,7 @@ or `COMMIT`.
 **Do not try to prove that with a row count.** Multiple Claude instances share this DB by
 design, so `recall.py --status` moves on its own while you work — measured during
 development: 883 → 908 across a session that wrote 5 rows itself. A count delta on this DB
-is not evidence about your own process.
+is not evidence about your own process. This is a separate objection from check 1's: there
+the problem is `--status` counting a *different set* than `n_current`, here it is `--status`
+counting a *moving* one, and neither makes it a bad status indicator — it is only unusable
+as a comparison target.
