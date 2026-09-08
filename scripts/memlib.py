@@ -20,6 +20,14 @@ BACKUP_DIR = os.environ.get("BACKUP_DIR", str(Path(__file__).resolve().parent.pa
 OLLAMA = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "bge-m3")
 FLAG = "--experimental-multiprocess-wal"
+# Windows' default IO backend refuses multiprocess WAL outright ("experimental
+# multiprocess WAL is not supported by the active IO backend"), which makes every
+# script here fail on open. tursodb's own --help names the fix: pair the flag with
+# the IOCP backend. Dropping the flag instead is not an option -- it is what keeps
+# concurrent openers from being refused (see CLAUDE.md, Concurrency).
+VFS = os.environ.get("TURSO_VFS") or ("experimental_win_iocp" if sys.platform == "win32" else "")
+# Splat this everywhere tursodb is opened, so no call site can drift.
+OPEN_ARGS = [FLAG] + (["--vfs", VFS] if VFS else [])
 DIM = 1024
 MAX_TEXT = 2000
 
@@ -43,7 +51,7 @@ def _count_memories(db_path):
     """Row count for a candidate DB, or None if it isn't a readable memory DB."""
     try:
         r = subprocess.run(
-            [TURSO, str(db_path), FLAG, "-q", "-m", "list",
+            [TURSO, str(db_path), *OPEN_ARGS, "-q", "-m", "list",
              "SELECT (SELECT count(*) FROM semantic_memory) + "
              "(SELECT count(*) FROM episodic_memory);"],
             capture_output=True, text=True, timeout=15)
@@ -143,7 +151,7 @@ def exec_sql(sql, mode="line"):
     """Run one statement via tursodb. Error detection is stderr-scoped so row
     data on stdout can't false-trigger it. Retries with backoff on busy/locked."""
     for attempt in range(6):
-        r = subprocess.run([TURSO, DB, FLAG, "-q", "-m", mode, sql],
+        r = subprocess.run([TURSO, DB, *OPEN_ARGS, "-q", "-m", mode, sql],
                            capture_output=True, text=True)
         if re.search(r"busy|locked", r.stderr, re.I):
             time.sleep(0.3 * (attempt + 1))

@@ -141,7 +141,7 @@ def main():
 
     failures = []
     for k, s in enumerate(stmts, 1):
-        p = subprocess.run([M.TURSO, str(out), M.FLAG, "-q", s],
+        p = subprocess.run([M.TURSO, str(out), *M.OPEN_ARGS, "-q", s],
                            capture_output=True, text=True, encoding="utf-8", timeout=300)
         if p.returncode != 0 or "error" in p.stderr.lower():
             failures.append((k, p.stderr.strip()[:160], s[:100]))
@@ -153,7 +153,7 @@ def main():
     for t in sorted(want):
         # Not M.exec_sql(): that targets memlib.DB, i.e. the LIVE database. The
         # whole point is to count what landed in the restored file.
-        r = subprocess.run([M.TURSO, str(out), M.FLAG, "-q", "-m", "list",
+        r = subprocess.run([M.TURSO, str(out), *M.OPEN_ARGS, "-q", "-m", "list",
                             f"SELECT count(*) FROM {t};"],
                            capture_output=True, text=True, encoding="utf-8", timeout=60)
         got = r.stdout.strip().splitlines()[0] if r.stdout.strip() else "MISSING"

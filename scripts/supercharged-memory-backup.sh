@@ -1,6 +1,7 @@
 #!/bin/bash
 # Daily backup of the local Turso memory DB (supercharged-memory) -> local backups folder.
-# Concurrent-safe: opens with --experimental-multiprocess-wal, so the dump runs
+# Concurrent-safe: opens with --experimental-multiprocess-wal (plus the IOCP VFS on
+# Windows, which that flag requires there), so the dump runs
 # as a reader even while Claude sessions hold the DB. Produces a gzipped SQL
 # dump, VALIDATES it (non-empty + has INSERTs + gzip intact), and retains
 # 3 daily + 4 weekly (Monday) copies so a long weekend can't rotate out every
@@ -8,6 +9,19 @@
 set -uo pipefail
 
 TURSO="${TURSO_BIN:-$HOME/.turso/tursodb}"
+# Windows' default IO backend refuses --experimental-multiprocess-wal outright, so
+# the dump below fails on open unless the flag is paired with the IOCP backend
+# (tursodb --help names it). Same detection as memlib.py's VFS/OPEN_ARGS.
+# Written as an array with the ${a[@]+...} guard because macOS still ships bash
+# 3.2, where "${empty[@]}" under `set -u` is an unbound-variable error.
+if [ -n "${TURSO_VFS:-}" ]; then
+  VFS_ARGS=(--vfs "$TURSO_VFS")
+else
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) VFS_ARGS=(--vfs experimental_win_iocp) ;;
+    *)                    VFS_ARGS=() ;;
+  esac
+fi
 DB="${SUPERCHARGED_MEMORY_TURSO_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/turso/supercharged-memory.db}"
 DEST="${BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/Backups}"
 ERR=/tmp/supercharged-memory-backup.err
@@ -20,7 +34,7 @@ TMP="$(mktemp)"
 # Dump with retry (a concurrent writer may briefly hold the write lock).
 ok=0
 for i in 1 2 3 4 5; do
-  if "$TURSO" "$DB" --experimental-multiprocess-wal -q ".dump" > "$TMP" 2>"$ERR"; then
+  if "$TURSO" "$DB" --experimental-multiprocess-wal ${VFS_ARGS[@]+"${VFS_ARGS[@]}"}        -q ".dump" > "$TMP" 2>"$ERR"; then
     if [ -s "$TMP" ] && grep -q "INSERT INTO" "$TMP"; then ok=1; break; fi
   fi
   sleep 5
