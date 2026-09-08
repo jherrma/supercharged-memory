@@ -9,6 +9,19 @@ import json, os, re, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 TURSO = os.environ.get("TURSO_BIN", str(Path.home() / ".turso/tursodb"))
+
+# Every script in this repo prints em-dashes, and a Windows console inherits the
+# legacy OEM codepage (cp850/cp437 on a default machine) where U+2014 is undefined
+# -- so the default is a hard UnicodeEncodeError on the first line of output, not
+# mojibake. Force UTF-8 with errors="replace": a wrong glyph on a legacy console
+# beats a traceback, and nothing here should die over a dash. No-op off Windows.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass   # already-wrapped or non-reconfigurable stream: leave it alone
+
 DB_ENV = "SUPERCHARGED_MEMORY_TURSO_PATH"
 # XDG Base Directory spec: state that survives and is not cache goes under
 # $XDG_DATA_HOME, which defaults to ~/.local/share.
