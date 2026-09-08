@@ -9,10 +9,33 @@
 #   TARGET=...         where to write the block (default ~/.claude/CLAUDE.md)
 #   SUPERCHARGED_MEMORY_TURSO_PATH=...        where the live Turso DB lives (must match what scripts use)
 #   EPISODIC_MODE=...  every-prompt | major-actions | major-events | manual
+#   PYTHON_BIN=...     interpreter for the rendered prefix (default: python3;
+#                      python on Windows, where python3 is a Store alias stub)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_PATH="${BASE_PATH:-$(dirname "$SCRIPT_DIR")}"
+# On Windows this script runs under Git Bash, so `pwd` yields an MSYS path
+# (/c/Users/...). That path is baked into ~/.claude/CLAUDE.md verbatim and only Git
+# Bash can resolve it -- a session driving PowerShell cannot open a single script it
+# names. cygpath -m gives the mixed form (C:/Users/...), which both shells accept.
+# No-op where cygpath does not exist.
+if command -v cygpath >/dev/null 2>&1; then
+  BASE_PATH="$(cygpath -m "$BASE_PATH")"
+fi
+# Interpreter for the rendered command prefix. `python3` does not exist on Windows:
+# the name is taken by a Microsoft Store alias stub that prints "Python was not
+# found" and EXITS 0 -- so `python3 recall.py --status` reads as a successful empty
+# result, and a session could then offer to restore a backup over a healthy DB.
+# Override with PYTHON_BIN.
+if [ -n "${PYTHON_BIN:-}" ]; then
+  PY="$PYTHON_BIN"
+else
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) PY="python" ;;
+    *)                    PY="python3" ;;
+  esac
+fi
 TEMPLATE="$BASE_PATH/CLAUDE.md.template"
 TARGET="${TARGET:-$HOME/.claude/CLAUDE.md}"
 SUPERCHARGED_MEMORY_TURSO_PATH="${SUPERCHARGED_MEMORY_TURSO_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/turso/supercharged-memory.db}"
@@ -69,6 +92,7 @@ mv "$tmp2" "$TARGET"
   printf '\n%s\n' "$BEGIN"
   printf '%s\n' "$STAMP"
   sed -e "s|{{BASE_PATH}}|$BASE_PATH|g" \
+      -e "s|{{PY}}|$PY|g" \
       -e "s|{{SUPERCHARGED_MEMORY_TURSO_PATH}}|$SUPERCHARGED_MEMORY_TURSO_PATH|g" \
       -e "s|{{EPISODIC_MODE}}|$EPISODIC_MODE|g" \
       -e "s|{{EPISODIC_RULE}}|$EPISODIC_RULE|g" "$TEMPLATE"
@@ -79,5 +103,6 @@ echo "installed agentic-memory block into $TARGET"
 echo "BASE_PATH                      = $BASE_PATH"
 echo "SUPERCHARGED_MEMORY_TURSO_PATH = $SUPERCHARGED_MEMORY_TURSO_PATH"
 echo "EPISODIC_MODE                  = $EPISODIC_MODE"
+echo "PY                             = $PY"
 echo "synced-at                      = $SYNC_SHA"
 echo "Restart your Claude Code session to pick it up."
