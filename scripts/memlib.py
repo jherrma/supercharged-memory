@@ -153,10 +153,18 @@ def exec_sql(sql, mode="line"):
     for attempt in range(6):
         r = subprocess.run([TURSO, DB, *OPEN_ARGS, "-q", "-m", mode, sql],
                            capture_output=True, text=True)
-        if re.search(r"busy|locked", r.stderr, re.I):
+        failed = r.returncode != 0 or re.search(r"error", r.stderr, re.I)
+        # tursodb 0.7.2 reports SQL-level failures on STDOUT with an empty stderr
+        # (observed on Windows); only CLI/open failures land on stderr. So the
+        # busy/locked probe has to see stdout too -- but only once the process has
+        # actually failed. rc!=0 means nothing committed, which is what makes the
+        # retry safe: scanning stdout on a SUCCESSFUL run would let row data
+        # containing the word "locked" re-run a write that already landed.
+        stream = (r.stderr + r.stdout) if failed else r.stderr
+        if re.search(r"busy|locked", stream, re.I):
             time.sleep(0.3 * (attempt + 1))
             continue
-        if r.returncode != 0 or re.search(r"error", r.stderr, re.I):
+        if failed:
             raise RuntimeError(r.stderr.strip() or r.stdout.strip() or "unknown tursodb error")
         return r.stdout
     raise RuntimeError("database busy after retries")
