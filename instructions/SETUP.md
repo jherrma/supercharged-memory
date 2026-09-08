@@ -194,7 +194,42 @@ as above. Finish with:
 python3 scripts/recall.py --status     # expect EMPTY (fresh) or READY n
 ```
 
-## Step 7 — Offer to create coworkers
+## Step 7 — Offer to migrate existing memory
+
+Step 6's candidate check looks for a Turso database or a backup dump. It does not
+look for the *other* kind of memory a user may already have: the ordinary
+file-based kind — a curated `~/.claude/CLAUDE.md`, a `~/.claude/memory/*.md` set,
+project-scoped `~/.claude/projects/<slug>/memory/`. Finishing setup without
+mentioning it leaves that memory outside the system that now claims to hold it.
+
+Check whether there is anything to migrate. Read-only, and needs neither the
+database nor Ollama:
+
+```bash
+python3 scripts/find-existing-memory.py
+```
+
+- **`n_memory_files` is 0** → nothing to do. Say so in one line and continue to
+  Step 8.
+- **Anything found** → report the totals (files, characters, how many exceed the
+  2000-char `MAX_TEXT`) and **ask whether to migrate it into the database**. On
+  yes, follow `instructions/MIGRATE-EXISTING-MEMORY.md`, which imports the files
+  as semantic memory and then runs the deep-sleep phases that apply (compaction,
+  the required topic-index rebuild, and the Verify pass — imported memory is old
+  by definition). On no, continue to Step 8; the files keep working as they did.
+
+The migration is additive: it never deletes or edits a source file, and every row
+it writes is tagged `source='migration'` with a `file_reference` back to its
+file, so the whole import can be found or undone afterwards.
+
+One thing to flag either way, because it is now true and easy to miss: this
+runbook has just appended a managed block to `~/.claude/CLAUDE.md`, so anything
+the user already had in that file sits alongside it. If that content is a second
+set of memory instructions, both are now live and neither mentions the other.
+`MIGRATE-EXISTING-MEMORY.md` M5 handles it — and deliberately leaves the decision
+to the user, since that content is outside the managed markers and is theirs.
+
+## Step 8 — Offer to create coworkers
 
 Once setup succeeds, offer to create a few dedicated AI coworkers (named personas
 with scoped memory and trust-gated autonomy). Present it as optional and suggest a
