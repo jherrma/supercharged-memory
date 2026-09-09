@@ -87,6 +87,7 @@ condensing several episodic rows into a single semantic memory is encouraged,
 don't force a 1:1 mapping):
 
 ```bash
+# On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
 python3 scripts/remember.py --table semantic --category <c> --topic "<t>" \
   --keywords "<k1, k2, ...>" --source sleep --model <your-model-id> \
   --text "<condensed, self-contained fact>"
@@ -129,6 +130,7 @@ or overlapping facts — same signal as `remember.py`'s own dedup guard
 and proposes merges. Apply an approved merge with:
 
 ```bash
+# On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
 python3 scripts/remember.py --table semantic --supersedes <id[,id...]> --text "<merged>" ...
 ```
 

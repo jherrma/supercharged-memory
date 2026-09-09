@@ -153,6 +153,7 @@ length, `why_safe` — **not** the full texts. Ask the user which to apply ("do
 1,3,4"). Then per approved merge:
 
 ```bash
+# On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
 python3 scripts/remember.py --table semantic --category <c> --topic "<t>" \
   --keywords "<k1, k2, ...>" --source deep-sleep --model <your-model-id> \
   --supersedes <id1,id2,id3> --text "<merged>"
@@ -209,6 +210,7 @@ session can check the claim against the episodic rows instead of trusting it.
 **5. Apply after approval:**
 
 ```bash
+# On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
 python3 scripts/remember.py --table semantic --category pattern --topic "<t>" \
   --keywords "<k1, k2, ...>" --source deep-sleep --model <your-model-id> \
   --text "<claim> ... Derived from episodic ids: 12, 44, 91." \
@@ -430,7 +432,9 @@ this rule verbatim:
 > "stale":["--old-flag"],"verdict":"current|stale|unverifiable","evidence":"one line
 > naming what you ran or read"}`. `stale` lists only artifacts you CONFIRMED are
 > gone or renamed — an artifact you could not check is `unverifiable`, never
-> `stale`. Do not propose replacement text and do not retire anything.
+> `stale`. On Windows invoke a script as `python`: the `python3` stub prints an
+> advert and exits 0, so a flag checked through it is `unverifiable`, not `stale`.
+> Do not propose replacement text and do not retire anything.
 
 **3. Present the batch.** One compact table: id, topic, age, verdict, the stale
 artifact, and the worker's evidence line — **not** the full texts. Then ask the user
