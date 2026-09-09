@@ -19,9 +19,17 @@ TURSO="${TURSO_BIN:-$HOME/.turso/tursodb}"
 # Written as an array with the ${a[@]+...} guard because macOS still ships bash
 # 3.2, where "${empty[@]}" under `set -u` is an unbound-variable error.
 if [ "${TURSO_VFS+set}" = set ]; then
-  case "$(printf '%s' "$TURSO_VFS" | tr '[:upper:]' '[:lower:]')" in
+  # memlib.py does _VFS_ENV.strip().lower(), so trim before deciding AND before
+  # passing the name on: without the trim, TURSO_VFS=" none " reaches --vfs
+  # verbatim and every open dies with `no such VFS:  none` while every Python
+  # script in the repo keeps working. Parameter expansion, not `tr -d`, so an
+  # interior space is preserved exactly as Python's .strip() preserves it.
+  VFS_NAME="$TURSO_VFS"
+  VFS_NAME="${VFS_NAME#"${VFS_NAME%%[![:space:]]*}"}"
+  VFS_NAME="${VFS_NAME%"${VFS_NAME##*[![:space:]]}"}"
+  case "$(printf '%s' "$VFS_NAME" | tr '[:upper:]' '[:lower:]')" in
     ""|none) VFS_ARGS=() ;;
-    *)       VFS_ARGS=(--vfs "$TURSO_VFS") ;;
+    *)       VFS_ARGS=(--vfs "$VFS_NAME") ;;
   esac
 else
   case "$(uname -s)" in
@@ -43,6 +51,15 @@ ok=0
 for i in 1 2 3 4 5; do
   if "$TURSO" "$DB" --experimental-multiprocess-wal ${VFS_ARGS[@]+"${VFS_ARGS[@]}"}        -q ".dump" > "$TMP" 2>"$ERR"; then
     if [ -s "$TMP" ] && grep -q "INSERT INTO" "$TMP"; then ok=1; break; fi
+  else
+    # tursodb refused to run at all. Retry only on contention -- the same phrase
+    # gate as memlib._is_busy, read off both streams because a contended write
+    # prints a bare `database is busy` with no diagnostic prefix and tursodb puts
+    # some diagnostics on stdout. Anything else (a bad --vfs name, a missing
+    # binary) fails identically on all five attempts, so the loop only delays the
+    # report by 25s. A false match on a dumped row quoting the phrase just costs
+    # the backoff we already paid today, so it cannot skip a genuine retry.
+    grep -Eqi 'database is (busy|locked)' "$ERR" "$TMP" || break
   fi
   sleep 5
 done
