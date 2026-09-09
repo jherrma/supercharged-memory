@@ -275,6 +275,12 @@ python3 <repo>/investigations/eval-harness.py --validate
 Exit 0 = every case points at a live, current row; go to D6.2. Otherwise it prints
 each broken case with a proposed replacement from the supersede chain.
 
+Exit 0 with `nothing to validate` = `eval_cases` holds no cases at all. That is the
+fresh-install case the preamble above already tells you to skip D6 on, reported as
+what it is rather than as a failure — an empty case set has nothing pointing at a
+purged, superseded or reused row. The scoring modes (`--report`, `--sweep`,
+`--variants`) still exit 1 there: there is no metric to compute.
+
 - `<old> -> <new>` — the target was merged in D3. Repointing is correct: same fact,
   new row id. Apply it, and refresh that target's stamp:
   `UPDATE eval_cases SET expect_ids='...', expect_stamps=(SELECT created_at FROM
@@ -461,6 +467,12 @@ the topic index (D5's command), because the corpus changed after both ran:
 ```bash
 python3 <repo>/investigations/eval-harness.py --validate
 ```
+
+On a corpus with no authored eval cases this prints `nothing to validate` and exits
+0. That is the expected outcome, not a failing step to stop on: a fresh install has
+no cases, and `MIGRATE-EXISTING-MEMORY.md` M4 reaches this step with D6 deliberately
+skipped for exactly that reason. Note it in the report and carry on to the topic
+rebuild.
 
 **5. Report:** candidates listed vs. checked, rows found stale, what the user chose
 per row, workers that died (a gap, not a silent omission), and the `n_no_artifacts`

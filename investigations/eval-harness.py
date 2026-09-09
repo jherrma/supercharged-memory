@@ -5,6 +5,11 @@ Modes:
   --validate            check every eval case still points at rows that exist and are
                         current truth; propose replacements where a supersede chain
                         moved the target. Run after deep sleep's D2 purge / D3 merges.
+                        Exits 0 with "nothing to validate" when no cases have been
+                        authored yet -- that is not a validation failure, and the
+                        runbooks that call this unconditionally would otherwise stall
+                        on a fresh install. Every other mode still exits 1 there:
+                        they have nothing to measure.
   --report              score the SHIPPED recall.py ranking at the current
                         RECALL_ALPHA, append to history.jsonl, diff vs the last run.
   --sweep A,B,C         score the shipped formula across alpha values, print the
@@ -67,7 +72,7 @@ def legacy_tokens(query):
 
 
 # ---------------- data -----------------------------------------------------
-def load_cases():
+def load_cases(allow_empty=False):
     out = M.exec_sql("SELECT id, class, memory_table, expect_ids, expect_stamps, query "
                      "FROM eval_cases WHERE retired_at IS NULL ORDER BY id;", mode="list")
     cases = []
@@ -79,7 +84,7 @@ def load_cases():
         cases.append({"id": cid, "class": cls, "table": tbl, "query": q,
                       "expect": [int(x) for x in ids.split(",") if x],
                       "stamps": stamps.split(",")})
-    if not cases:
+    if not cases and not allow_empty:
         sys.exit("no eval cases in the DB (table eval_cases is empty).\n"
                  "  Migrate a legacy file set with --import <dir>, or author cases in\n"
                  "  deep sleep D6.3. Do NOT auto-generate them from memory_text — a query\n"
@@ -381,9 +386,23 @@ def main():
     if a.import_dir:
         import_files(a.import_dir)
         return
-    cases = load_cases()
+    # --validate alone tolerates an empty case set: "nothing to validate" is a
+    # different answer from "validation failed", and DEEP-SLEEP.md D7 step 4 and
+    # MIGRATE-EXISTING-MEMORY.md M4 both run this command unconditionally after a
+    # retirement, under a "stop if any step fails" convention. Scoring modes still
+    # exit on an empty set -- there is no metric to compute.
+    cases = load_cases(allow_empty=a.validate)
 
     if a.validate:
+        if not cases:
+            print(f"eval_cases: 0 live case(s) in {M.DB}\n")
+            print("  nothing to validate — no eval cases have been authored yet, so no "
+                  "case\n  can be pointing at a purged, superseded or reused row.")
+            print("  Expected on a fresh install and on a corpus that was just imported "
+                  "by\n  MIGRATE-EXISTING-MEMORY.md. Author cases in deep sleep D6.3 "
+                  "(never\n  auto-generated from memory_text), or migrate a legacy file "
+                  "set with\n  --import <dir>.")
+            sys.exit(0)
         sys.exit(1 if validate(cases) else 0)
 
     classes = sorted({c["class"] for c in cases})
