@@ -407,6 +407,12 @@ def verify_candidates(table, limit):
 
 def rebuild_topics():
     M.require_db()
+    # stdin decodes with the ANSI codepage on Windows, so an em-dash or umlaut in a
+    # topic/keyword payload would land in topic_keywords mis-decoded. Re-read as UTF-8.
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
     rows = json.load(sys.stdin)
     if not isinstance(rows, list):
         sys.exit("refused: stdin must be a JSON array of {topic, keywords} objects.")

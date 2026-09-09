@@ -23,7 +23,7 @@ COPY_TABLES = MEM_TABLES + ["eval_cases", "topic_keywords"]
 def run_file(db, sql_text):
     """Pipe a multi-statement script into tursodb. Piping (not argv) is what keeps
     2000-char memory_text plus a 1024-float vector literal off the command line."""
-    p = subprocess.run([M.TURSO, str(db), M.FLAG], input=sql_text,
+    p = subprocess.run([M.TURSO, str(db), *M.OPEN_ARGS], input=sql_text,
                        capture_output=True, text=True, encoding="utf-8", timeout=900)
     if p.returncode != 0 or "error" in p.stderr.lower():
         sys.exit(f"tursodb failed rc={p.returncode}\n  stderr: {p.stderr.strip()[:600]}"
@@ -49,7 +49,7 @@ def read_rows(db, table):
     # F32_BLOB and fails the whole statement. It is regenerated anyway.
     cols = [c for c in columns(db, table) if c != "embedding"]
     args = ",".join(f"'{c}',{c}" for c in cols)
-    p = subprocess.run([M.TURSO, str(db), M.FLAG, "-q", "-m", "list",
+    p = subprocess.run([M.TURSO, str(db), *M.OPEN_ARGS, "-q", "-m", "list",
                         f"SELECT json_object({args}) FROM {table};"],
                        capture_output=True, text=True, encoding="utf-8", timeout=180)
     if p.returncode != 0 or "error" in p.stderr.lower():
@@ -77,7 +77,7 @@ def qm(v):
 
 
 def columns(db, table):
-    p = subprocess.run([M.TURSO, str(db), M.FLAG, "-q", "-m", "list",
+    p = subprocess.run([M.TURSO, str(db), *M.OPEN_ARGS, "-q", "-m", "list",
                         f"SELECT name FROM pragma_table_info('{table}');"],
                        capture_output=True, text=True, encoding="utf-8", timeout=60)
     return [c for c in p.stdout.split() if c]

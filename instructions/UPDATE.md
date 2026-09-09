@@ -10,6 +10,16 @@ Work from the repository root. Report each step in one line. **Ask before
 applying anything** — this runbook reads and reports on its own, but never
 changes the machine without the user's ok.
 
+> **On Windows, run every `python3` in this file as `python`, and add `--vfs
+> experimental_win_iocp` to every `tursodb` command in it.** There is no
+> `python3` on Windows: the name is a Microsoft Store alias stub that prints
+> `Python was not found` **and exits 0**, so a command reads as a successful,
+> empty result and the agent reports work it never did. And
+> `--experimental-multiprocess-wal` on its own is refused by Windows' default IO
+> backend (`experimental multiprocess WAL is not supported by the active IO
+> backend`), so a `tursodb` line without the VFS does nothing at all — pair the
+> two flags, never drop the WAL one. See `instructions/SETUP.md`, section *Windows*.
+
 Two variables used throughout:
 
 - `TARGET` — the installed instructions, default `~/.claude/CLAUDE.md`
@@ -156,6 +166,13 @@ EPISODIC_MODE="$EPISODIC_MODE" SUPERCHARGED_MEMORY_TURSO_PATH="$DB" \
 
 It replaces the managed block and writes the new stamp. Any content the user has
 outside the markers is left untouched.
+
+Passing both values is a cross-check, not the only guard: the installer itself reads
+`EPISODIC_MODE` back out of the block it is about to replace, and refuses the run
+outright if `BASE_PATH` differs from the one that block was rendered from (override
+with `ALLOW_BASE_PATH_CHANGE=1` only when the repo really moved). Its closing report
+names where each value came from — check that `EPISODIC_MODE` reads `env` or
+`recovered from the existing block`, never `script default`.
 
 ## Step 7 — Report
 
