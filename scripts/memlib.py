@@ -211,10 +211,21 @@ ERR_LINE_RE = re.compile(r"^\s*(?:[×x]\s|[│|]\s|Error:)")
 
 
 def _is_busy(stderr, stdout):
-    """True only when tursodb itself reported contention, never for row/SQL text."""
-    if BUSY_RE.search(stderr):
-        return True
-    return any(BUSY_RE.search(ln) for ln in stdout.splitlines() if ERR_LINE_RE.match(ln))
+    """True only when tursodb itself reported contention, never for row/SQL text.
+
+    Deliberately NOT gated on ERR_LINE_RE. Contention is the one stdout error
+    that carries no diagnostic prefix at all: a contended write prints exactly
+    `database is busy` -- no miette bullet, no `Error:`, no leading whitespace
+    (verified on 0.7.2 by holding BEGIN IMMEDIATE in a second process). Requiring
+    a prefix here meant the backoff never fired, which is the invariant that lets
+    several Claude sessions share one DB.
+
+    Scanning the whole of stdout is safe because callers pass it only once the run
+    has already FAILED -- nothing landed, so a retry cannot duplicate a write. The
+    cost of being wrong is a few seconds of pointless backoff before the same
+    exception; the cost of the prefix gate was silent data loss.
+    """
+    return bool(BUSY_RE.search(stderr) or BUSY_RE.search(stdout))
 
 
 def _stdout_reports_failure(stdout):
