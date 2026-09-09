@@ -143,9 +143,13 @@ Setup Step 7 offers it; you can also ask for it later ("migrate my memory").
 
 - **`scripts/find-existing-memory.py`** — read-only scan, needs neither the
   database nor Ollama. Reports what exists per file: `kind` (`memory` / `index` /
-  `claude`), `scope` (`global` / `project`), char count against the 2000-char
-  `MAX_TEXT`, and files it could not read. Counts cover `kind: memory` only, so a
-  plain `CLAUDE.md` is not reported as memory to migrate.
+  `claude` / `empty`), `scope` (`global` / `project`), char count against the
+  2000-char `MAX_TEXT`. Counts of what there is to import cover `kind: memory`
+  only, so a plain `CLAUDE.md` is not reported as memory to migrate. Everything it
+  leaves out lands in a reported field instead of vanishing — `over_max_text`,
+  `empty` (nothing to import; the writer refuses an empty `--text`), `unreadable`
+  (unreadable file or directory, broken symlink, symlink loop) and `excluded_dirs`
+  (`.git`/`agents` at a memory root, or a symlink pointing above it).
 - **Additive, not reversible.** No source file is deleted or edited, and every row
   carries `source='migration'` plus a `file_reference` back to its file. There is
   no bulk undo of the imported rows, though: the source files are always the way

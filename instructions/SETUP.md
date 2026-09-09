@@ -211,9 +211,12 @@ python3 scripts/find-existing-memory.py
 
 - **`n_memory_files` is 0** → nothing to do. Say so in one line and continue to
   Step 8. A `CLAUDE.md` on its own counts as `n_claude_files`, not as memory:
-  instructions are not facts, and there is nothing there to import.
-- **Anything found** → report the totals (files, characters, how many exceed the
-  2000-char `MAX_TEXT`) and **ask whether to migrate it into the database**. On
+  instructions are not facts, and there is nothing there to import. Same for an
+  empty `.md` file (`n_empty_files`) — the writer refuses an empty `--text`.
+- **Anything found** → report the totals — `n_memory_files`, `total_chars`, and
+  `over_max_text` (the files above the 2000-char `MAX_TEXT`) — plus any non-empty
+  `unreadable` / `excluded_dirs` / `empty`, which are the probe's own gaps and are
+  reported nowhere else. Then **ask whether to migrate it into the database**. On
   yes, follow `instructions/MIGRATE-EXISTING-MEMORY.md`, which imports the files
   as semantic memory and then runs the deep-sleep phases that apply (compaction,
   the required topic-index rebuild, and the Verify pass — imported memory is old
