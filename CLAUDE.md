@@ -47,7 +47,7 @@ A commit cannot reference its own sha, so **the note goes in the commit immediat
 
 ## Runtime dependencies (not installed by this repo)
 
-- **tursodb** (Turso 0.7.1, Rust SQLite rewrite w/ native vectors) — `curl -sSL tur.so/install | sh`. Registered as the `turso` MCP server for ad-hoc SQL. Its `current_database` MCP tool misreports `:memory: (default)` for a CLI-opened DB ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061)) — verify with a real `SELECT`, never `open_database`.
+- **tursodb** (Turso 0.7.2 — the targeted version; 0.7.0+ is the floor. Rust SQLite rewrite w/ native vectors) — `curl -sSL tur.so/install | sh`. Registered as the `turso` MCP server for ad-hoc SQL. Its `current_database` MCP tool misreports `:memory: (default)` for a CLI-opened DB ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061)) — verify with a real `SELECT`, never `open_database`.
 - **Ollama** at `localhost:11434` running the **bge-m3** embedding model (`ollama pull bge-m3`), 1024-dim.
 
 ## Common commands

@@ -22,7 +22,9 @@ Neither dependency is bundled — install both before setup.
 
 ### Turso (`tursodb`)
 
-Turso 0.7.0+ — the Rust rewrite of SQLite with native vector support.
+Turso 0.7.0+ — the Rust rewrite of SQLite with native vector support. **0.7.2 is
+what this project targets**, and what the behaviour documented here was verified
+against; 0.7.0 remains the floor, not a tested version.
 
 ```bash
 curl -sSL tur.so/install | sh

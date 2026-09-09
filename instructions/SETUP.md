@@ -342,7 +342,8 @@ a session, the user tells the agent "load <Name>."
 ## Windows
 
 Verified on Windows 11 (26100), Git Bash from Git for Windows, PowerShell 5.1,
-Python 3.14, `tursodb` 0.7.2, Ollama 0.33.3. Everything in this runbook works
+Python 3.14, `tursodb` 0.7.2 (the targeted version, also verified on Linux),
+Ollama 0.33.3. Everything in this runbook works
 there, but four things differ and two of them fail *silently* — they look like
 success, which is worse than an error.
 
