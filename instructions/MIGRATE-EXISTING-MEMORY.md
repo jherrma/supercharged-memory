@@ -28,7 +28,10 @@ SELECT id, topic, file_reference FROM semantic_memory WHERE source='migration';
 - **Never `--force`.** `remember.py`'s near-duplicate guard rejecting a row is a
   correct outcome on a corpus of overlapping notes, not an obstacle.
 - **Never truncate.** A file over the 2000-char `MAX_TEXT` is split into separate
-  facts, or condensed with the user's agreement.
+  facts, or condensed with the user's agreement. Note the writer appends
+  `--keywords` into the stored text and counts them inside the same limit, so aim
+  at roughly 1800 chars of prose — otherwise the write is refused after the work
+  of composing it.
 - **Never mint a `baseline` row on your own.** That category needs
   `--confirm-baseline` and the user's explicit go-ahead, per `CLAUDE.md`.
 - The orchestrator does not read memory files in bulk — same subagent contract as
@@ -97,10 +100,20 @@ dump is what makes "start over" cheap.
 
 ## M3 — Classify and write, in subagents
 
+**Agree a closed topic vocabulary BEFORE dispatching anything.** This is the one
+decision that cannot be fixed afterwards cheaply. `remember.py` accepts any
+`--topic` string, so independent workers invent one topic per file — and the topic
+index in M4/D5 has a hard 500-char cap across *all* topics, which a few hundred
+per-file topics cannot be squeezed into. Derive ten to fifteen topics from the
+structure the corpus already has (a `MEMORY.md` index's own section headings are
+the obvious source), give every worker that exact list, and tell them to pick the
+closest match and say so in the report rather than inventing a new one. Fixing
+this later means re-topicking every row by hand.
+
 Batch the files into groups of **≤8** and dispatch one worker per batch, all in
 one message. Each worker prompt must be self-contained: the file paths it owns,
-the category table below, the exact `remember.py` invocation, and your model id
-for `--model`.
+the topic vocabulary, the category table below, the exact `remember.py`
+invocation, and your model id for `--model`.
 
 ### Category mapping
 
@@ -151,8 +164,18 @@ Give each worker this rule verbatim:
 >   [--project "<project>"] --text "<self-contained fact>"
 > ```
 >
+> Compose the memory text with the Write tool into a temp file and pass it as
+> `--text "$(cat <file>)"`. Do NOT build it in a bash heredoc: the texts contain
+> backticks, `$` and emoji, which a heredoc mangles silently.
+>
 > If the writer rejects a row as a near-duplicate, **do not retry with
 > `--force`** — report it as `duplicate` and move on.
+>
+> If a write is refused with `Blocked by classifier`, report that row as
+> `skipped(blocked by classifier)` and name the fact. Do **not** look for a
+> rewording that gets through: the block is a guardrail, and a memory whose
+> content is a recipe for evading one should not be persisted for every future
+> session to read.
 >
 > Report one line per file and nothing else:
 > `<file> -> stored(<id>[,<id>]) | duplicate | skipped(<short reason>)`
@@ -173,6 +196,27 @@ be stale, and the date is the only signal those phases have.
 
 `--file-reference` is what makes the import auditable and reversible, and it is
 the only link back to the file a row came from.
+
+## M3b — If the run is interrupted, resume from the database
+
+A bulk import will not always finish in one go — a worker can die, and a session
+can hit a spend or rate limit mid-batch. Do not restart from the beginning, and
+do not assume the batch list is still where you were:
+
+```sql
+SELECT file_reference, count(*) FROM semantic_memory WHERE source='migration'
+GROUP BY file_reference;
+```
+
+That is the resume position, and it is why `--file-reference` is mandatory in M3.
+Re-derive the remaining set as *files with no rows*, plus *every file from a batch
+whose worker died* — the latter may be half-written, and nothing else can tell you
+which. Re-running a fully imported file is cheap and safe: every row comes back
+`duplicate`. Re-running a half-written one is the whole point, since the guard
+rejects the facts already stored and accepts only the missing ones.
+
+Give resumed workers the same "check what is already there first" query, so they
+skip finished files instead of re-reading them.
 
 ## M4 — Consolidate (the deep-sleep phases that apply)
 
