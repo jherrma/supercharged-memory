@@ -59,6 +59,15 @@ it protects D3.
   of composing it.
 - **Never mint a `baseline` row on your own.** That category needs
   `--confirm-baseline` and the user's explicit go-ahead, per `CLAUDE.md`.
+- **Not `backfill.py`, even though it looks like the tool for this.** It is the
+  bulk `.md` importer `CLAUDE.md` points at on an `EMPTY` database, but it is
+  built for a fresh start from arbitrary notes, not for this corpus: it passes
+  `force=True` (so it stores every near-duplicate — the opposite of the rule
+  above, on a corpus whose premise is overlap), sets `topic=<file stem>` (the
+  per-file topic explosion M3 calls unfixable afterwards), writes
+  `source='backfill'`, and passes neither `--file-reference` nor `--created-at`
+  (so no resume position, no audit trail, and every row dated today). Use it only
+  if the user explicitly asks for a raw dump and accepts all four.
 - The orchestrator does not read memory files in bulk — same subagent contract as
   `SLEEP.md`. The context cost of reading a few hundred files into the session
   running the migration is the reason that contract exists.
@@ -87,11 +96,21 @@ python3 scripts/find-existing-memory.py
 ```
 
 Returns `config_dir`, `n_memory_files`, `n_index_files`, `n_claude_files`,
-`n_global`, `n_project`, `projects`, `total_chars`, `over_max_text`, `unreadable`
-(files it could not open — a gap, report it), and a `files` list where each entry
-carries `kind`, `scope` (`global` or `project`) and `project_dir`. Every count and
-total covers `kind: memory` files only, so a user who has a `CLAUDE.md` and no
-memory files gets `n_memory_files: 0` and is offered nothing.
+`n_empty_files`, `n_global`, `n_project`, `projects`, `total_chars`, and a `files`
+list where each entry carries `kind`, `scope` (`global` or `project`) and
+`project_dir`. Every count and total of memory *to import* covers `kind: memory`
+files only, so a user who has a `CLAUDE.md` and no memory files gets
+`n_memory_files: 0` and is offered nothing.
+
+Four fields are the probe's gaps — **report each non-empty one**, because nothing
+else will:
+
+| field | what it holds |
+|---|---|
+| `over_max_text` | memory files above the 2000-char cap: split or condense, never truncate |
+| `empty` | `.md` files with no content. `remember.py` exits `refused: --text is empty` on one, so there is nothing to import — they are counted as `n_empty_files`, not as memory |
+| `unreadable` | `{path, reason}`: a file that could not be read, a broken symlink, a directory that could not be listed (its contents are invisible, not absent), a symlink loop |
+| `excluded_dirs` | `{path, n_md, reason}`: directories left out on purpose — `.git`/`agents` at a memory root (Claude Code's own protected subdirectories), or a symlink pointing above the memory root. `n_md` says how much is in there, so a *topic* directory that happens to be named `agents` is visible rather than silently dropped |
 
 | `kind` | What it is | How to treat it |
 |---|---|---|
@@ -113,9 +132,15 @@ Then ask whether to migrate, and offer the scope choice explicitly:
    survives**: that column means a tracking-tool work-item id (ClickUp/Jira, e.g.
    `869e7xzp6`), while all the scanner can offer is `project_dir` — Claude Code's
    mangled cwd (`-home-alex-Documents-Repositories-supercharged-memory`). That is
-   not an id, and a long one exceeds the column's `length(project) <= 128` check,
-   which `remember.py` does not pre-validate: it surfaces as a raw constraint
-   failure mid-batch. So leave `--project` unset unless the user names a real
+   not an id, and a slug **starts with a hyphen**, so `--project <slug>` never
+   even reaches the database: argparse reads it as a flag and exits
+   `remember.py: error: argument --project: expected one argument`. Only
+   `--project=<slug>` gets through, and then a slug long enough to exceed
+   `length(project) <= 128` surfaces as an uncaught
+   `RuntimeError: ... CHECK constraint failed: length (project) <= 128`, after
+   the embedding call was already paid for (verified 2026-09-09; a 53-char slug
+   passed the check and stored, which is the point — the column accepts it and it
+   is still not an id). So leave `--project` unset unless the user names a real
    work-item id, and carry the scope in the **text** instead — the fact's
    situation line names the repository or directory it applies to, which the
    `project_dir` slug is readable enough to derive. `file_reference` keeps the
@@ -249,6 +274,12 @@ different repository: `git log -- ~/.claude/memory/foo.md` from here fails with
 history", and every row quietly gets today's date — the outcome the
 paragraph below warns about:
 
+Substitute the **absolute** path for `<file>` throughout — the same one M3 passes
+to `--file-reference`. A pathspec is resolved relative to `git -C`'s directory, so
+`-- <relative path>` under `git -C "$d"` matches nothing and returns empty with
+exit 0, which is the same silent "no history" this snippet exists to avoid
+(measured: absolute path → `2026-09-08 17:18:33`, the repo-relative one → empty).
+
 ```bash
 d="$(dirname "<file>")"
 when=""
@@ -257,11 +288,30 @@ if git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   when="$(git -C "$d" log --diff-filter=A --reverse \
             --format=%ad --date=format:'%Y-%m-%d %H:%M:%S' -- "<file>" | head -1)"
 fi
-[ -n "$when" ] && src=git || { when="$(date -r "<file>" '+%Y-%m-%d %H:%M:%S')"; src=mtime; }
+if [ -n "$when" ]; then src=git
+elif s="$(stat -c %y "<file>" 2>/dev/null)"; then when="${s%%.*}"; src=mtime  # GNU
+else when="$(date -r "$(stat -f %m "<file>")" '+%Y-%m-%d %H:%M:%S')"; src=mtime  # BSD
+fi
 ```
 
+**`date -r "<file>"` is GNU-only — do not use it for the fallback.** GNU `date -r`
+takes a *reference file*; BSD/macOS `date -r` takes epoch **seconds** (Apple's
+`shell_cmds` `date.c` parses the argument with `strtoq` and prints usage if
+anything is left over), so on macOS it fails and `when` stays empty. That is the
+*normal* path there: `~/.claude/memory` is not a git work tree, so every file
+takes the fallback. `remember.py` used to read an empty `--created-at` as "not
+given" and stamp `CURRENT_TIMESTAMP` while the worker still reported `mtime` — a
+whole batch dated today reading as a clean run. It now refuses the write
+(`refused: --created-at is empty`), which turns that into a reported failure
+rather than a wrong date, but the fallback still has to be right. `stat -c %y` (GNU) /
+`stat -f %m` (BSD) is the portable pair; the `${s%%.*}` trims GNU's fractional
+seconds and zone off `2025-03-04 09:12:07.000000000 +0100`.
+
 Each worker reports which source it used per file (`git` or `mtime`), so a batch
-that fell back for every file is visible instead of reading as a clean run.
+that fell back for every file is visible instead of reading as a clean run. **If
+`when` is empty after the branch above, report the file as `date=none` and omit
+`--created-at` entirely** — an empty value is now refused rather than stored, so
+the row is simply not written until you decide what its date is.
 
 Importing everything with today's date makes `sleep.py --staleness` and deep
 sleep's D7 describe a corpus that looks brand new while holding facts that are a
@@ -296,39 +346,64 @@ skip finished files instead of re-reading them.
 
 An import writes N rows from files that overlapped, with no topic index at all.
 Follow `DEEP-SLEEP.md`, but only the phases that have anything to do — and say in
-the report which you skipped and why:
+the report which you skipped and why.
+
+**Every "skip" below is a fact about an `EMPTY` database, not about this runbook.**
+M0 admits `READY n` too, and on a database that already held rows four of them
+flip — the episodic log, the superseded rows and the eval cases are all the user's
+own, and they predate the import. Check which case M0 reported before stating a
+skip to the user as a reason.
 
 | Phase | Run it? | Why |
 |---|---|---|
-| D0 normal sleep first | skip | D0 exists to sift unprocessed episodic rows into semantic facts; an import writes none, so there is nothing for it to do. Skipping it is the one deviation from `DEEP-SLEEP.md`'s "always enter through a sleep pass" — say so in the report |
+| D0 normal sleep first | skip on `EMPTY` | D0 exists to sift unprocessed episodic rows into semantic facts; an import writes none, so on a database it just filled there is nothing to sift. Skipping it is the one deviation from `DEEP-SLEEP.md`'s "always enter through a sleep pass" — say so in the report. **On `READY n`: run it.** Unprocessed episodic rows are exactly what D0 demands a sleep pass for, and compacting without them merges against stale content |
 | D1 backup | **yes** | D3 writes; this is the undo |
-| D2 purge | skip | nothing is superseded or retired yet |
-| D3 compaction | **yes** | the point of this phase: the files overlapped, so the rows do too |
-| D4 pattern mining | skip | patterns come from episodic events, and there are none |
+| D2 purge | skip on `EMPTY` | nothing is superseded or retired in a database the import just filled. **On `READY n`: run the D2 listing** before telling the user nothing is there — earlier revisions and retirements are what it finds, and the decision is theirs every run |
+| D3 compaction | **yes** | the point of this phase: the files overlapped, so the rows do too. Carry the oldest input's `--created-at` — see below |
+| D4 pattern mining | skip on `EMPTY` | patterns come from episodic events, and an import writes none. **On `READY n`: it applies unchanged** — that episodic log is the user's own history |
 | D5 re-index | **yes, required** | `CLAUDE.md` loads the topic index every session, and it is empty until rebuilt |
-| D6 eval upkeep | skip | no eval cases exist on a fresh install |
+| D6 eval upkeep | skip on `EMPTY` | `eval_cases` is empty on a fresh install, and D6 says to skip and say so. **On `READY n`: required.** D6 runs after D3 precisely because a merge breaks an eval case. Reproduced 2026-09-09: a case pointing at a row D3 merged makes `eval-harness.py --validate` print `s01 [semantic] NO VALID TARGET LEFT` over `2 -> 3 (superseded; repoint)` and exit 1. Skipping D6 leaves every case D3 just broke pointing at a superseded row, and the next run reads it as a ranking regression |
 | D7 Verify | **yes** | imported memory is old by definition; its paths, flags and versions may already be stale |
 
-**Capture the import manifest before D3 runs.** D3 merges with
-`remember.py --supersedes` and `--source deep-sleep`, and passes no
-`--file-reference` — so a merged survivor drops out of both the
-`source='migration'` audit query at the top of this file and the M3b resume query.
-The rows most likely to be merged are exactly the imported ones, since overlap is
-why D3 is required here. Write the mapping to a file first, so "which rows came
-from the import, and from which file" stays answerable:
+**D3 must carry each merge's oldest input date.** `DEEP-SLEEP.md`'s D3 has the
+command and the reasoning; it matters here more than anywhere, because M3 dated
+every imported row on purpose and D3 proposes a lot of merges on this corpus (see
+below). A survivor stamped today throws that work away for exactly the rows most
+likely to be stale.
+
+**D3 does not cost you the provenance — the database stays the audit trail.** A
+`--supersedes` merge neither deletes nor rewrites its inputs: they keep
+`source='migration'` and their `file_reference`, gain a `superseded_by` pointing
+at the survivor, and both the audit query at the top of this file and the M3b
+resume query still return every one of them (verified after a 2-row merge,
+2026-09-09). The merge *adds* the old-id → survivor link, so after D3 the database
+holds strictly more than any export of it does.
+
+What can destroy that link is a **later** deep sleep's D2, which hard-deletes the
+superseded rows the user selects — and those are precisely the imported ones D3
+just superseded. So export the mapping as cheap insurance against that day, and
+take it **after** D3, when `superseded_by` is populated (before D3 it is all NULL,
+and that column is the half worth having):
 
 ```bash
-tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list \
-  "SELECT id, file_reference, topic FROM semantic_memory WHERE source='migration' ORDER BY id;" \
-  > "Backups/migration-manifest-$(date +%F).csv"
+"${TURSO_BIN:-$HOME/.turso/tursodb}" "$SUPERCHARGED_MEMORY_TURSO_PATH" \
+  --experimental-multiprocess-wal -q -m list \
+  "SELECT id, superseded_by, file_reference, topic FROM semantic_memory WHERE source='migration' ORDER BY id;" \
+  > "${BACKUP_DIR:-$PWD/Backups}/migration-manifest-$(date +%F).psv"
 ```
 
-(The same query through the `turso` MCP does just as well; what matters is that
-the mapping lands in a file. On Windows the open needs
+Three details that are wrong if copied carelessly: `-m list` emits `|`-delimited
+rows, so the file is not a `.csv`; `tursodb` is not necessarily on `PATH` (every
+script resolves it through `TURSO_BIN`, default `~/.turso/tursodb`); and the
+backup directory is `BACKUP_DIR`, which every script honours and which a user may
+well have moved off the repo. (The same query through the `turso` MCP does just as
+well; what matters is that the mapping lands in a file. On Windows the open needs
 `--vfs experimental_win_iocp` alongside the WAL flag.)
 
-After D3, that file is the audit trail; the database no longer is. Report where
-it was written.
+Report where it was written — and describe it as insurance, not as the audit
+trail. M4's D1 backup, one phase earlier, already holds the same mapping and more;
+the manifest's only advantage is that it answers a question with `grep` instead of
+a `restore.py` into a fresh database. It is optional. D1 is not.
 
 Two things to expect at import scale, so they do not read as failures:
 
@@ -348,10 +423,15 @@ Two things to expect at import scale, so they do not read as failures:
 were imported, and check that the right rows come back:
 
 ```bash
-python3 scripts/recall.py "<a question the old memory answered>"
+python3 scripts/recall.py --table semantic "<a question the old memory answered>"
 python3 scripts/recall.py --topics
 python3 scripts/recall.py --status      # expect READY n
 ```
+
+`--table semantic` is deliberate: the import writes no episodic rows, so a
+semantic-only query is both the one worth running and the one that cannot trip
+over an empty `episodic_memory` (`recall.py`'s default `both` sums over both
+tables; the fix for that lives in `recall.py`, not here).
 
 Do not proceed to the cleanup below until the user agrees recall works.
 
