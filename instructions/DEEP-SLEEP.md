@@ -13,11 +13,15 @@ Phases are numbered in execution order. **Every phase that writes runs its
 judgment in subagents and its decisions past the user** — see *Subagent contract*
 below for why, and how.
 
-> **On Windows, run every `python3` in this file as `python`.** There is no
+> **On Windows, run every `python3` in this file as `python`, and add `--vfs
+> experimental_win_iocp` to every `tursodb` command in it.** There is no
 > `python3` on Windows: the name is a Microsoft Store alias stub that prints
 > `Python was not found` **and exits 0**, so a command reads as a successful,
-> empty result and the agent reports work it never did. See
-> `instructions/SETUP.md`, section *Windows*.
+> empty result and the agent reports work it never did. And
+> `--experimental-multiprocess-wal` on its own is refused by Windows' default IO
+> backend (`experimental multiprocess WAL is not supported by the active IO
+> backend`), so a `tursodb` line without the VFS does nothing at all — pair the
+> two flags, never drop the WAL one. See `instructions/SETUP.md`, section *Windows*.
 
 ## Subagent contract
 

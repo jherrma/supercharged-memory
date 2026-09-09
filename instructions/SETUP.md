@@ -11,6 +11,16 @@ Work from the repository root. Report the outcome of each step in one line. Stop
 and surface the problem if any step fails — do not continue past a failed
 dependency.
 
+> **On Windows, run every `python3` in this file as `python`, and add `--vfs
+> experimental_win_iocp` to every `tursodb` command in it.** There is no
+> `python3` on Windows: the name is a Microsoft Store alias stub that prints
+> `Python was not found` **and exits 0**, so a command reads as a successful,
+> empty result and the agent reports work it never did. And
+> `--experimental-multiprocess-wal` on its own is refused by Windows' default IO
+> backend (`experimental multiprocess WAL is not supported by the active IO
+> backend`), so a `tursodb` line without the VFS does nothing at all — pair the
+> two flags, never drop the WAL one. See [Windows](#windows) below.
+
 ## Rules
 
 - **Ask before installing anything.** Before running any install command, tell
@@ -253,9 +263,19 @@ first** — on a re-run, a second machine, or after a path change, a fresh empty
 silently strands memory the user already has:
 
 ```bash
+# This gate is only worth as much as the interpreter that runs it, so prove the
+# interpreter first: the Store stub prints an advert and exits 0 (see Windows).
+python3 --version 2>&1 | grep -q '^Python 3' \
+  || echo "STOP: wrong interpreter — re-run this step with 'python'"
 python3 scripts/recall.py --candidates    # any DB/backup elsewhere?
 ```
 
+- **No output, or output that is not a `configured path :` line** → the script
+  never ran. Read this as *unknown*, **never** as "no candidates": that
+  misreading is what strands a user's real memory behind a fresh empty DB.
+  `--candidates` unconditionally prints `configured path : <path>` as its first
+  line, so its absence means the interpreter is wrong (on Windows, `python`) or
+  the path is. Fix it and re-run before creating anything.
 - **A `CANDIDATE DB` is listed** → do NOT create anything. Show the user the path
   and its memory count and ask whether that is their real memory. If yes, point
   `SUPERCHARGED_MEMORY_TURSO_PATH` at it (settings.json + profile + MCP) instead of
@@ -350,8 +370,16 @@ The scripts handle this themselves — `memlib.py` builds `OPEN_ARGS` from
 the backup script from `uname -s`. `TURSO_VFS` overrides the detection in both
 directions: a name switches the backend, and `TURSO_VFS=none` (or empty) drops
 `--vfs` altogether — which is what a tursodb that supports multiprocess WAL
-natively on Windows, or that renames the backend, will need. You only pass `--vfs` by
-hand when you invoke `tursodb` directly, which this runbook does once, in Step 6.
+natively on Windows, or that renames the backend, will need.
+
+**Every `tursodb` command you run by hand needs both flags yourself**, and the
+runbooks hand you several: Step 6 (schema load) and the MCP registration under
+*Done* in this file, the worker read command and the MCP fallback in `SLEEP.md`,
+the worker read command in `DEEP-SLEEP.md`, and whatever a `migration-steps/`
+note tells `UPDATE.md` to run — those notes are dated records of a past migration,
+written before Windows was supported, and are deliberately not retrofitted. Each
+runbook now says this in the note at its top; where this file writes the command
+out, the Windows form is given inline.
 
 ### 2. `python3` is a trap, not a missing command (silent failure)
 
@@ -372,8 +400,17 @@ that covers only the session prefix.
 `UPDATE.md` all spell commands `python3`, and an agent *executes* those lines —
 so `sleep.py --mark-processed`, `--purge … --confirm-purge` and
 `… | sleep.py --rebuild-topics` would each print the Store advert, exit 0, and be
-reported as done with nothing written. Each of those files now carries the same
-note at the top: on Windows, read every `python3` in it as `python`.
+reported as done with nothing written. All four files carry the same note at the
+top, covering both this and the `--vfs` pairing above: read every `python3` in
+the file as `python`, and add `--vfs experimental_win_iocp` to every `tursodb`
+command in it.
+
+The worst instance is Step 6's `recall.py --candidates`, the gate behind "never
+create a DB without checking for an existing one first" — under the stub it
+prints nothing, and *nothing* reads as "no candidates found", so the next step
+builds a fresh empty DB and strands the user's real memory. That is why Step 6
+proves the interpreter before running the gate and tells you to treat a missing
+`configured path :` line as unknown rather than empty.
 
 Check which one you have before trusting any script output:
 
