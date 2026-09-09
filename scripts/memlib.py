@@ -2,8 +2,8 @@
 """Shared helpers for the supercharged-memory scripts.
 
 Central place for: DB/Ollama config, embedding (with dim assert), compact vector
-literals, SQL escaping, and a robust tursodb runner (stderr-scoped error
-detection + busy backoff). Import as `memlib`.
+literals, SQL escaping, and a robust tursodb runner (error detection
+over both streams, phrase-scoped busy backoff). Import as `memlib`.
 """
 import json, os, re, subprocess, sys, time, urllib.request
 from pathlib import Path
@@ -15,7 +15,12 @@ TURSO = os.environ.get("TURSO_BIN", str(Path.home() / ".turso/tursodb"))
 # -- so the default is a hard UnicodeEncodeError on the first line of output, not
 # mojibake. Force UTF-8 with errors="replace": a wrong glyph on a legacy console
 # beats a traceback, and nothing here should die over a dash. No-op off Windows.
-if sys.platform == "win32":
+# sys.platform is "msys"/"cygwin" under an MSYS2 or Cygwin Python, and Git Bash is
+# the shell this repo's Windows path recommends -- so gate on all three, matching
+# supercharged-memory-backup.sh's `uname -s` test (MINGW*|MSYS*|CYGWIN*).
+IS_WINDOWS = sys.platform in ("win32", "msys", "cygwin")
+
+if IS_WINDOWS:
     for _stream in (sys.stdout, sys.stderr):
         try:
             _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -38,7 +43,14 @@ FLAG = "--experimental-multiprocess-wal"
 # script here fail on open. tursodb's own --help names the fix: pair the flag with
 # the IOCP backend. Dropping the flag instead is not an option -- it is what keeps
 # concurrent openers from being refused (see CLAUDE.md, Concurrency).
-VFS = os.environ.get("TURSO_VFS") or ("experimental_win_iocp" if sys.platform == "win32" else "")
+# TURSO_VFS overrides in both directions: name a different backend, or set it to
+# "none" (or empty) to drop --vfs altogether -- what a future tursodb supporting
+# multiprocess WAL natively on Windows, or renaming the backend, will need.
+_VFS_ENV = os.environ.get("TURSO_VFS")
+if _VFS_ENV is None:
+    VFS = "experimental_win_iocp" if IS_WINDOWS else ""
+else:
+    VFS = "" if _VFS_ENV.strip().lower() in ("", "none") else _VFS_ENV.strip()
 # Splat this everywhere tursodb is opened, so no call site can drift.
 OPEN_ARGS = [FLAG] + (["--vfs", VFS] if VFS else [])
 DIM = 1024
@@ -53,7 +65,8 @@ SEARCH_DIRS = [
     Path.home() / ".local/share/turso",
     Path.home() / "turso",
     Path.home() / ".turso",
-]
+] + [Path(os.environ[_v]) / "turso" for _v in ("LOCALAPPDATA", "APPDATA")
+     if os.environ.get(_v)]   # SETUP.md's recommended Windows location
 
 
 def db_exists():
@@ -67,7 +80,8 @@ def _count_memories(db_path):
             [TURSO, str(db_path), *OPEN_ARGS, "-q", "-m", "list",
              "SELECT (SELECT count(*) FROM semantic_memory) + "
              "(SELECT count(*) FROM episodic_memory);"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=15)
         if r.returncode != 0 or re.search(r"error", r.stderr, re.I):
             return None
         return int(r.stdout.strip().splitlines()[0])
@@ -160,27 +174,52 @@ def like_lit(tok):
     return "'%" + tok + "%'"
 
 
+# The two contention messages, matched as PHRASES. The bare words "busy" and
+# "locked" are not usable: a failed run echoes the offending SQL back (miette caret
+# diagram) plus any rows already scanned, so a query text or a row body holding
+# either word would turn a hard SQL error into a 6-attempt stall -- and
+# `recall.py "database is locked"` is a search this corpus invites.
+BUSY_RE = re.compile(r"database is (?:busy|locked)", re.I)
+# tursodb prefixes a reported error on stdout with a miette bullet ("  x Parse
+# error: ...", observed on 0.7.2). On stdout only those lines are diagnostics; the
+# rest is echoed SQL and row data, which must never drive a retry.
+ERR_LINE_RE = re.compile(r"^\s*(?:×|[Ee]rror:)")
+
+
+def _is_busy(stderr, stdout):
+    """True only when tursodb itself reported contention, never for row/SQL text."""
+    if BUSY_RE.search(stderr):
+        return True
+    return any(BUSY_RE.search(ln) for ln in stdout.splitlines() if ERR_LINE_RE.match(ln))
+
+
 def exec_sql(sql, mode="line"):
-    """Run one statement via tursodb. Error detection is stderr-scoped so row
-    data on stdout can't false-trigger it. Retries with backoff on busy/locked."""
+    """Run one statement via tursodb. A failure is detected on stderr AND stdout
+    (tursodb reports SQL-level errors on stdout), but only a `database is
+    busy/locked` phrase retries, with backoff."""
+    last = ""
     for attempt in range(6):
         r = subprocess.run([TURSO, DB, *OPEN_ARGS, "-q", "-m", mode, sql],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
         failed = r.returncode != 0 or re.search(r"error", r.stderr, re.I)
         # tursodb 0.7.2 reports SQL-level failures on STDOUT with an empty stderr
         # (observed on Windows); only CLI/open failures land on stderr. So the
         # busy/locked probe has to see stdout too -- but only once the process has
-        # actually failed. rc!=0 means nothing committed, which is what makes the
-        # retry safe: scanning stdout on a SUCCESSFUL run would let row data
-        # containing the word "locked" re-run a write that already landed.
-        stream = (r.stderr + r.stdout) if failed else r.stderr
-        if re.search(r"busy|locked", stream, re.I):
+        # actually failed, and only on stdout's diagnostic lines. rc!=0 means
+        # nothing committed, which is what makes the retry safe: scanning a
+        # SUCCESSFUL run's stdout would let row data re-run a landed write.
+        if failed:
+            last = r.stderr.strip() or r.stdout.strip() or "unknown tursodb error"
+        if _is_busy(r.stderr, r.stdout if failed else ""):
             time.sleep(0.3 * (attempt + 1))
             continue
         if failed:
-            raise RuntimeError(r.stderr.strip() or r.stdout.strip() or "unknown tursodb error")
+            raise RuntimeError(last)
         return r.stdout
-    raise RuntimeError("database busy after retries")
+    # Report what tursodb actually said -- a bare "busy after retries" hides
+    # which statement lost which lock.
+    raise RuntimeError(f"database busy after retries: {last}")
 
 
 def scalar(sql):
