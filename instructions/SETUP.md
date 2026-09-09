@@ -346,8 +346,11 @@ instead (see `CLAUDE.md`, Concurrency). Every opener needs both: the schema
 load, the MCP registration, and each script.
 
 The scripts handle this themselves — `memlib.py` builds `OPEN_ARGS` from
-`sys.platform`, and the backup script from `uname -s`. `TURSO_VFS` overrides the
-detection if a future release changes the backend name. You only pass `--vfs` by
+`sys.platform` (`win32`, plus `msys`/`cygwin` for an MSYS2 or Cygwin Python), and
+the backup script from `uname -s`. `TURSO_VFS` overrides the detection in both
+directions: a name switches the backend, and `TURSO_VFS=none` (or empty) drops
+`--vfs` altogether — which is what a tursodb that supports multiprocess WAL
+natively on Windows, or that renames the backend, will need. You only pass `--vfs` by
 hand when you invoke `tursodb` directly, which this runbook does once, in Step 6.
 
 ### 2. `python3` is a trap, not a missing command (silent failure)
@@ -362,8 +365,15 @@ python3 scripts/recall.py --status     # prints a Store advert, exit code 0, no 
 reads as a *successful, empty* status. A session that trusts it concludes the
 memory DB is empty and can go on to offer restoring a backup over a database that
 was never broken. Use `python`. `install-claude-md.sh` renders `python` into
-`~/.claude/CLAUDE.md` automatically on Windows (`PYTHON_BIN` overrides it), so
-this only matters for commands you type yourself while following the runbook.
+`~/.claude/CLAUDE.md` automatically on Windows (`PYTHON_BIN` overrides it), but
+that covers only the session prefix.
+
+**It does not cover the runbooks.** This file, `SLEEP.md`, `DEEP-SLEEP.md` and
+`UPDATE.md` all spell commands `python3`, and an agent *executes* those lines —
+so `sleep.py --mark-processed`, `--purge … --confirm-purge` and
+`… | sleep.py --rebuild-topics` would each print the Store advert, exit 0, and be
+reported as done with nothing written. Each of those files now carries the same
+note at the top: on Windows, read every `python3` in it as `python`.
 
 Check which one you have before trusting any script output:
 

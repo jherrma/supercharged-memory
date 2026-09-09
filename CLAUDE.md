@@ -52,7 +52,7 @@ A commit cannot reference its own sha, so **the note goes in the commit immediat
 
 ## Common commands
 
-All scripts honor env overrides `TURSO_BIN`, `SUPERCHARGED_MEMORY_TURSO_PATH`, `BACKUP_DIR`, `OLLAMA_URL`, `EMBED_MODEL` (defaults in `scripts/memlib.py`), plus `RECALL_ALPHA` (`scripts/recall.py`).
+All scripts honor env overrides `TURSO_BIN`, `SUPERCHARGED_MEMORY_TURSO_PATH`, `BACKUP_DIR`, `OLLAMA_URL`, `EMBED_MODEL` (defaults in `scripts/memlib.py`), plus `RECALL_ALPHA` (`scripts/recall.py`), `TURSO_VFS` (tursodb IO backend; `none` disables it — Windows detail, see `instructions/SETUP.md`) and `PYTHON_BIN` (`scripts/install-claude-md.sh`).
 
 ```bash
 # Activation — render template into ~/.claude/CLAUDE.md (idempotent; re-run after any edit)
@@ -106,7 +106,7 @@ python3 scripts/seed.py                          # empty by default; add SEM/EPI
 
 ## Architecture
 
-**`scripts/memlib.py` is the shared core** every script imports — config/env, `embed()` (asserts 1024 dims), vector literal formatting, SQL escaping (`q`, `like_lit`), and `exec_sql()`, the one tursodb runner: it detects errors on **stderr only** (so row data on stdout can't false-trigger) and retries with backoff on `busy|locked`. Everything else is a thin CLI on top of it.
+**`scripts/memlib.py` is the shared core** every script imports — config/env, `embed()` (asserts 1024 dims), vector literal formatting, SQL escaping (`q`, `like_lit`), and `exec_sql()`, the one tursodb runner: it detects a failure on **stderr and stdout** (tursodb reports SQL-level errors on stdout) and retries with backoff only on the phrase `database is busy|locked`, never on the bare words — a query text or a row body can contain those. Everything else is a thin CLI on top of it.
 
 **Two memory tables (`schema.sql`), one row per memory, no chunking:**
 - `semantic_memory` — timeless facts, **revisable** via a supersede chain (`superseded_by IS NULL` = current truth) and soft-deletable via `retired_at` (set only by `sleep.py --retire`; current truth also requires `retired_at IS NULL`). Category ∈ `baseline|user|feedback|project|reference`.

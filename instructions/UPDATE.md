@@ -10,6 +10,12 @@ Work from the repository root. Report each step in one line. **Ask before
 applying anything** — this runbook reads and reports on its own, but never
 changes the machine without the user's ok.
 
+> **On Windows, run every `python3` in this file as `python`.** There is no
+> `python3` on Windows: the name is a Microsoft Store alias stub that prints
+> `Python was not found` **and exits 0**, so a command reads as a successful,
+> empty result and the agent reports work it never did. See
+> `instructions/SETUP.md`, section *Windows*.
+
 Two variables used throughout:
 
 - `TARGET` — the installed instructions, default `~/.claude/CLAUDE.md`

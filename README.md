@@ -101,6 +101,7 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 | `EMBED_MODEL` | `bge-m3` | Embedding model; one per DB. |
 | `RECALL_ALPHA` | `0.15` | Keyword weight in recall ranking. Corpus-calibrated — see below. |
 | `BACKUP_DIR` | `./Backups` | Where daily dumps are written. |
+| `TURSO_VFS` | `experimental_win_iocp` on Windows, else unset | tursodb IO backend, paired with `--experimental-multiprocess-wal`. Set it to `none` (or empty) to drop `--vfs` entirely. See `instructions/SETUP.md`, *Windows*. |
 | `SUPERCHARGED_MEMORY_EVAL_DIR` | `<db parent>/eval` | Query-embedding cache for the eval harness. Derived data; the cases themselves live in the DB. |
 
 `install-claude-md.sh` reads two more env vars and bakes them into the rendered
@@ -111,6 +112,7 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 | `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db` | Written into the instructions so the agent restores to the right path. Keep it in sync with the `SUPERCHARGED_MEMORY_TURSO_PATH` the scripts use. |
 | `EPISODIC_MODE` | `major-events` | Episodic-storage policy (see below). Validated to one of the four keys. |
 | `BASE_PATH` | repo root | Points at this repo; the installer fills it in automatically — update it on a new machine. |
+| `PYTHON_BIN` | `python3`, `python` on Windows | Interpreter rendered into the command prefix. Windows has no `python3` — the name is a Store alias stub that exits 0. |
 
 ### Episodic memory policy
 
@@ -241,7 +243,8 @@ agent's Bash tool runs non-interactively and never sources `~/.zshrc` or `~/.bas
 
 `scripts/memlib.py` is the shared core every script imports: config, embedding
 (with a dimension assert), compact vector literals, SQL escaping, and a robust
-`tursodb` runner (stderr-scoped error detection + busy backoff). The rest are
+`tursodb` runner (failure detected on both streams, phrase-scoped busy
+backoff). The rest are
 thin CLIs on top:
 
 - **`remember.py`** — one memory = one row (no chunking). Folds `--keywords` into

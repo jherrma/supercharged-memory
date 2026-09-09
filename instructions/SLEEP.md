@@ -13,6 +13,12 @@ ones — `episodic_memory`/`semantic_memory` are unchanged; sleep just adds a
 `processed_at` marker (episodic) and a `retired_at` soft-delete (semantic), plus
 one small unlinked `topic_keywords` table.
 
+> **On Windows, run every `python3` in this file as `python`.** There is no
+> `python3` on Windows: the name is a Microsoft Store alias stub that prints
+> `Python was not found` **and exits 0**, so a command reads as a successful,
+> empty result and the agent reports work it never did. See
+> `instructions/SETUP.md`, section *Windows*.
+
 ## How the work is split — read this first
 
 **The orchestrating agent never holds `memory_text` in bulk.** Reading every row's
