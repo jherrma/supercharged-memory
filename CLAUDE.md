@@ -106,7 +106,7 @@ python3 scripts/seed.py                          # empty by default; add SEM/EPI
 
 ## Architecture
 
-**`scripts/memlib.py` is the shared core** every script imports — config/env, `embed()` (asserts 1024 dims), vector literal formatting, SQL escaping (`q`, `like_lit`), and `exec_sql()`, the one tursodb runner: it detects a failure on **stderr and stdout** (tursodb reports SQL-level errors on stdout) and retries with backoff only on the phrase `database is busy|locked`, never on the bare words — a query text or a row body can contain those. Everything else is a thin CLI on top of it.
+**`scripts/memlib.py` is the shared core** every script imports — config/env, `embed()` (asserts 1024 dims), vector literal formatting, SQL escaping (`q`, `like_lit`), and `exec_sql()`, the one tursodb runner: it detects a failure on the **exit status, on stderr, and on stdout** — tursodb reports SQL-level errors on stdout with an *empty* stderr, so stdout has to count, but only when it holds a diagnostic and **nothing else** (this corpus stores tursodb's error messages as memories, so a successful `SELECT` can print lines byte-identical to a real diagnostic; what separates them is the absence of row output around them). It then retries with backoff only on the phrase `database is busy|locked`, never on the bare words — a query text or a row body can contain those. Everything else is a thin CLI on top of it.
 
 **Two memory tables (`schema.sql`), one row per memory, no chunking:**
 - `semantic_memory` — timeless facts, **revisable** via a supersede chain (`superseded_by IS NULL` = current truth) and soft-deletable via `retired_at` (set only by `sleep.py --retire`; current truth also requires `retired_at IS NULL`). Category ∈ `baseline|user|feedback|project|reference`.

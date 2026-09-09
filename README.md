@@ -243,8 +243,9 @@ agent's Bash tool runs non-interactively and never sources `~/.zshrc` or `~/.bas
 
 `scripts/memlib.py` is the shared core every script imports: config, embedding
 (with a dimension assert), compact vector literals, SQL escaping, and a robust
-`tursodb` runner (failure detected on both streams, phrase-scoped busy
-backoff). The rest are
+`tursodb` runner (failure detected on the exit status and stderr, phrase-scoped
+busy backoff read off both streams — see [Concurrency](#concurrency--locking)).
+The rest are
 thin CLIs on top:
 
 - **`remember.py`** — one memory = one row (no chunking). Folds `--keywords` into
@@ -497,6 +498,24 @@ on all openers (MCP, scripts, backup): multiple agent instances share the DB,
 reads run concurrently, and writes serialize (a clash returns `database is busy`;
 scripts retry with backoff). A process without the flag is refused. The flag is
 **experimental** — that's the trade for concurrency.
+
+On Windows the flag needs `--vfs experimental_win_iocp` alongside it, or the open
+fails with `experimental multiprocess WAL is not supported by the active IO
+backend`. The scripts add it themselves (`TURSO_VFS`, see the table above); every
+`tursodb` command you type by hand needs both flags. Dropping the WAL flag is not
+an alternative — that is what re-introduces the exclusive lock.
+
+How `exec_sql` decides what failed and what to retry. A **failure** is a non-zero
+exit, an error on stderr, or a stdout that carries a tursodb diagnostic and
+nothing else — SQL-level errors go to stdout with an empty stderr, so stdout has
+to count, but only structurally: this corpus stores tursodb's own error messages
+as memories, so a successful `SELECT memory_text` can print lines byte-identical
+to a diagnostic, and what tells them apart is that a real failure prints no rows
+around them (a successful write prints nothing; a successful read always prints at
+least one non-diagnostic line). Only then is stdout scanned **line by line** for
+the phrase `database is busy|locked`, on diagnostic lines only (`  × …`, `  x …`
+under miette's ASCII theme on a legacy Windows codepage, a wrapped `  │ …`
+continuation, or a line-initial `Error:`), and only a match there retries.
 
 ## Backup & restore
 
