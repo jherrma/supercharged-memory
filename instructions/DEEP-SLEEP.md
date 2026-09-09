@@ -156,8 +156,14 @@ length, `why_safe` — **not** the full texts. Ask the user which to apply ("do
 # Pair --experimental-multiprocess-wal with a --vfs wherever a tursodb line is handed
 # out: on Windows the default IO backend refuses the flag outright, so this lookup
 # returns nothing and the merge below then backdates the survivor to an empty string.
-oldest="$("${TURSO_BIN:-$HOME/.turso/tursodb}" "$SUPERCHARGED_MEMORY_TURSO_PATH" \
-  --experimental-multiprocess-wal ${TURSO_VFS:+--vfs "$TURSO_VFS"} -q -m list \
+# `none` is memlib's sentinel for "no --vfs at all", so it must not be passed
+# through as a backend name -- tursodb refuses that with `no such VFS: none`.
+# Built with set --/"$@": `${v:+--vfs "$v"}` expands to TWO arguments in bash but
+# stays ONE in zsh, where tursodb then rejects `--vfs experimental_win_iocp` whole.
+set -- --experimental-multiprocess-wal
+case "${TURSO_VFS-}" in ""|none|NONE) ;; *) set -- "$@" --vfs "$TURSO_VFS" ;; esac
+oldest="$("${TURSO_BIN:-$HOME/.turso/tursodb}" "$SUPERCHARGED_MEMORY_TURSO_PATH" "$@" \
+  -q -m list \
   "SELECT min(created_at) FROM semantic_memory WHERE id IN (<id1,id2,id3>);")"
 # On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
 python3 scripts/remember.py --table semantic --category <c> --topic "<t>" \
