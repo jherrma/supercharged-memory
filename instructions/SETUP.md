@@ -311,7 +311,67 @@ as above. Finish with:
 python3 scripts/recall.py --status     # expect EMPTY (fresh) or READY n
 ```
 
-## Step 7 — Offer to create coworkers
+## Step 7 — Offer to migrate existing memory
+
+Step 6's candidate check looks for a Turso database or a backup dump. It does not
+look for the *other* kind of memory a user may already have: the ordinary
+file-based kind — a curated `~/.claude/CLAUDE.md`, a `~/.claude/memory/*.md` set,
+project-scoped `~/.claude/projects/<slug>/memory/`. Finishing setup without
+mentioning it leaves that memory outside the system that now claims to hold it.
+
+Check whether there is anything to migrate. Read-only, and needs neither the
+database nor Ollama:
+
+```bash
+python3 scripts/find-existing-memory.py
+```
+
+**Gate on `nothing_to_do`, never on `n_memory_files` alone.** That count covers
+what can be imported; `unreadable` and `excluded_dirs` hold what the probe could
+not or would not read, and nothing else reports those — so a config dir whose only
+memory file is mode 000 comes back `n_memory_files: 0` with a populated
+`unreadable`, and a step reading just the count would tell the user there is
+nothing to migrate. The probe computes the combined verdict for you:
+
+- **`nothing_to_do` is `true`** → nothing to do. Say so in one line and continue to
+  Step 8. A `CLAUDE.md` on its own counts as `n_claude_files`, not as memory:
+  instructions are not facts, and there is nothing there to import. Same for an
+  empty `.md` file (`empty` / `n_empty_files`) — the writer refuses an empty
+  `--text` — so mention it in that same line and move on; there is genuinely
+  nothing in the file.
+- **`nothing_to_do` is `false` but `n_memory_files` is 0** → do **not** say nothing
+  to do. There is nothing *importable*, but the probe could not see everything, and
+  what it could not see may be exactly the memory this step exists to find (a
+  mode-000 memory file, a directory that could not be listed, a topic directory
+  named `agents`). Report each `unreadable` / `excluded_dirs` entry's `path` and
+  `reason` — plus `n_md` for an excluded directory, which says how much is in
+  there — and let the user decide: fix the permission and re-run this probe, or
+  accept the skip and continue to Step 8. Do not fix anything on their behalf.
+- **`n_memory_files` is above 0** → report the totals — `n_memory_files`,
+  `total_chars`, and `over_max_text` (each entry carries the file, its `chars` and
+  a `reason`: over the 2000-char `MAX_TEXT`, or over the 1800-char effective
+  budget, since `remember.py` appends `--keywords` into the same capped field) —
+  plus any non-empty `unreadable` / `excluded_dirs` / `empty`, for the same reason
+  as above. Then **ask whether to migrate it into the database**. On yes, follow
+  `instructions/MIGRATE-EXISTING-MEMORY.md`, which imports the files as semantic
+  memory and then runs the deep-sleep phases that apply (compaction, the required
+  topic-index rebuild, and the Verify pass — imported memory is old by
+  definition). On no, continue to Step 8; the files keep working as they did.
+
+The migration is additive: it never deletes or edits a source file, and every row
+it writes is tagged `source='migration'` with a `file_reference` back to its
+file, so the import can be identified afterwards. It is not one-click
+reversible — there is no bulk undo of the imported rows, and the way back is the
+source files, which the import never touches — so do not offer it as one.
+
+One thing to flag either way, because it is now true and easy to miss: this
+runbook has just appended a managed block to `~/.claude/CLAUDE.md`, so anything
+the user already had in that file sits alongside it. If that content is a second
+set of memory instructions, both are now live and neither mentions the other.
+`MIGRATE-EXISTING-MEMORY.md` M5 handles it — and deliberately leaves the decision
+to the user, since that content is outside the managed markers and is theirs.
+
+## Step 8 — Offer to create coworkers
 
 Once setup succeeds, offer to create a few dedicated AI coworkers (named personas
 with scoped memory and trust-gated autonomy). Present it as optional and suggest a

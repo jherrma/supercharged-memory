@@ -116,3 +116,6 @@ via the turso MCP; writes go through `coworkers.py` / `remember.py --coworker`.
   subagents — never read the whole corpus into your own context.
 - "backup" → `bash "{{BASE_PATH}}/scripts/supercharged-memory-backup.sh"` (writes `{{BASE_PATH}}/Backups/`).
 - "update" (sync this machine with the repo) → follow `{{BASE_PATH}}/instructions/UPDATE.md` step by step.
+- "migrate my memory" / "import my old memories" (file-based Claude memory that predates this
+  system) → follow `{{BASE_PATH}}/instructions/MIGRATE-EXISTING-MEMORY.md`. Additive: it never
+  deletes or edits a source file, so the sources are the way back. No bulk undo of imported rows.

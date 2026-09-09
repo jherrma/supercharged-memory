@@ -153,15 +153,46 @@ length, `why_safe` — **not** the full texts. Ask the user which to apply ("do
 1,3,4"). Then per approved merge:
 
 ```bash
+# Pair --experimental-multiprocess-wal with a --vfs wherever a tursodb line is handed
+# out: on Windows the default IO backend refuses the flag outright, so this lookup
+# returns nothing and the merge below then backdates the survivor to an empty string.
+# `none` is memlib's sentinel for "no --vfs at all", so it must not be passed
+# through as a backend name -- tursodb refuses that with `no such VFS: none`.
+# Built with set --/"$@": `${v:+--vfs "$v"}` expands to TWO arguments in bash but
+# stays ONE in zsh, where tursodb then rejects `--vfs experimental_win_iocp` whole.
+set -- --experimental-multiprocess-wal
+case "${TURSO_VFS-}" in ""|none|NONE) ;; *) set -- "$@" --vfs "$TURSO_VFS" ;; esac
+oldest="$("${TURSO_BIN:-$HOME/.turso/tursodb}" "$SUPERCHARGED_MEMORY_TURSO_PATH" "$@" \
+  -q -m list \
+  "SELECT min(created_at) FROM semantic_memory WHERE id IN (<id1,id2,id3>);")"
 # On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
 python3 scripts/remember.py --table semantic --category <c> --topic "<t>" \
   --keywords "<k1, k2, ...>" --source deep-sleep --model <your-model-id> \
-  --supersedes <id1,id2,id3> --text "<merged>"
+  --supersedes <id1,id2,id3> --created-at "$oldest" --text "<merged>"
 ```
 
 One call, one transaction: the new row is inserted and **all** listed ids are
 pointed at it. `--supersedes` also skips the near-duplicate guard, which would
 otherwise reject a merge for resembling its own inputs.
+
+**Why the survivor keeps the oldest input's date.** Without `--created-at` it gets
+`CURRENT_TIMESTAMP`. Measured on 2026-09-09: two rows dated `2025-03-04` and
+`2025-01-15` merged into a survivor with `created_at 2026-09-09`, `age_days 0` —
+D6.5's `--staleness` counted a 601-day-old fact in `0-30d`, and D7's oldest-first
+ordering sorted it last, behind rows a fraction of its age. Both phases run in
+*this* pass, right after this one, and `created_at` is the only signal either has.
+Overlap is why rows merge, and overlapping rows are prime candidates for being
+stale, so a merge that resets the clock hides staleness exactly where it is most
+likely.
+
+**Advisory: this one cannot be enforced in the writer.** A merge and a revision
+use the same `--supersedes`. Merging N equivalent facts keeps the oldest date;
+*revising* one fact because something was learned (`--supersedes <one id>`, the
+store rule in `CLAUDE.md`) is new knowledge and must keep today's, or a
+just-corrected row sorts to the back of D7. `remember.py` cannot tell the two
+apart from its arguments — this phase can, so the rule lives here. Note
+`--created-at` backdates the survivor's `updated_at` too (the writer sets both);
+nothing reads a semantic row's `updated_at` for judgment today.
 
 Merges create fresh superseded rows, which the *next* deep sleep offers for purge
 in D2. That cycle is intended.
@@ -265,6 +296,12 @@ python3 <repo>/investigations/eval-harness.py --validate
 
 Exit 0 = every case points at a live, current row; go to D6.2. Otherwise it prints
 each broken case with a proposed replacement from the supersede chain.
+
+Exit 0 with `nothing to validate` = `eval_cases` holds no cases at all. That is the
+fresh-install case the preamble above already tells you to skip D6 on, reported as
+what it is rather than as a failure — an empty case set has nothing pointing at a
+purged, superseded or reused row. The scoring modes (`--report`, `--sweep`,
+`--variants`) still exit 1 there: there is no metric to compute.
 
 - `<old> -> <new>` — the target was merged in D3. Repointing is correct: same fact,
   new row id. Apply it, and refresh that target's stamp:
@@ -454,6 +491,12 @@ the topic index (D5's command), because the corpus changed after both ran:
 ```bash
 python3 <repo>/investigations/eval-harness.py --validate
 ```
+
+On a corpus with no authored eval cases this prints `nothing to validate` and exits
+0. That is the expected outcome, not a failing step to stop on: a fresh install has
+no cases, and `MIGRATE-EXISTING-MEMORY.md` M4 reaches this step with D6 deliberately
+skipped for exactly that reason. Note it in the report and carry on to the topic
+rebuild.
 
 **5. Report:** candidates listed vs. checked, rows found stale, what the user chose
 per row, workers that died (a gap, not a silent omission), and the `n_no_artifacts`

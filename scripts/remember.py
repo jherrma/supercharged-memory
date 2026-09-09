@@ -2,9 +2,12 @@
 """Store ONE memory (no chunking). Hard cap 2000 chars (schema CHECK + here).
 
 Guards: refuses an empty --text (a lost command substitution would otherwise store
-a row holding only its keywords); baseline needs --confirm-baseline; refuses a
-near-duplicate (cosine < 0.10) unless --force; refuses if the table already holds
-rows embedded with a different model (mixed vector spaces break recall).
+a row holding only its keywords), an empty --created-at (which would silently date
+an old memory today) and a --created-at that is not a storable date (which SQLite
+keeps verbatim and every date function then reads as NULL); baseline needs
+--confirm-baseline; refuses a near-duplicate (cosine < 0.10) unless --force;
+refuses if the table already holds rows embedded with a different model (mixed
+vector spaces break recall).
 NEVER pass PII — anonymize.
 
 --coworker NAME[,NAME...] tags the memory to one or more coworkers (see
@@ -12,13 +15,54 @@ coworkers.py) instead of leaving it global. Dedup then scopes its
 near-duplicate search to memories visible to that coworker set, not the
 whole table.
 """
-import argparse, sys
+import argparse, re, sys
 sys.dont_write_bytecode = True                       # no __pycache__ in a synced folder
+from datetime import datetime
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import memlib as M                                   # noqa: E402
 
 DUP_DIST = 0.10
+
+# What `created_at` is allowed to look like: `YYYY-MM-DD HH:MM:SS` (what the
+# schema's CURRENT_TIMESTAMP writes and what sleep.py's julianday() arithmetic
+# needs), or a bare `YYYY-MM-DD`, normalised to midnight so the column stays one
+# fixed width -- min(created_at) in sleep.py --staleness is a STRING min, and a
+# mixed-width column makes its `oldest_current` inconsistent between rows.
+# Deliberately not accepting the ISO `T` separator: julianday() takes it, but
+# 'T' > ' ' byte-wise, so a T-row sorts after every space-separated row of the
+# same second in exactly the string comparisons above.
+CREATED_AT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?: (\d{2}:\d{2}:\d{2}))?$")
+
+
+def normalise_created_at(raw):
+    """`created_at` as it will be stored, or exit if it is not a storable date.
+
+    The mechanical enforcer for the one column nothing else checks. `created_at`
+    is TEXT with no CHECK, so SQLite stores whatever it is handed: measured
+    2026-09-09, `--created-at "March 2024"` was stored verbatim, `julianday()`
+    then returned NULL, the row fell through `sleep.py --staleness`'s bucket CASE
+    into `180d+` regardless of its real age, and `min(created_at)` sorted `'M'`
+    after `'2'` so `oldest_current` ignored it altogether. A wrong date is
+    therefore invisible rather than obviously wrong -- and the migration runbook
+    has workers BUILD this string in shell, which is where malformed values come
+    from. Refuse before the embedding call, like the guards above it.
+    """
+    m = CREATED_AT_RE.match(raw.strip())
+    if m:
+        stamp = f"{m.group(1)} {m.group(2) or '00:00:00'}"
+        try:
+            datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")   # rejects 2024-13-45
+            return stamp
+        except ValueError:
+            pass
+    sys.exit(f"refused: --created-at {raw!r} is not a date this system can store. "
+             "Pass 'YYYY-MM-DD HH:MM:SS' (or a bare 'YYYY-MM-DD', stored as that "
+             "day at 00:00:00), or omit the flag to date the row now. SQLite keeps "
+             "any other string verbatim and julianday() then returns NULL, so the "
+             "row lands in sleep.py --staleness's '180d+' bucket whatever its real "
+             "age is and min(created_at) sorts it away from oldest_current — "
+             "nothing was stored.")
 
 
 def store_memory(table, text, *, topic=None, project=None, category=None,
@@ -36,13 +80,36 @@ def store_memory(table, text, *, topic=None, project=None, category=None,
     if not text:
         sys.exit("refused: --text is empty. If you passed a command substitution such as "
                  '--text "$(cat file)", the file is missing or empty — nothing was stored.')
+    # Same shape of failure one flag over: `if created_at:` below treats "" as
+    # "not given" and lets the row take CURRENT_TIMESTAMP, so a substitution that
+    # came back empty -- `--created-at "$(stat ...)"` on a platform where the
+    # command is wrong, or a min(created_at) query that returned nothing -- dates
+    # a year-old fact today, while the caller reports the date it meant to use.
+    # Omitting the flag is how you ask for "now"; passing it empty is a bug.
+    if created_at is not None:
+        if not created_at.strip():
+            sys.exit("refused: --created-at is empty. If you passed a command substitution, "
+                     "it produced nothing — nothing was stored. Omit the flag to date the "
+                     "row now, or pass a real 'YYYY-MM-DD HH:MM:SS'.")
+        # An empty value was already refused; a MALFORMED one used to sail
+        # through and corrupt every date-based phase silently. Same position in
+        # the flow, for the same reason: before the embedding call is paid for.
+        created_at = normalise_created_at(created_at)
+    # Measured before the keywords go on, so the over-cap refusal below can say
+    # how much of the length the caller actually wrote and how much this line
+    # added -- a worker staring at a 1948-char file otherwise has no way to see
+    # where "2096 chars" came from.
+    body_len = len(text)
     if keywords:                                     # keywords live INSIDE the text
         text = f"{text}\n\nKeywords: {keywords}".strip()
     if category == "baseline" and not confirm_baseline:
         sys.exit("refused: 'baseline' memories load every session and need the user's "
                  "explicit confirmation. Ask first, then pass --confirm-baseline.")
     if len(text) > M.MAX_TEXT:
-        sys.exit(f"refused: memory is {len(text)} chars; hard cap {M.MAX_TEXT}. "
+        added = len(text) - body_len
+        detail = (f" — {body_len} of them your --text, {added} the '--keywords' line "
+                  "appended into the same field") if added else ""
+        sys.exit(f"refused: memory is {len(text)} chars; hard cap {M.MAX_TEXT}{detail}. "
                  "Tighten it or split into separate memories.")
     M.require_db()
     if supersedes:
@@ -141,7 +208,10 @@ def main():
     p.add_argument("--topic"); p.add_argument("--project")
     p.add_argument("--keywords"); p.add_argument("--source"); p.add_argument("--model")
     p.add_argument("--file-reference", dest="file_reference")
-    p.add_argument("--created-at", dest="created_at")
+    p.add_argument("--created-at", dest="created_at",
+                   help="'YYYY-MM-DD HH:MM:SS', or a bare 'YYYY-MM-DD' (stored as that "
+                        "day at 00:00:00). Anything else is refused; omit the flag to "
+                        "date the row now.")
     p.add_argument("--category")                        # semantic
     p.add_argument("--event-type", dest="event_type")  # episodic
     p.add_argument("--importance")                     # episodic

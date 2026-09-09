@@ -151,6 +151,43 @@ gotchas, or corrections — those are always stored autonomously):
 Change it later by re-running `install-claude-md.sh` with a different
 `EPISODIC_MODE`.
 
+## Migrating existing file-based memory
+
+If you were running Claude Code with ordinary file-based memory before installing
+this — a curated `~/.claude/CLAUDE.md`, a `~/.claude/memory/*.md` set,
+project-scoped `~/.claude/projects/<slug>/memory/*.md` — none of it is in the
+database, and the setup runbook's candidate check will not find it: that looks for
+a Turso DB or a backup dump, which is a different thing.
+
+`instructions/MIGRATE-EXISTING-MEMORY.md` imports those files as semantic memory
+and then runs the deep-sleep phases that apply (compaction, the required
+topic-index rebuild, the Verify pass — imported memory is old by definition).
+Setup Step 7 offers it; you can also ask for it later ("migrate my memory").
+
+- **`scripts/find-existing-memory.py`** — read-only scan, needs neither the
+  database nor Ollama. Reports what exists per file: `kind` (`memory` / `index` /
+  `claude` / `empty`), `scope` (`global` / `project`), char count. Counts of what
+  there is to import cover `kind: memory` only, so a plain `CLAUDE.md` is not
+  reported as memory to migrate. Everything it leaves out lands in a reported field
+  instead of vanishing — `over_max_text` (`{path, chars, reason}`, flagged against
+  the **1800-char effective budget**, not the raw 2000-char `MAX_TEXT`, because
+  `remember.py` appends `--keywords` into the same field the cap counts — so a
+  1900-char file is flagged here rather than refused mid-import), `empty` (nothing
+  to import; the writer refuses an empty `--text`), `unreadable` (unreadable file or
+  directory, broken symlink, symlink loop) and `excluded_dirs` (`.git`/`agents` at a
+  memory root, or a symlink pointing above it). `SETUP.md` Step 7 gates on the
+  computed `nothing_to_do` — no importable memory **and** nothing skipped — rather
+  than on `n_memory_files`, which is 0 for a config dir whose only memory file is
+  unreadable.
+- **Additive, not reversible.** No source file is deleted or edited, and every row
+  carries `source='migration'` plus a `file_reference` back to its file. There is
+  no bulk undo of the imported rows, though: the source files are always the way
+  back, a pre-import backup restores a database that already held rows, and on a
+  fresh (`EMPTY`) one — the common case — there is no pre-import dump because
+  there is nothing to lose, so the reset is a rebuild from `schema.sql`.
+- **Classification runs in subagents**, the same contract the sleep runbooks use;
+  the orchestrator never reads the corpus in bulk.
+
 ## Staying up to date
 
 The runtime state lives *outside* this repo — the database, `~/.claude/CLAUDE.md`,
@@ -273,7 +310,12 @@ phrase `database is busy|locked` in either stream (see
   the text, embeds it, inserts. Guards: baseline needs `--confirm-baseline`;
   semantic refuses a near-duplicate (cosine < 0.10) unless `--force` (episodic is
   exempt — events recur); `--supersedes <id>` inserts a revision and marks the old
-  row superseded in one call; refuses a DB embedded with a different model.
+  row superseded in one call; refuses a DB embedded with a different model; refuses
+  an empty or malformed `--created-at` (`YYYY-MM-DD HH:MM:SS`, or a bare
+  `YYYY-MM-DD` normalised to midnight — anything else is kept verbatim by SQLite
+  and read as NULL by every date function), before paying for the embedding. Its
+  over-cap refusal splits the total into your `--text` and the appended keyword
+  line, since the cap counts both.
 - **`recall.py`** — hybrid search, scored `dist - RECALL_ALPHA * kw` (lower wins):
   brute-force `vector_distance_cos` minus an IDF-weighted keyword credit, normalised
   to 0..1. IDF is measured per query against the rows being ranked, so common words
