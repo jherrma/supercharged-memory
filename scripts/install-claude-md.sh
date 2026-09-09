@@ -10,7 +10,10 @@
 #   SUPERCHARGED_MEMORY_TURSO_PATH=...        where the live Turso DB lives (must match what scripts use)
 #   EPISODIC_MODE=...  every-prompt | major-actions | major-events | manual
 #   PYTHON_BIN=...     interpreter for the rendered prefix (default: python3;
-#                      python on Windows, where python3 is a Store alias stub)
+#                      python on Windows, where python3 is a Store alias stub).
+#                      Either a command (`python`, `py -3`) or a path; a path
+#                      containing spaces is quoted for you, other whitespace is
+#                      refused. See the case statement below.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +44,32 @@ else
     *)                    PY="python3" ;;
   esac
 fi
+# The template renders the interpreter UNQUOTED -- `{{PY}} "{{BASE_PATH}}/scripts/x.py"`
+# -- because PYTHON_BIN has two legitimate shapes and one blanket rule breaks one of
+# them. An interpreter PATH must be quoted: an all-users Windows install lands in
+# `C:\Program Files\Python314\python.exe`, which cygpath -m turns into
+# `C:/Program Files/Python314/python.exe`, and unquoted that prefix splits at the
+# space into the command `C:/Program` plus a stray argument. A multi-word launcher
+# command (`py -3`) must NOT be quoted, or the shell looks the whole string up as one
+# filename. Nothing distinguishes them but what they are, so decide it here, once, and
+# bake the quotes into the value itself. Whitespace that is neither is refused rather
+# than rendered: the result lands in a file nobody re-reads, and every memory command
+# of every future session would fail on it.
+case "$PY" in
+  *[[:space:]]*)
+    if [ -f "$PY" ]; then
+      PY="\"$PY\""                                        # interpreter path
+    elif command -v "${PY%%[[:space:]]*}" >/dev/null 2>&1; then
+      :                                                   # launcher command, e.g. `py -3`
+    else
+      echo "PYTHON_BIN='$PY' contains whitespace but is neither an existing file" >&2
+      echo "(an interpreter path, which would be quoted) nor a command whose first" >&2
+      echo "word resolves (a launcher such as 'py -3'). Refusing: the rendered" >&2
+      echo "prefix would split at the space and every command in the installed" >&2
+      echo "instructions would fail." >&2
+      exit 1
+    fi ;;
+esac
 TEMPLATE="$BASE_PATH/CLAUDE.md.template"
 TARGET="${TARGET:-$HOME/.claude/CLAUDE.md}"
 SUPERCHARGED_MEMORY_TURSO_PATH="${SUPERCHARGED_MEMORY_TURSO_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/turso/supercharged-memory.db}"
@@ -133,6 +162,6 @@ echo "installed agentic-memory block into $TARGET"
 echo "BASE_PATH                      = $BASE_PATH"
 echo "SUPERCHARGED_MEMORY_TURSO_PATH = $SUPERCHARGED_MEMORY_TURSO_PATH"
 echo "EPISODIC_MODE                  = $EPISODIC_MODE"
-echo "PY                             = $PY"
+echo "PY                             = $PY   (as rendered)"
 echo "synced-at                      = $SYNC_SHA"
 echo "Restart your Claude Code session to pick it up."

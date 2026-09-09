@@ -117,7 +117,7 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 | `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db` | Written into the instructions so the agent restores to the right path. Keep it in sync with the `SUPERCHARGED_MEMORY_TURSO_PATH` the scripts use. |
 | `EPISODIC_MODE` | `major-events` | Episodic-storage policy (see below). Validated to one of the four keys. |
 | `BASE_PATH` | repo root | Points at this repo; the installer fills it in automatically — update it on a new machine. |
-| `PYTHON_BIN` | `python3`, `python` on Windows | Interpreter rendered into the command prefix. Windows has no `python3` — the name is a Store alias stub that exits 0. |
+| `PYTHON_BIN` | `python3`, `python` on Windows | Interpreter rendered into the command prefix. Windows has no `python3` — the name is a Store alias stub that exits 0. Takes a command (`python`, `py -3`) or a path; a path with spaces (`C:/Program Files/Python314/python.exe`) is quoted for you, and whitespace that is neither is refused rather than rendered into a prefix that splits at the space. |
 
 ### Episodic memory policy
 
