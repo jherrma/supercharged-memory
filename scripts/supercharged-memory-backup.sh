@@ -11,11 +11,18 @@ set -uo pipefail
 TURSO="${TURSO_BIN:-$HOME/.turso/tursodb}"
 # Windows' default IO backend refuses --experimental-multiprocess-wal outright, so
 # the dump below fails on open unless the flag is paired with the IOCP backend
-# (tursodb --help names it). Same detection as memlib.py's VFS/OPEN_ARGS.
+# (tursodb --help names it). Same detection as memlib.py's VFS/OPEN_ARGS: the
+# uname cases below are the shell spelling of memlib's sys.platform set
+# (win32/msys/cygwin), so Git Bash and a Cygwin Python agree.
+# TURSO_VFS overrides in BOTH directions -- a different backend name, or
+# "none"/empty to drop --vfs for a tursodb that no longer needs it.
 # Written as an array with the ${a[@]+...} guard because macOS still ships bash
 # 3.2, where "${empty[@]}" under `set -u` is an unbound-variable error.
-if [ -n "${TURSO_VFS:-}" ]; then
-  VFS_ARGS=(--vfs "$TURSO_VFS")
+if [ "${TURSO_VFS+set}" = set ]; then
+  case "$(printf '%s' "$TURSO_VFS" | tr '[:upper:]' '[:lower:]')" in
+    ""|none) VFS_ARGS=() ;;
+    *)       VFS_ARGS=(--vfs "$TURSO_VFS") ;;
+  esac
 else
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) VFS_ARGS=(--vfs experimental_win_iocp) ;;

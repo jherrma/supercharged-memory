@@ -30,6 +30,11 @@ fi
 # Override with PYTHON_BIN.
 if [ -n "${PYTHON_BIN:-}" ]; then
   PY="$PYTHON_BIN"
+  # PYTHON_BIN's documented case is an interpreter PATH on Windows, and such a path
+  # survives neither Git Bash nor a template substitution. cygpath -m normalises it
+  # to C:/... the way BASE_PATH is normalised; a bare command name passes through
+  # unchanged, and this is a no-op where cygpath does not exist.
+  if command -v cygpath >/dev/null 2>&1; then PY="$(cygpath -m "$PY")"; fi
 else
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) PY="python" ;;
@@ -86,16 +91,41 @@ awk '{l[NR]=$0} END{e=NR; while(e>0 && l[e]~/^[[:space:]]*$/) e--; for(i=1;i<=e;
   "$TARGET" > "$tmp2"
 mv "$tmp2" "$TARGET"
 
-# Append the freshly rendered block ( | delimiter: paths contain slashes.
-# EPISODIC_MODE is validated to a fixed keyword set above, so it's sed-safe ).
+# Substitute the placeholders LITERALLY. A sed replacement is NOT literal: GNU sed
+# reads \U \L \t \n and & inside one, so PYTHON_BIN=C:\Python314\python.exe rendered
+# as C:Python314python.exe -- and the report line below still echoed the value
+# correctly, so nothing surfaced until a session tried to run a script. awk with
+# index/substr does plain string replacement, and the values arrive through ENVIRON,
+# so nothing processes escapes on the way in either.
+render() {
+  R_BASE_PATH="$BASE_PATH" R_PY="$PY" R_DB="$SUPERCHARGED_MEMORY_TURSO_PATH" \
+  R_EPISODIC_MODE="$EPISODIC_MODE" R_EPISODIC_RULE="$EPISODIC_RULE" \
+  awk '
+    function rep(s, from, to,   out, i) {
+      out = ""
+      while ((i = index(s, from)) > 0) {
+        out = out substr(s, 1, i - 1) to
+        s = substr(s, i + length(from))
+      }
+      return out s
+    }
+    {
+      l = $0
+      l = rep(l, "{{BASE_PATH}}", ENVIRON["R_BASE_PATH"])
+      l = rep(l, "{{PY}}", ENVIRON["R_PY"])
+      l = rep(l, "{{SUPERCHARGED_MEMORY_TURSO_PATH}}", ENVIRON["R_DB"])
+      l = rep(l, "{{EPISODIC_MODE}}", ENVIRON["R_EPISODIC_MODE"])
+      l = rep(l, "{{EPISODIC_RULE}}", ENVIRON["R_EPISODIC_RULE"])
+      print l
+    }
+  ' "$1"
+}
+
+# Append the freshly rendered block.
 {
   printf '\n%s\n' "$BEGIN"
   printf '%s\n' "$STAMP"
-  sed -e "s|{{BASE_PATH}}|$BASE_PATH|g" \
-      -e "s|{{PY}}|$PY|g" \
-      -e "s|{{SUPERCHARGED_MEMORY_TURSO_PATH}}|$SUPERCHARGED_MEMORY_TURSO_PATH|g" \
-      -e "s|{{EPISODIC_MODE}}|$EPISODIC_MODE|g" \
-      -e "s|{{EPISODIC_RULE}}|$EPISODIC_RULE|g" "$TEMPLATE"
+  render "$TEMPLATE"
   printf '%s\n' "$END"
 } >> "$TARGET"
 
