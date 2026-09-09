@@ -142,14 +142,36 @@ length, `why_safe` — **not** the full texts. Ask the user which to apply ("do
 1,3,4"). Then per approved merge:
 
 ```bash
+oldest="$("${TURSO_BIN:-$HOME/.turso/tursodb}" "$SUPERCHARGED_MEMORY_TURSO_PATH" \
+  --experimental-multiprocess-wal -q -m list \
+  "SELECT min(created_at) FROM semantic_memory WHERE id IN (<id1,id2,id3>);")"
 python3 scripts/remember.py --table semantic --category <c> --topic "<t>" \
   --keywords "<k1, k2, ...>" --source deep-sleep --model <your-model-id> \
-  --supersedes <id1,id2,id3> --text "<merged>"
+  --supersedes <id1,id2,id3> --created-at "$oldest" --text "<merged>"
 ```
 
 One call, one transaction: the new row is inserted and **all** listed ids are
 pointed at it. `--supersedes` also skips the near-duplicate guard, which would
 otherwise reject a merge for resembling its own inputs.
+
+**Why the survivor keeps the oldest input's date.** Without `--created-at` it gets
+`CURRENT_TIMESTAMP`. Measured on 2026-09-09: two rows dated `2025-03-04` and
+`2025-01-15` merged into a survivor with `created_at 2026-09-09`, `age_days 0` —
+D6.5's `--staleness` counted a 601-day-old fact in `0-30d`, and D7's oldest-first
+ordering sorted it last, behind rows a fraction of its age. Both phases run in
+*this* pass, right after this one, and `created_at` is the only signal either has.
+Overlap is why rows merge, and overlapping rows are prime candidates for being
+stale, so a merge that resets the clock hides staleness exactly where it is most
+likely.
+
+**Advisory: this one cannot be enforced in the writer.** A merge and a revision
+use the same `--supersedes`. Merging N equivalent facts keeps the oldest date;
+*revising* one fact because something was learned (`--supersedes <one id>`, the
+store rule in `CLAUDE.md`) is new knowledge and must keep today's, or a
+just-corrected row sorts to the back of D7. `remember.py` cannot tell the two
+apart from its arguments — this phase can, so the rule lives here. Note
+`--created-at` backdates the survivor's `updated_at` too (the writer sets both);
+nothing reads a semantic row's `updated_at` for judgment today.
 
 Merges create fresh superseded rows, which the *next* deep sleep offers for purge
 in D2. That cycle is intended.
