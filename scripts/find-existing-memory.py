@@ -5,8 +5,14 @@ Read-only and dependency-free on purpose: it needs neither the database nor
 Ollama, so SETUP.md can call it before either is proven working, and a user can
 run it to decide whether a migration is worth doing at all.
 
-Emits JSON. The interesting fields per file are `chars` (against the 2000-char
-MAX_TEXT the writer enforces) and `kind`:
+Emits JSON. Every count and total in the report covers `kind: memory` files only
+-- an index and a CLAUDE.md body are context, not things to import, so a user who
+merely has a CLAUDE.md is not told they have memory to migrate.
+
+The interesting fields per file are `chars` (against the 2000-char MAX_TEXT the
+writer enforces), `scope` (`global` or `project`), `project_dir` (the
+`projects/<slug>` directory name -- Claude Code's mangled cwd, NOT a work-item id
+for `remember.py --project`) and `kind`:
 
   memory   a memory file -- one fact, the unit a semantic row is written from
   index    a pointer list (MEMORY.md); its LINES are links to memory files, so
@@ -41,37 +47,67 @@ def outside_managed_block(text):
     return head + tail
 
 
-def entry(path, kind, chars):
+def entry(path, kind, chars, scope, project=None):
     return {"path": str(path), "kind": kind, "chars": chars,
-            "over_max_text": chars > MAX_TEXT}
+            "over_max_text": chars > MAX_TEXT,
+            # Which memory a file is: `global` applies everywhere, `project` only
+            # when cwd matches. A worker must not have to re-derive that from the
+            # path, and the M1 scope choice is unanswerable without it.
+            "scope": scope,
+            # The `projects/<slug>` directory name, verbatim. It is Claude Code's
+            # mangled cwd, NOT a tracking-tool work-item id -- so it is reported
+            # for context and must never be passed to `remember.py --project`.
+            "project_dir": project}
+
+
+def read_text(path):
+    """File content, or None if it cannot be read. Never raises: this is a
+    read-only pre-flight probe that SETUP.md runs before anything else, so one
+    unreadable file (mode 000, a stale symlink) must degrade, not traceback."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
 
 
 def scan():
     root = config_dir()
-    found, sources = [], []
+    found, sources, unreadable = [], [], []
 
     claude_md = root / "CLAUDE.md"
     if claude_md.is_file():
-        body = outside_managed_block(claude_md.read_text(encoding="utf-8", errors="replace")).strip()
-        if body:
-            found.append(entry(claude_md, "claude", len(body)))
-            sources.append("CLAUDE.md (outside the managed block)")
+        text = read_text(claude_md)
+        if text is None:
+            unreadable.append(str(claude_md))
+        else:
+            body = outside_managed_block(text).strip()
+            if body:
+                found.append(entry(claude_md, "claude", len(body), "global"))
+                sources.append("CLAUDE.md (outside the managed block)")
 
     # Global memory, then per-project memory. Same shape, different scope: a
     # project-scoped file is only loaded when cwd matches, so its facts are
-    # narrower and the `project` column is where that belongs.
-    globs = [("global memory files", root / "memory", root.glob("memory/*.md")),
-             ("project memory files", root / "projects", root.glob("projects/*/memory/*.md"))]
-    for label, base, it in globs:
+    # narrower and that has to survive the move.
+    globs = [("global memory files", root / "memory", root.glob("memory/*.md"), "global"),
+             ("project memory files", root / "projects", root.glob("projects/*/memory/*.md"), "project")]
+    for label, base, it, scope in globs:
         n = 0
         for f in sorted(it):
+            if not f.is_file():
+                continue          # a directory named *.md, or a broken symlink
+            text = read_text(f)
+            if text is None:
+                unreadable.append(str(f))
+                continue
             kind = "index" if f.name.upper() == "MEMORY.MD" else "memory"
-            found.append(entry(f, kind, len(f.read_text(encoding="utf-8", errors="replace").strip())))
+            # ~/.claude/projects/<slug>/memory/<file>.md -- the slug is 3 up.
+            project = f.parent.parent.name if scope == "project" else None
+            found.append(entry(f, kind, len(text.strip()), scope, project))
             n += 1
         if n:
             sources.append(f"{n} {label} under {base}")
 
-    return root, found, sources
+    return root, found, sources, unreadable
 
 
 def main():
@@ -81,19 +117,30 @@ def main():
                     help="print only whether anything was found (exit 0 = yes, 1 = no)")
     a = ap.parse_args()
 
-    root, found, sources = scan()
-    memories = [f for f in found if f["kind"] != "index"]
+    root, found, sources, unreadable = scan()
+    # `memory` files ONLY. An index is a pointer list, and the CLAUDE.md body is
+    # instructions -- counting either as a memory file made a plain CLAUDE.md
+    # ("Always use pnpm") read as one file to migrate, which is what SETUP.md
+    # Step 7 gates on, and put a normal-length CLAUDE.md in `over_max_text` as a
+    # memory file the user must split.
+    memories = [f for f in found if f["kind"] == "memory"]
     report = {
         "config_dir": str(root),
         "n_files": len(found),
         "n_memory_files": len(memories),
-        "n_index_files": len(found) - len(memories),
+        "n_index_files": len([f for f in found if f["kind"] == "index"]),
+        "n_claude_files": len([f for f in found if f["kind"] == "claude"]),
+        "n_global": len([f for f in memories if f["scope"] == "global"]),
+        "n_project": len([f for f in memories if f["scope"] == "project"]),
+        "projects": sorted({f["project_dir"] for f in memories if f["project_dir"]}),
         "total_chars": sum(f["chars"] for f in memories),
         "over_max_text": [f["path"] for f in memories if f["over_max_text"]],
+        "unreadable": unreadable,
         "sources": sources,
         "files": found,
-        "note": ("index files are pointer lists, not facts -- read them to find "
-                 "the memory files, do not import them as memories. A file over "
+        "note": ("counts and totals cover `kind: memory` only. An index file is a "
+                 "pointer list and a `claude` entry is instructions -- read both "
+                 "for context, import neither as a fact. A memory file over "
                  f"{MAX_TEXT} chars must be split or condensed, never truncated."),
     }
     if a.quiet:
