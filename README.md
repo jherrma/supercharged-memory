@@ -28,7 +28,9 @@ Turso 0.7.0+ — the Rust rewrite of SQLite with native vector support.
 curl -sSL tur.so/install | sh
 ```
 
-`tursodb` is always opened with `--experimental-multiprocess-wal` (see [Concurrency](#concurrency--locking)).
+`tursodb` is always opened with `--experimental-multiprocess-wal`, and on Windows
+with `--vfs experimental_win_iocp` beside it (see
+[Concurrency](#concurrency--locking)).
 
 ### Ollama + an embedding model
 
@@ -70,7 +72,10 @@ activates the instructions, creates the DB, and finally offers to set up coworke
    export SUPERCHARGED_MEMORY_TURSO_PATH="${XDG_DATA_HOME:-$HOME/.local/share}/turso/supercharged-memory.db"   # your choice
    ```
 4. Register Turso as a Claude Code MCP server named `turso`, launched as
-   `tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --mcp --experimental-multiprocess-wal`.
+   `tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --mcp --experimental-multiprocess-wal`
+   (on Windows append `--vfs experimental_win_iocp` — see
+   [Concurrency](#concurrency--locking); this applies to every `tursodb`
+   command below too).
 5. Activate the memory instructions in your agent, baking in your database path and
    episodic policy:
 
@@ -85,7 +90,7 @@ activates the instructions, creates the DB, and finally offers to set up coworke
    silently create an empty DB, so build the schema first):
 
    ```bash
-   tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql
+   tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql   # +`--vfs experimental_win_iocp` on Windows
    python3 scripts/recall.py --status     # MISSING | EMPTY | DEGRADED n | READY n
    ```
 
@@ -553,7 +558,7 @@ continuation, or a line-initial `Error:`), and only a match there retries.
 - **Rebuild empty schema** — **pipe** the file; don't pass it as a SQL argument
   (`tursodb "$(cat schema.sql)"` fails: the leading `--` comment parses as a CLI flag):
   ```bash
-  tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql
+  tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql   # +`--vfs experimental_win_iocp` on Windows
   python3 scripts/seed.py    # empty by default — add entries first if you want a seeded start
   ```
 - **New machine:** run `instructions/SETUP.md` (or manually: install `tursodb` +

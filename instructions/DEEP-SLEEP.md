@@ -42,6 +42,7 @@ scales with the corpus and is the reason this file exists. So:
 Read rows in a worker with:
 
 ```bash
+# On Windows this needs `--vfs experimental_win_iocp` too, or the open is refused.
 tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list \
   "SELECT id, topic, category, memory_text FROM semantic_memory WHERE id IN (...);"
 ```

@@ -100,6 +100,7 @@ bash scripts/supercharged-memory-backup.sh
 # boundaries and then COUNTS every table against the dump; it exits non-zero on a mismatch.
 python3 scripts/restore.py --out /path/to/new.db          # defaults to the newest backup
 python3 scripts/restore.py --dump Backups/<file>.sql.gz --out /path/to/new.db
+# every hand-run tursodb command needs --vfs experimental_win_iocp on Windows (the scripts add it themselves)
 tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql   # rebuild empty schema — PIPE it, don't pass as arg
 python3 scripts/seed.py                          # empty by default; add SEM/EPI entries first
 ```
@@ -125,7 +126,7 @@ This replaced an `ORDER BY kw DESC, dist ASC` lexicographic sort, which measured
 
 ## Invariants — do not break these
 
-- **`--experimental-multiprocess-wal` on EVERY opener** (MCP, scripts, backup). tursodb takes an exclusive file lock otherwise — a process without the flag is *refused*, and one without it would block all readers. This is what lets multiple Claude instances share the DB (concurrent reads, serialized writes). It's experimental — that's the trade.
+- **`--experimental-multiprocess-wal` on EVERY opener** (MCP, scripts, backup). tursodb takes an exclusive file lock otherwise — a process without the flag is *refused*, and one without it would block all readers. This is what lets multiple Claude instances share the DB (concurrent reads, serialized writes). It's experimental — that's the trade. **On Windows it must be paired with `--vfs experimental_win_iocp`** or the open is refused with `experimental multiprocess WAL is not supported by the active IO backend`; the scripts pair it themselves via `memlib.OPEN_ARGS`/`TURSO_VFS`, but every `tursodb` line a doc or runbook hands an agent to execute needs both flags written out — the runbooks say so in the note at the top of each file.
 - **One embedding model per DB** (bge-m3, 1024-dim, recorded in `embed_model`). Mixing models makes cosine meaningless; `remember.py` refuses a table that already holds another model. To switch models you must rebuild + re-embed.
 - **Keywords are not a column** — `remember.py --keywords` appends them into `memory_text` so they're both embedded and LIKE-searchable.
 - **Length caps are enforced by `CHECK`, not VARCHAR** (SQLite ignores declared sizes): `memory_text` ≤ 2000; most metadata ≤ 128.

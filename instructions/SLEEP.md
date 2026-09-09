@@ -40,6 +40,7 @@ only** (ids, topics, dates) and hands the actual reading to subagents:
 Read rows inside a worker with:
 
 ```bash
+# On Windows this needs `--vfs experimental_win_iocp` too, or the open is refused.
 tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list \
   "SELECT id, created_at, topic, event_type, importance, memory_text
    FROM episodic_memory WHERE id IN (...);"
@@ -51,7 +52,8 @@ Ad-hoc SQL via the turso MCP (read-only, no script needed). Ignore the MCP's
 `current_database` tool — it reports `:memory: (default)` even when correctly
 attached to the real file ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061));
 confirm with the query itself, or read via
-`tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list "<sql>"`.
+`tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list "<sql>"`
+(plus `--vfs experimental_win_iocp` on Windows).
 
 Pull **metadata only** — the text belongs in the workers, not here:
 
