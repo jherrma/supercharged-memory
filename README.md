@@ -143,13 +143,19 @@ Setup Step 7 offers it; you can also ask for it later ("migrate my memory").
 
 - **`scripts/find-existing-memory.py`** — read-only scan, needs neither the
   database nor Ollama. Reports what exists per file: `kind` (`memory` / `index` /
-  `claude` / `empty`), `scope` (`global` / `project`), char count against the
-  2000-char `MAX_TEXT`. Counts of what there is to import cover `kind: memory`
-  only, so a plain `CLAUDE.md` is not reported as memory to migrate. Everything it
-  leaves out lands in a reported field instead of vanishing — `over_max_text`,
-  `empty` (nothing to import; the writer refuses an empty `--text`), `unreadable`
-  (unreadable file or directory, broken symlink, symlink loop) and `excluded_dirs`
-  (`.git`/`agents` at a memory root, or a symlink pointing above it).
+  `claude` / `empty`), `scope` (`global` / `project`), char count. Counts of what
+  there is to import cover `kind: memory` only, so a plain `CLAUDE.md` is not
+  reported as memory to migrate. Everything it leaves out lands in a reported field
+  instead of vanishing — `over_max_text` (`{path, chars, reason}`, flagged against
+  the **1800-char effective budget**, not the raw 2000-char `MAX_TEXT`, because
+  `remember.py` appends `--keywords` into the same field the cap counts — so a
+  1900-char file is flagged here rather than refused mid-import), `empty` (nothing
+  to import; the writer refuses an empty `--text`), `unreadable` (unreadable file or
+  directory, broken symlink, symlink loop) and `excluded_dirs` (`.git`/`agents` at a
+  memory root, or a symlink pointing above it). `SETUP.md` Step 7 gates on the
+  computed `nothing_to_do` — no importable memory **and** nothing skipped — rather
+  than on `n_memory_files`, which is 0 for a config dir whose only memory file is
+  unreadable.
 - **Additive, not reversible.** No source file is deleted or edited, and every row
   carries `source='migration'` plus a `file_reference` back to its file. There is
   no bulk undo of the imported rows, though: the source files are always the way
@@ -279,7 +285,12 @@ thin CLIs on top:
   the text, embeds it, inserts. Guards: baseline needs `--confirm-baseline`;
   semantic refuses a near-duplicate (cosine < 0.10) unless `--force` (episodic is
   exempt — events recur); `--supersedes <id>` inserts a revision and marks the old
-  row superseded in one call; refuses a DB embedded with a different model.
+  row superseded in one call; refuses a DB embedded with a different model; refuses
+  an empty or malformed `--created-at` (`YYYY-MM-DD HH:MM:SS`, or a bare
+  `YYYY-MM-DD` normalised to midnight — anything else is kept verbatim by SQLite
+  and read as NULL by every date function), before paying for the embedding. Its
+  over-cap refusal splits the total into your `--text` and the appended keyword
+  line, since the cap counts both.
 - **`recall.py`** — hybrid search, scored `dist - RECALL_ALPHA * kw` (lower wins):
   brute-force `vector_distance_cos` minus an IDF-weighted keyword credit, normalised
   to 0..1. IDF is measured per query against the rows being ranked, so common words
