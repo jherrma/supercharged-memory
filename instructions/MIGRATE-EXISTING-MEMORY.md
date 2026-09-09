@@ -13,13 +13,19 @@ a backup dump, which is a different thing entirely.
 This runbook imports those files as semantic memory, then runs the consolidation
 phases that make the result usable rather than a few hundred loose rows.
 
-**It is additive and reversible.** Nothing here deletes or edits a source file.
-Every row it writes carries `--source migration` and a `--file-reference` back to
-the file it came from, so the whole import can be identified afterwards:
+**It is additive: nothing here deletes or edits a source file.** Every row it
+writes carries `--source migration` and a `--file-reference` back to the file it
+came from, so the import can be identified afterwards:
 
 ```sql
 SELECT id, topic, file_reference FROM semantic_memory WHERE source='migration';
 ```
+
+It is **not** one-click reversible, and do not tell the user it is. There is no
+"undo this migration": `sleep.py --retire` takes one id per call, and `--purge`
+only touches rows that are already superseded or retired. The way back is the
+pre-import backup in M2 — which is why M2 is a step and not a suggestion — plus
+the source files, which stay where they are.
 
 ## Rules
 
@@ -27,6 +33,12 @@ SELECT id, topic, file_reference FROM semantic_memory WHERE source='migration';
   cannot state as a fact — report it and move on.
 - **Never `--force`.** `remember.py`'s near-duplicate guard rejecting a row is a
   correct outcome on a corpus of overlapping notes, not an obstacle.
+- **That guard is best-effort under concurrency.** It is a SELECT followed by an
+  INSERT with no transaction around the pair, so two workers holding overlapping
+  facts can both pass it and both insert. Overlapping content across files is the
+  premise of this migration, so this does happen: group overlapping files into
+  the same batch (M3) to shrink the window, and treat **D3 in M4 as the real
+  dedup** — which is why it is required here rather than optional.
 - **Never truncate.** A file over the 2000-char `MAX_TEXT` is split into separate
   facts, or condensed with the user's agreement. Note the writer appends
   `--keywords` into the stored text and counts them inside the same limit, so aim
@@ -61,8 +73,12 @@ Mechanical. Needs neither the database nor Ollama:
 python3 scripts/find-existing-memory.py
 ```
 
-Returns `config_dir`, `n_memory_files`, `n_index_files`, `total_chars`,
-`over_max_text`, and a `files` list where each entry carries a `kind`:
+Returns `config_dir`, `n_memory_files`, `n_index_files`, `n_claude_files`,
+`n_global`, `n_project`, `projects`, `total_chars`, `over_max_text`, `unreadable`
+(files it could not open — a gap, report it), and a `files` list where each entry
+carries `kind`, `scope` (`global` or `project`) and `project_dir`. Every count and
+total covers `kind: memory` files only, so a user who has a `CLAUDE.md` and no
+memory files gets `n_memory_files: 0` and is offered nothing.
 
 | `kind` | What it is | How to treat it |
 |---|---|---|
@@ -77,26 +93,43 @@ amount of work and several minutes of embedding, not a background detail.
 
 Then ask whether to migrate, and offer the scope choice explicitly:
 
-1. **global only** — `~/.claude/memory/*.md`. The safe default: these facts apply
-   everywhere.
-2. **global + project-scoped** — also `~/.claude/projects/*/memory/*.md`, written
-   with `--project` set so their narrower scope survives the move.
-3. **a subset** — the user names topics or files.
+1. **global only** — the `scope: "global"` entries. The safe default: these facts
+   apply everywhere.
+2. **global + project-scoped** — also the `scope: "project"` entries. Their
+   narrower scope has to survive the move, and **`--project` is not how it
+   survives**: that column means a tracking-tool work-item id (ClickUp/Jira, e.g.
+   `869e7xzp6`), while all the scanner can offer is `project_dir` — Claude Code's
+   mangled cwd (`-home-alex-Documents-Repositories-supercharged-memory`). That is
+   not an id, and a long one exceeds the column's `length(project) <= 128` check,
+   which `remember.py` does not pre-validate: it surfaces as a raw constraint
+   failure mid-batch. So leave `--project` unset unless the user names a real
+   work-item id, and carry the scope in the **text** instead — the fact's
+   situation line names the repository or directory it applies to, which the
+   `project_dir` slug is readable enough to derive. `file_reference` keeps the
+   exact origin either way.
+3. **a subset** — the user names topics, files, or one `project_dir`.
 
 If they decline, say so in one line and return to `SETUP.md`. Declining is a
 normal outcome; the files keep working exactly as they did.
 
 ## M2 — Backup first
 
-Only meaningful if the database already holds rows — a fresh one has nothing to
-lose, and `EMPTY` in M0 tells you which case you are in:
+**On `READY n`, run it. On `EMPTY`, skip it deliberately:**
 
 ```bash
-bash scripts/supercharged-memory-backup.sh
+bash scripts/supercharged-memory-backup.sh      # only when M0 said READY n
 ```
 
-An import is a bulk write. If the classification turns out wrong at scale, this
-dump is what makes "start over" cheap.
+`EMPTY` is the common case here — Step 7 runs right after the database is created
+— and the backup script *fails* on it: it validates a dump by requiring
+`INSERT INTO` lines, a database just built from `schema.sql` has none, so the
+script retries 5x5s and exits 1. Nothing is at risk in that state, but do not run
+it and then explain the error away. A fresh database has nothing to lose, and the
+source files are the fallback.
+
+On a database that already holds rows this dump is what makes "start over" cheap,
+and per the header above it is the only way back from a classification that turns
+out wrong at scale.
 
 ## M3 — Classify and write, in subagents
 
@@ -111,7 +144,10 @@ closest match and say so in the report rather than inventing a new one. Fixing
 this later means re-topicking every row by hand.
 
 Batch the files into groups of **≤8** and dispatch one worker per batch, all in
-one message. Each worker prompt must be self-contained: the file paths it owns,
+one message. **Group by subject, not alphabetically**: one worker's writes are
+serial, so putting the files that cover the same thing in the same batch is what
+lets the near-duplicate guard see them at all (across concurrent workers it
+cannot — see Rules). Each worker prompt must be self-contained: the file paths it owns,
 the topic vocabulary, the category table below, the exact `remember.py`
 invocation, and your model id for `--model`.
 
@@ -148,6 +184,10 @@ Give each worker this rule verbatim:
 > every `[[link]]`**: either fold in the fact it points at, or name the thing in
 > plain words. A row that says "see [[other-memory]]" is useless in a database.
 >
+> Do NOT pass `--project`. A `projects/<slug>` directory name is not a work-item
+> id, which is what that column means; name the repository or directory in the
+> fact text instead (see M1, scope choice).
+>
 > Preserve every concrete identifier verbatim — exact error strings, ids, CLI
 > flags, paths, version numbers, dates. These are the whole value of the corpus,
 > and they are what a rewrite silently smooths away.
@@ -161,7 +201,7 @@ Give each worker this rule verbatim:
 >   --keywords "<k1, k2, ...>" --source migration --model <your-model-id> \
 >   --file-reference "<absolute path of the source file>" \
 >   --created-at "<original date, YYYY-MM-DD HH:MM:SS>" \
->   [--project "<project>"] --text "<self-contained fact>"
+>   --text "<self-contained fact>"
 > ```
 >
 > Compose the memory text with the Write tool into a temp file and pass it as
@@ -183,11 +223,27 @@ Give each worker this rule verbatim:
 ### Why `--created-at` and `--file-reference` are not optional
 
 `--created-at` should carry the source file's original date, not today's. Take it
-from git when the memory directory is a repo, otherwise from the file's mtime:
+from git when the file's own directory is a work tree, otherwise from the file's
+mtime. Run git **in that directory** — not from the repo root, which is a
+different repository: `git log -- ~/.claude/memory/foo.md` from here fails with
+`fatal: ... is outside repository`, and a trailing `tail -1` turns that into exit
+0 with empty output. The failure then looks exactly like "this file has no git
+history", and every row quietly gets today's date — the outcome the
+paragraph below warns about:
 
 ```bash
-git log --diff-filter=A --format=%ad --date=format:'%Y-%m-%d %H:%M:%S' -- <file> | tail -1
+d="$(dirname "<file>")"
+when=""
+if git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # --reverse | head -1 is the ADD commit; no `tail` swallowing a git failure
+  when="$(git -C "$d" log --diff-filter=A --reverse \
+            --format=%ad --date=format:'%Y-%m-%d %H:%M:%S' -- "<file>" | head -1)"
+fi
+[ -n "$when" ] && src=git || { when="$(date -r "<file>" '+%Y-%m-%d %H:%M:%S')"; src=mtime; }
 ```
+
+Each worker reports which source it used per file (`git` or `mtime`), so a batch
+that fell back for every file is visible instead of reading as a clean run.
 
 Importing everything with today's date makes `sleep.py --staleness` and deep
 sleep's D7 describe a corpus that looks brand new while holding facts that are a
@@ -226,6 +282,7 @@ the report which you skipped and why:
 
 | Phase | Run it? | Why |
 |---|---|---|
+| D0 normal sleep first | skip | D0 exists to sift unprocessed episodic rows into semantic facts; an import writes none, so there is nothing for it to do. Skipping it is the one deviation from `DEEP-SLEEP.md`'s "always enter through a sleep pass" — say so in the report |
 | D1 backup | **yes** | D3 writes; this is the undo |
 | D2 purge | skip | nothing is superseded or retired yet |
 | D3 compaction | **yes** | the point of this phase: the files overlapped, so the rows do too |
@@ -233,6 +290,27 @@ the report which you skipped and why:
 | D5 re-index | **yes, required** | `CLAUDE.md` loads the topic index every session, and it is empty until rebuilt |
 | D6 eval upkeep | skip | no eval cases exist on a fresh install |
 | D7 Verify | **yes** | imported memory is old by definition; its paths, flags and versions may already be stale |
+
+**Capture the import manifest before D3 runs.** D3 merges with
+`remember.py --supersedes` and `--source deep-sleep`, and passes no
+`--file-reference` — so a merged survivor drops out of both the
+`source='migration'` audit query at the top of this file and the M3b resume query.
+The rows most likely to be merged are exactly the imported ones, since overlap is
+why D3 is required here. Write the mapping to a file first, so "which rows came
+from the import, and from which file" stays answerable:
+
+```bash
+tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list \
+  "SELECT id, file_reference, topic FROM semantic_memory WHERE source='migration' ORDER BY id;" \
+  > "Backups/migration-manifest-$(date +%F).csv"
+```
+
+(The same query through the `turso` MCP does just as well; what matters is that
+the mapping lands in a file. On Windows the open needs
+`--vfs experimental_win_iocp` alongside the WAL flag.)
+
+After D3, that file is the audit trail; the database no longer is. Report where
+it was written.
 
 Two things to expect at import scale, so they do not read as failures:
 

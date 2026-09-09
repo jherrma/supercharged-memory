@@ -210,7 +210,8 @@ python3 scripts/find-existing-memory.py
 ```
 
 - **`n_memory_files` is 0** → nothing to do. Say so in one line and continue to
-  Step 8.
+  Step 8. A `CLAUDE.md` on its own counts as `n_claude_files`, not as memory:
+  instructions are not facts, and there is nothing there to import.
 - **Anything found** → report the totals (files, characters, how many exceed the
   2000-char `MAX_TEXT`) and **ask whether to migrate it into the database**. On
   yes, follow `instructions/MIGRATE-EXISTING-MEMORY.md`, which imports the files
@@ -220,7 +221,9 @@ python3 scripts/find-existing-memory.py
 
 The migration is additive: it never deletes or edits a source file, and every row
 it writes is tagged `source='migration'` with a `file_reference` back to its
-file, so the whole import can be found or undone afterwards.
+file, so the import can be identified afterwards. It is not one-click
+reversible — the runbook's own backup step is the way back — so do not
+offer it as one.
 
 One thing to flag either way, because it is now true and easy to miss: this
 runbook has just appended a managed block to `~/.claude/CLAUDE.md`, so anything
