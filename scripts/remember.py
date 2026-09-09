@@ -2,7 +2,8 @@
 """Store ONE memory (no chunking). Hard cap 2000 chars (schema CHECK + here).
 
 Guards: refuses an empty --text (a lost command substitution would otherwise store
-a row holding only its keywords); baseline needs --confirm-baseline; refuses a
+a row holding only its keywords) and an empty --created-at (which would silently
+date an old memory today); baseline needs --confirm-baseline; refuses a
 near-duplicate (cosine < 0.10) unless --force; refuses if the table already holds
 rows embedded with a different model (mixed vector spaces break recall).
 NEVER pass PII — anonymize.
@@ -36,6 +37,16 @@ def store_memory(table, text, *, topic=None, project=None, category=None,
     if not text:
         sys.exit("refused: --text is empty. If you passed a command substitution such as "
                  '--text "$(cat file)", the file is missing or empty — nothing was stored.')
+    # Same shape of failure one flag over: `if created_at:` below treats "" as
+    # "not given" and lets the row take CURRENT_TIMESTAMP, so a substitution that
+    # came back empty -- `--created-at "$(stat ...)"` on a platform where the
+    # command is wrong, or a min(created_at) query that returned nothing -- dates
+    # a year-old fact today, while the caller reports the date it meant to use.
+    # Omitting the flag is how you ask for "now"; passing it empty is a bug.
+    if created_at is not None and not created_at.strip():
+        sys.exit("refused: --created-at is empty. If you passed a command substitution, "
+                 "it produced nothing — nothing was stored. Omit the flag to date the "
+                 "row now, or pass a real 'YYYY-MM-DD HH:MM:SS'.")
     if keywords:                                     # keywords live INSIDE the text
         text = f"{text}\n\nKeywords: {keywords}".strip()
     if category == "baseline" and not confirm_baseline:
