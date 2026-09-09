@@ -157,6 +157,13 @@ EPISODIC_MODE="$EPISODIC_MODE" SUPERCHARGED_MEMORY_TURSO_PATH="$DB" \
 It replaces the managed block and writes the new stamp. Any content the user has
 outside the markers is left untouched.
 
+Passing both values is a cross-check, not the only guard: the installer itself reads
+`EPISODIC_MODE` back out of the block it is about to replace, and refuses the run
+outright if `BASE_PATH` differs from the one that block was rendered from (override
+with `ALLOW_BASE_PATH_CHANGE=1` only when the repo really moved). Its closing report
+names where each value came from — check that `EPISODIC_MODE` reads `env` or
+`recovered from the existing block`, never `script default`.
+
 ## Step 7 — Report
 
 One summary: old → new HEAD, migrations applied (or none pending), what changed in

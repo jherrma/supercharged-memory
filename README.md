@@ -79,8 +79,12 @@ activates the instructions, creates the DB, and finally offers to set up coworke
    ```
 
    This renders `CLAUDE.md.template` into `~/.claude/CLAUDE.md` between managed
-   markers (idempotent — safe to re-run after any edit), substituting `BASE_PATH`,
-   `SUPERCHARGED_MEMORY_TURSO_PATH`, and `EPISODIC_MODE`. Restart your session to pick it up.
+   markers, substituting `BASE_PATH` and `EPISODIC_MODE`. Re-running replaces the
+   managed block and keeps everything outside it — and, because both of those values
+   are *rendered into* the block, a re-run reads them back out of it rather than
+   resetting them: a bare `bash scripts/install-claude-md.sh` preserves this machine's
+   episodic mode, and refuses outright if it would repoint the block at a different
+   `BASE_PATH` (see *Configuration*). Restart your session to pick it up.
 6. Create the database and check availability (the scripts refuse to
    silently create an empty DB, so build the schema first):
 
@@ -103,14 +107,23 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 | `BACKUP_DIR` | `./Backups` | Where daily dumps are written. |
 | `SUPERCHARGED_MEMORY_EVAL_DIR` | `<db parent>/eval` | Query-embedding cache for the eval harness. Derived data; the cases themselves live in the DB. |
 
-`install-claude-md.sh` reads two more env vars and bakes them into the rendered
-`~/.claude/CLAUDE.md` (they are template placeholders, not runtime script config):
+`install-claude-md.sh` reads three more env vars. `bash scripts/install-claude-md.sh --help`
+is the authoritative copy of this list; the table below is the prose one.
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db` | Written into the instructions so the agent restores to the right path. Keep it in sync with the `SUPERCHARGED_MEMORY_TURSO_PATH` the scripts use. |
-| `EPISODIC_MODE` | `major-events` | Episodic-storage policy (see below). Validated to one of the four keys. |
-| `BASE_PATH` | repo root | Points at this repo; the installer fills it in automatically — update it on a new machine. |
+| `EPISODIC_MODE` | `major-events`, **but recovered from the managed block being replaced** when there is one | Episodic-storage policy (see below), rendered into the block. Validated to one of the four keys. A block whose policy line can't be read is refused rather than silently defaulted. |
+| `BASE_PATH` | repo root (the parent of the folder holding the script) | Points at this repo; rendered into every path in the block. If the existing block was rendered from a *different* `BASE_PATH`, the run is refused — a stray run from a temporary clone or git worktree would otherwise repoint a live config at it. |
+| `ALLOW_BASE_PATH_CHANGE` | unset | Set to `1` to allow that repoint (the repo genuinely moved). |
+
+`SUPERCHARGED_MEMORY_TURSO_PATH` is read too, and falls back to the value in
+`~/.claude/settings.json` before the XDG default, but the template stopped
+referencing it in 05b1967 — so today it is substituted into nothing and only shows
+up in the installer's closing report. The path that matters at runtime is the one in
+`~/.claude/settings.json` (see above).
+
+Every value's source — env, recovered from the block, or default — is named in that
+closing report, so a re-install is auditable after the fact.
 
 ### Episodic memory policy
 
@@ -265,7 +278,8 @@ thin CLIs on top:
   statement boundaries because piping a dump into `tursodb` restores only a fraction
   of the rows (below). Refuses an existing target; exits non-zero on any row mismatch.
 - **`install-claude-md.sh`** — render the template into `~/.claude/CLAUDE.md`, stamping
-  the repo commit it rendered from (see *Staying up to date*).
+  the repo commit it rendered from (see *Staying up to date*). Recovers the values
+  already in the block it is about to replace, and refuses a `BASE_PATH` repoint.
 - **`coworkers.py`** — manage AI personas (below).
 
 ## Database schema
