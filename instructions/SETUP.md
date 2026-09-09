@@ -266,10 +266,13 @@ silently strands memory the user already has:
 # This gate is only worth as much as the interpreter that runs it, so prove the
 # interpreter first: the Store stub prints an advert and exits 0 (see Windows).
 python3 --version 2>&1 | grep -q '^Python 3' \
-  || echo "STOP: wrong interpreter — re-run this step with 'python'"
+  || { echo "STOP: wrong interpreter — re-run this step with 'python'"; exit 1; }
 python3 scripts/recall.py --candidates    # any DB/backup elsewhere?
 ```
 
+- **The block exited non-zero** → the interpreter check tripped and
+  `--candidates` never ran at all. Nothing was learned about candidates; re-run
+  the whole block with `python` before going further.
 - **No output, or output that is not a `configured path :` line** → the script
   never ran. Read this as *unknown*, **never** as "no candidates": that
   misreading is what strands a user's real memory behind a fresh empty DB.
