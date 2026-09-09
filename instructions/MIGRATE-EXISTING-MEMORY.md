@@ -56,7 +56,11 @@ it protects D3.
   facts, or condensed with the user's agreement. Note the writer appends
   `--keywords` into the stored text and counts them inside the same limit, so aim
   at roughly 1800 chars of prose — otherwise the write is refused after the work
-  of composing it.
+  of composing it. That 1800 is not advice the probe leaves you to remember:
+  `find-existing-memory.py` flags a file against the same effective budget
+  (`MAX_TEXT` minus a stated 200-char keyword reserve) and says which of the two
+  limits each flagged file hit, and `remember.py`'s over-cap refusal splits the
+  total into your text and the appended keyword line.
 - **Never mint a `baseline` row on your own.** That category needs
   `--confirm-baseline` and the user's explicit go-ahead, per `CLAUDE.md`.
 - **Not `backfill.py`, even though it looks like the tool for this.** It is the
@@ -95,19 +99,23 @@ Mechanical. Needs neither the database nor Ollama:
 python3 scripts/find-existing-memory.py
 ```
 
-Returns `config_dir`, `n_memory_files`, `n_index_files`, `n_claude_files`,
+Returns `config_dir`, `nothing_to_do`, `n_memory_files`, `n_index_files`, `n_claude_files`,
 `n_empty_files`, `n_global`, `n_project`, `projects`, `total_chars`, and a `files`
 list where each entry carries `kind`, `scope` (`global` or `project`) and
 `project_dir`. Every count and total of memory *to import* covers `kind: memory`
 files only, so a user who has a `CLAUDE.md` and no memory files gets
 `n_memory_files: 0` and is offered nothing.
 
+`nothing_to_do` is the combined "there is nothing here" verdict `SETUP.md` Step 7
+gates on: no importable memory **and** nothing skipped. Reaching this runbook means
+it was `false`.
+
 Four fields are the probe's gaps — **report each non-empty one**, because nothing
 else will:
 
 | field | what it holds |
 |---|---|
-| `over_max_text` | memory files above the 2000-char cap: split or condense, never truncate |
+| `over_max_text` | `{path, chars, reason}`: memory files that will not fit — split or condense, never truncate. The flag is against the **1800-char effective budget**, not the raw 2000-char cap, because `remember.py` appends `--keywords` into the same field the cap counts; each entry's `reason` says which of the two it hit, so a 1900-char file is flagged here instead of being refused mid-import |
 | `empty` | `.md` files with no content. `remember.py` exits `refused: --text is empty` on one, so there is nothing to import — they are counted as `n_empty_files`, not as memory |
 | `unreadable` | `{path, reason}`: a file that could not be read, a broken symlink, a directory that could not be listed (its contents are invisible, not absent), a symlink loop |
 | `excluded_dirs` | `{path, n_md, reason}`: directories left out on purpose — `.git`/`agents` at a memory root (Claude Code's own protected subdirectories), or a symlink pointing above the memory root. `n_md` says how much is in there, so a *topic* directory that happens to be named `agents` is visible rather than silently dropped |
@@ -167,12 +175,42 @@ source files are the fallback.
 
 On a database that already holds rows this dump is what makes "start over" cheap:
 restoring it puts the database back exactly as it was before the import, which is
-what you want if a classification turns out wrong at scale — with
-`python3 scripts/restore.py --dump <that dump> --out <fresh path>`, into a **new**
-file, never over the live database. On `EMPTY` there is
-no earlier state to restore, so the equivalent reset is a rebuild from
-`schema.sql` followed by another import. Either way the source files are
-untouched, and there is no bulk undo of the rows themselves — see the header.
+what you want if a classification turns out wrong at scale. **But `restore.py`
+refuses to write over an existing file**, so a restore is a new database at a new
+path — and until everything that reads the database is pointed at that new file,
+the live one is still the database holding the import. Reporting "restored" after
+step 1 alone leaves the user exactly where they were. All three steps:
+
+1. `python3 scripts/restore.py --dump <that dump> --out <fresh path>` — into a
+   **new** file, never over the live database. Read its per-table `in dump` vs
+   `restored` counts and treat a mismatch as a failed restore.
+2. Repoint `SUPERCHARGED_MEMORY_TURSO_PATH` at the new file. `~/.claude/settings.json`
+   under `env` is the authoritative location — Claude Code runs its Bash tool
+   non-interactively and never sources `~/.zshrc` / `~/.bashrc`, so a profile
+   export alone leaves every script on the old path. `SETUP.md` Step 4 has that
+   procedure and its `jq -e` verification, and Step 6's candidate branch says the
+   same thing in one line ("settings.json + profile + MCP"); follow it rather than
+   improvising a second one.
+3. Re-register the `turso` MCP server on the new path. It carries the path in its
+   argv — `tursodb "<path>" --mcp --experimental-multiprocess-wal`, `SETUP.md`'s
+   Done section — so a registration left behind keeps every ad-hoc SQL read
+   pointed at the imported database while the scripts read the restored one.
+   Worse, `tursodb` **creates** a file at whatever path it is opened with, so a
+   stale registration (or an old export in a shell) re-creates one at the *old*
+   path if the file was moved away: verified 2026-09-09, opening a non-existent
+   path left a 0-byte `.db` plus `-tshm`/`-wal` behind, and pointing
+   `SUPERCHARGED_MEMORY_TURSO_PATH` at that file made `recall.py --status` print
+   `ERROR × Parse error: no such table: semantic_memory` instead of `MISSING` —
+   `memlib.db_exists()` only checks that the path exists, so the one branch that
+   would have listed the real database as a `CANDIDATE DB` never runs. That is the
+   "wrong path, not lost data" failure `README.md` describes, in its most
+   confusing form.
+
+Then restart the session and confirm with `python3 scripts/recall.py --status`,
+which prints the configured path and where it came from. On `EMPTY` there is no
+earlier state to restore, so the equivalent reset is a rebuild from `schema.sql`
+followed by another import. Either way the source files are untouched, and there
+is no bulk undo of the rows themselves — see the header.
 
 ## M3 — Classify and write, in subagents
 
@@ -307,6 +345,19 @@ rather than a wrong date, but the fallback still has to be right. `stat -c %y` (
 `stat -f %m` (BSD) is the portable pair; the `${s%%.*}` trims GNU's fractional
 seconds and zone off `2025-03-04 09:12:07.000000000 +0100`.
 
+**A malformed value is refused too, not stored.** `remember.py` accepts
+`YYYY-MM-DD HH:MM:SS`, or a bare `YYYY-MM-DD` which it stores as that day at
+`00:00:00`; anything else exits `refused: --created-at '<value>' is not a date
+this system can store`, before the embedding call. That guard exists because the
+column is plain TEXT with no `CHECK`: measured 2026-09-09, `--created-at
+"March 2024"` was stored verbatim, `julianday()` then returned NULL, the row fell
+into `sleep.py --staleness`'s `180d+` bucket whatever its real age was, and
+`min(created_at)` sorted `'M'` after `'2'` so `oldest_current` ignored it. Since
+this snippet builds the string **in shell**, a wrong `stat`/`date` branch is
+exactly how such a value gets produced — so keep the trim, and if a file yields
+something that is not one of those two shapes, treat it like the empty case
+below.
+
 Each worker reports which source it used per file (`git` or `mtime`), so a batch
 that fell back for every file is visible instead of reading as a clean run. **If
 `when` is empty after the branch above, report the file as `date=none` and omit
@@ -333,14 +384,37 @@ GROUP BY file_reference;
 ```
 
 That is the resume position, and it is why `--file-reference` is mandatory in M3.
-Re-derive the remaining set as *files with no rows*, plus *every file from a batch
-whose worker died* — the latter may be half-written, and nothing else can tell you
-which. Re-running a fully imported file is cheap and safe: every row comes back
-`duplicate`. Re-running a half-written one is the whole point, since the guard
-rejects the facts already stored and accepts only the missing ones.
+**Skip the files it already returns — do not re-import them.** Re-derive the
+remaining set as:
 
-Give resumed workers the same "check what is already there first" query, so they
-skip finished files instead of re-reading them.
+- *files with no rows at all* — the work still to do, and
+- *every file from a batch whose worker died* — those may be half-written, and
+  nothing else can tell you which.
+
+Then dispatch only that set, and give each resumed worker the query above so it
+re-checks its own files before its first write.
+
+**Do not lean on the near-duplicate guard to absorb a re-import.** It compares
+embeddings against `DUP_DIST = 0.10`, so it reliably catches only a re-run whose
+text is near-identical to what is already stored — and a worker composing the same
+fact a second time from the same file does not reproduce its own earlier wording.
+Measured 2026-09-09 (bge-m3), four rewrites of one already-imported fact from one
+memory file: a near-verbatim restatement came back at cosine `0.0331` and was
+**refused**, while a terse restatement (`0.1622`), a rewrite emphasising a
+different consequence (`0.1394`) and — worst — the *situation / what is true / how
+to apply* shape this runbook's own worker contract asks for, with its own keyword
+list (`0.1796`), were all **accepted**. That is a duplicate row the worker reports
+as a clean `stored(<id>)`. The guard is best-effort in two separate ways: it sees
+wording, not facts, and it is a SELECT followed by an unguarded INSERT (see Rules).
+Do **not** raise `DUP_DIST` to compensate: it is a global constant that changes
+what every future write and every recall-quality measurement counts as a
+duplicate, and it is not this pass's to tune.
+
+The one file worth re-running is a half-written one, and that is a deliberate
+trade: the guard rejects most of what is already stored and the missing facts get
+written, at the risk of a paraphrase slipping through as above. Say in the report
+which files were re-run for that reason, so a duplicate found later has an
+explanation — and note that M4's D3 is where such a pair actually gets merged.
 
 ## M4 — Consolidate (the deep-sleep phases that apply)
 
@@ -363,7 +437,7 @@ skip to the user as a reason.
 | D4 pattern mining | skip on `EMPTY` | patterns come from episodic events, and an import writes none. **On `READY n`: it applies unchanged** — that episodic log is the user's own history |
 | D5 re-index | **yes, required** | `CLAUDE.md` loads the topic index every session, and it is empty until rebuilt |
 | D6 eval upkeep | skip on `EMPTY` | `eval_cases` is empty on a fresh install, and D6 says to skip and say so. **On `READY n`: required.** D6 runs after D3 precisely because a merge breaks an eval case. Reproduced 2026-09-09: a case pointing at a row D3 merged makes `eval-harness.py --validate` print `s01 [semantic] NO VALID TARGET LEFT` over `2 -> 3 (superseded; repoint)` and exit 1. Skipping D6 leaves every case D3 just broke pointing at a superseded row, and the next run reads it as a ranking regression |
-| D7 Verify | **yes** | imported memory is old by definition; its paths, flags and versions may already be stale |
+| D7 Verify | **yes** | imported memory is old by definition; its paths, flags and versions may already be stale. Its step 4 re-runs `eval-harness.py --validate` after a retirement; on `EMPTY` that prints `nothing to validate` and exits 0, which is the expected outcome here and not a failed step |
 
 **D3 must carry each merge's oldest input date.** `DEEP-SLEEP.md`'s D3 has the
 command and the reasoning; it matters here more than anywhere, because M3 dated
