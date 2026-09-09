@@ -3,8 +3,9 @@
 
 Central place for: DB/Ollama config, embedding (with dim assert), compact vector
 literals, SQL escaping, and a robust tursodb runner (failure detected on the exit
-status, on stderr, and on a stdout that is nothing but a diagnostic;
-phrase-scoped busy backoff). Import as `memlib`.
+status, on stderr, and on a stdout that is nothing but a diagnostic; busy backoff
+on the unanchored phrase `database is busy|locked` in either stream). Import as
+`memlib`.
 """
 import json, os, re, subprocess, sys, time, urllib.request
 from pathlib import Path
@@ -260,8 +261,10 @@ def exec_sql(sql, mode="line"):
     A failure is a non-zero exit, an error on stderr, or a stdout that holds a
     tursodb diagnostic and nothing else (see _stdout_reports_failure -- tursodb
     reports SQL-level errors on stdout with an EMPTY stderr). Of those failures
-    only a `database is busy/locked` phrase retries, with backoff; everything else
-    raises RuntimeError.
+    only one retries, with backoff: the phrase `database is (busy|locked)` found
+    anywhere in stderr or in a failed run's stdout -- unanchored, NOT scoped to
+    diagnostic-prefixed lines, because contention prints a bare `database is busy`
+    (see _is_busy). Everything else raises RuntimeError.
     """
     last = ""
     for attempt in range(6):

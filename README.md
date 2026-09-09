@@ -250,10 +250,10 @@ agent's Bash tool runs non-interactively and never sources `~/.zshrc` or `~/.bas
 
 `scripts/memlib.py` is the shared core every script imports: config, embedding
 (with a dimension assert), compact vector literals, SQL escaping, and a robust
-`tursodb` runner (failure detected on the exit status and stderr, phrase-scoped
-busy backoff read off both streams — see [Concurrency](#concurrency--locking)).
-The rest are
-thin CLIs on top:
+`tursodb` runner — a failure is a non-zero exit, an error on stderr, or a stdout
+that is nothing but a diagnostic, and the busy backoff fires on the unanchored
+phrase `database is busy|locked` in either stream (see
+[Concurrency](#concurrency--locking)). The rest are thin CLIs on top:
 
 - **`remember.py`** — one memory = one row (no chunking). Folds `--keywords` into
   the text, embeds it, inserts. Guards: baseline needs `--confirm-baseline`;
@@ -519,10 +519,17 @@ to count, but only structurally: this corpus stores tursodb's own error messages
 as memories, so a successful `SELECT memory_text` can print lines byte-identical
 to a diagnostic, and what tells them apart is that a real failure prints no rows
 around them (a successful write prints nothing; a successful read always prints at
-least one non-diagnostic line). Only then is stdout scanned **line by line** for
-the phrase `database is busy|locked`, on diagnostic lines only (`  × …`, `  x …`
-under miette's ASCII theme on a legacy Windows codepage, a wrapped `  │ …`
-continuation, or a line-initial `Error:`), and only a match there retries.
+least one non-diagnostic line). Only a failure then retries, and only when the
+phrase `database is busy|locked` appears anywhere in stderr or stdout.
+That search is **unanchored on purpose** — deliberately *not* restricted to
+diagnostic-shaped lines (`  × …`, `  x …` under miette's ASCII theme on a legacy
+Windows codepage, a wrapped `  │ …` continuation, a line-initial `Error:`),
+because contention is the one error that carries no prefix at all: a contended
+write prints exactly `database is busy`, so the prefix gate meant the backoff
+never fired. Reading all of stdout is safe because it is read only once the run
+has already failed — nothing landed, so a retry cannot duplicate a write, and a
+row body that merely quotes the phrase costs a few seconds of pointless backoff
+before the same exception.
 
 ## Backup & restore
 
