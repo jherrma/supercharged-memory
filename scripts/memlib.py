@@ -270,7 +270,9 @@ def exec_sql(sql, mode="line"):
         # The busy/locked probe reads stdout only ONCE the run has failed, and only
         # its diagnostic lines. Scanning a successful run's stdout would let a row
         # body containing "database is busy" (a memory this corpus invites) re-run
-        # a write that had already landed.
+        # a write that had already landed. Retrying is safe however the failure was
+        # detected, exit code or not: contention is reported *instead of* running
+        # the statement, so there is no landed write for the retry to duplicate.
         if failed:
             last = r.stderr.strip() or r.stdout.strip() or "unknown tursodb error"
         if _is_busy(r.stderr, r.stdout if failed else ""):
