@@ -21,11 +21,24 @@ came from, so the import can be identified afterwards:
 SELECT id, topic, file_reference FROM semantic_memory WHERE source='migration';
 ```
 
-It is **not** one-click reversible, and do not tell the user it is. There is no
-"undo this migration": `sleep.py --retire` takes one id per call, and `--purge`
-only touches rows that are already superseded or retired. The way back is the
-pre-import backup in M2 — which is why M2 is a step and not a suggestion — plus
-the source files, which stay where they are.
+It is **not** one-click reversible, and do not tell the user it is. **There is no
+bulk undo of the imported rows**: `sleep.py --retire` takes one id per call, and
+`--purge` only touches rows that are already superseded or retired. What the way
+back *is* depends on what M0 found:
+
+- **The source files, always.** Nothing here deletes or edits one, so everything
+  the import read from is still on disk, unchanged, either way. That is the
+  guarantee to state to the user.
+- **`READY n`** (the database already held rows) — M2's pre-import dump restores
+  it to exactly its pre-import state, which is why M2 is a step and not a
+  suggestion there.
+- **`EMPTY`** (the common case: Step 7 runs right after the database is created)
+  — M2 is skipped deliberately and there is **no** pre-import dump. Nothing was
+  at risk, and "start over" means rebuilding from `schema.sql` and importing
+  again.
+
+M4's D1 backup is taken *after* the import, so it is not an undo of it either —
+it protects D3.
 
 ## Rules
 
@@ -127,9 +140,14 @@ script retries 5x5s and exits 1. Nothing is at risk in that state, but do not ru
 it and then explain the error away. A fresh database has nothing to lose, and the
 source files are the fallback.
 
-On a database that already holds rows this dump is what makes "start over" cheap,
-and per the header above it is the only way back from a classification that turns
-out wrong at scale.
+On a database that already holds rows this dump is what makes "start over" cheap:
+restoring it puts the database back exactly as it was before the import, which is
+what you want if a classification turns out wrong at scale — with
+`python3 scripts/restore.py --dump <that dump> --out <fresh path>`, into a **new**
+file, never over the live database. On `EMPTY` there is
+no earlier state to restore, so the equivalent reset is a rebuild from
+`schema.sql` followed by another import. Either way the source files are
+untouched, and there is no bulk undo of the rows themselves — see the header.
 
 ## M3 — Classify and write, in subagents
 
@@ -250,8 +268,8 @@ sleep's D7 describe a corpus that looks brand new while holding facts that are a
 year old. That is precisely backwards: old imported memory is the most likely to
 be stale, and the date is the only signal those phases have.
 
-`--file-reference` is what makes the import auditable and reversible, and it is
-the only link back to the file a row came from.
+`--file-reference` is what makes the import auditable and resumable (M3b), and it
+is the only link back to the file a row came from.
 
 ## M3b — If the run is interrupted, resume from the database
 

@@ -148,7 +148,10 @@ Setup Step 7 offers it; you can also ask for it later ("migrate my memory").
   plain `CLAUDE.md` is not reported as memory to migrate.
 - **Additive, not reversible.** No source file is deleted or edited, and every row
   carries `source='migration'` plus a `file_reference` back to its file. There is
-  no bulk undo, though — the pre-import backup is the way back.
+  no bulk undo of the imported rows, though: the source files are always the way
+  back, a pre-import backup restores a database that already held rows, and on a
+  fresh (`EMPTY`) one — the common case — there is no pre-import dump because
+  there is nothing to lose, so the reset is a rebuild from `schema.sql`.
 - **Classification runs in subagents**, the same contract the sleep runbooks use;
   the orchestrator never reads the corpus in bulk.
 

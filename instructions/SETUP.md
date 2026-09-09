@@ -222,8 +222,8 @@ python3 scripts/find-existing-memory.py
 The migration is additive: it never deletes or edits a source file, and every row
 it writes is tagged `source='migration'` with a `file_reference` back to its
 file, so the import can be identified afterwards. It is not one-click
-reversible — the runbook's own backup step is the way back — so do not
-offer it as one.
+reversible — there is no bulk undo of the imported rows, and the way back is the
+source files, which the import never touches — so do not offer it as one.
 
 One thing to flag either way, because it is now true and easy to miss: this
 runbook has just appended a managed block to `~/.claude/CLAUDE.md`, so anything
