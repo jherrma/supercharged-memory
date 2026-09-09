@@ -53,6 +53,13 @@ Precedence: explicit env > value recovered from the existing block > default.
   ALLOW_BASE_PATH_CHANGE=1
                       allow re-rendering an existing block from a different
                       BASE_PATH (the repo genuinely moved).
+  PYTHON_BIN=...      interpreter rendered into every command in the block.
+                      default: python3, but `python` on Windows, where python3
+                      is a Microsoft Store alias stub that prints "Python was
+                      not found" and EXITS 0 -- so a rendered python3 command
+                      reads as a successful empty result. Either a command
+                      (`python`, `py -3`) or a path; a path containing spaces
+                      is quoted for you, other whitespace is refused.
 
 Every run writes TARGET. The closing report names where each value came from.
 USAGE
@@ -77,6 +84,62 @@ else
   BASE_PATH="$(dirname "$SCRIPT_DIR")"
   BASE_SRC="default (parent of $SCRIPT_DIR)"
 fi
+# On Windows this script runs under Git Bash, so `pwd` yields an MSYS path
+# (/c/Users/...). That path is baked into ~/.claude/CLAUDE.md verbatim and only Git
+# Bash can resolve it -- a session driving PowerShell cannot open a single script it
+# names. cygpath -m gives the mixed form (C:/Users/...), which both shells accept.
+# No-op where cygpath does not exist.
+if command -v cygpath >/dev/null 2>&1; then
+  BASE_PATH="$(cygpath -m "$BASE_PATH")"
+fi
+# Interpreter for the rendered command prefix. `python3` does not exist on Windows:
+# the name is taken by a Microsoft Store alias stub that prints "Python was not
+# found" and EXITS 0 -- so `python3 recall.py --status` reads as a successful empty
+# result, and a session could then offer to restore a backup over a healthy DB.
+# Override with PYTHON_BIN.
+if [ -n "${PYTHON_BIN:-}" ]; then
+  PY="$PYTHON_BIN"
+  # PYTHON_BIN's documented case is an interpreter PATH on Windows, and such a path
+  # survives neither Git Bash nor a template substitution. cygpath -m normalises it
+  # to C:/... the way BASE_PATH is normalised; a bare command name passes through
+  # unchanged, and this is a no-op where cygpath does not exist.
+  if command -v cygpath >/dev/null 2>&1; then PY="$(cygpath -m "$PY")"; fi
+else
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) PY="python" ;;
+    *)                    PY="python3" ;;
+  esac
+fi
+# The template renders the interpreter UNQUOTED -- `{{PY}} "{{BASE_PATH}}/scripts/x.py"`
+# -- because PYTHON_BIN has two legitimate shapes and one blanket rule breaks one of
+# them. An interpreter PATH must be quoted: an all-users Windows install lands in
+# `C:\Program Files\Python314\python.exe`, which cygpath -m turns into
+# `C:/Program Files/Python314/python.exe`, and unquoted that prefix splits at the
+# space into the command `C:/Program` plus a stray argument. A multi-word launcher
+# command (`py -3`) must NOT be quoted, or the shell looks the whole string up as one
+# filename. Nothing distinguishes them but what they are, so decide it here, once, and
+# bake the quotes into the value itself. Whitespace that is neither is refused rather
+# than rendered: the result lands in a file nobody re-reads, and every memory command
+# of every future session would fail on it.
+# PY is what gets RENDERED, and the case below may wrap it in quotes. PY_RUN is the
+# same interpreter in a form this script can execute itself (settings_db below needs
+# one). Keep them separate: running a value with literal quotes in it fails.
+PY_RUN="$PY"
+case "$PY" in
+  *[[:space:]]*)
+    if [ -f "$PY" ]; then
+      PY="\"$PY\""                                        # interpreter path
+    elif command -v "${PY%%[[:space:]]*}" >/dev/null 2>&1; then
+      :                                                   # launcher command, e.g. `py -3`
+    else
+      echo "PYTHON_BIN='$PY' contains whitespace but is neither an existing file" >&2
+      echo "(an interpreter path, which would be quoted) nor a command whose first" >&2
+      echo "word resolves (a launcher such as 'py -3'). Refusing: the rendered" >&2
+      echo "prefix would split at the space and every command in the installed" >&2
+      echo "instructions would fail." >&2
+      exit 1
+    fi ;;
+esac
 TEMPLATE="$BASE_PATH/CLAUDE.md.template"
 TARGET="${TARGET:-$HOME/.claude/CLAUDE.md}"
 BEGIN="<!-- BEGIN agentic-memory (managed by install-claude-md.sh) -->"
@@ -102,6 +165,11 @@ if [ -n "$BLOCK" ]; then
   PREV_MODE="$(printf '%s\n' "$BLOCK" \
     | grep -o 'Episodic policy on this machine — `[a-z-]*`' \
     | grep -o '`[a-z-]*`' | tr -d '`' | head -1 || true)"
+  # The path alternation accepts a Windows drive-letter prefix (C:/...), and the
+  # command strip accepts `python` and a quoted interpreter path, because this branch
+  # renders those. Without both, PREV_BASE came back EMPTY on every Windows install:
+  # the mismatch guard then degraded to its "no recognisable repo paths" warning and
+  # never actually protected a Windows machine from a silent repoint.
   # BASE_PATH is not labelled in the block, it is just the prefix of every path
   # in it. Take the most common prefix among the paths that end in a known repo
   # subpath, so one reworded template line cannot flip the answer. Paths are cut
@@ -110,8 +178,10 @@ if [ -n "$BLOCK" ]; then
   # truncated, and the mismatch check below would fire on a path that matches.
   PREV_BASE="$(printf '%s\n' "$BLOCK" \
     | grep -oE '`[^`]+`' \
-    | sed -E 's/^`//; s/`$//; s/^(bash|python3) //; s/^"//; s/"$//' \
-    | sed -nE 's;^(/.+)/(README\.md|scripts|instructions|Backups)(/.*)?$;\1;p' \
+    | sed -E 's/^`//; s/`$//'  \
+    | sed -E 's/^(bash|python3|python|py -3) //; s/^"[^"]*python[^"]*" //'  \
+    | sed -E 's/^"//; s/"$//'  \
+    | sed -nE 's;^([A-Za-z]:/.+|/.+)/(README\.md|scripts|instructions|Backups)(/.*)?$;\1;p'  \
     | sort | uniq -c | sort -rn | head -1 | sed -E 's/^ *[0-9]+ //' || true)"
 fi
 
@@ -140,10 +210,14 @@ fi
 settings_db() {
   local f="$HOME/.claude/settings.json"
   [ -f "$f" ] || return 0
-  # python3 first (every other script here already needs it); jq only if it is
-  # installed -- neither is a hard dependency of this script.
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import json,sys
+  # Use the interpreter resolved above, NOT a literal `python3`. On Windows
+  # `command -v python3` SUCCEEDS -- the name is a Microsoft Store alias stub that
+  # prints "Python was not found" and exits 0 -- so the literal form returned empty
+  # here and this function silently fell through to the XDG default, reporting
+  # DB_SRC="XDG default" on a machine whose settings.json held the real path. That is
+  # the same exit-0 stub this branch exists to work around.
+  if [ -n "$PY_RUN" ] && $PY_RUN -c "import sys" >/dev/null 2>&1; then
+    $PY_RUN -c 'import json,sys
 try:
     print(json.load(open(sys.argv[1])).get("env",{}).get("SUPERCHARGED_MEMORY_TURSO_PATH","") or "")
 except Exception:
@@ -236,15 +310,41 @@ awk '{l[NR]=$0} END{e=NR; while(e>0 && l[e]~/^[[:space:]]*$/) e--; for(i=1;i<=e;
   "$TARGET" > "$tmp2"
 mv "$tmp2" "$TARGET"
 
-# Append the freshly rendered block ( | delimiter: paths contain slashes.
-# EPISODIC_MODE is validated to a fixed keyword set above, so it's sed-safe ).
+# Substitute the placeholders LITERALLY. A sed replacement is NOT literal: GNU sed
+# reads \U \L \t \n and & inside one, so PYTHON_BIN=C:\Python314\python.exe rendered
+# as C:Python314python.exe -- and the report line below still echoed the value
+# correctly, so nothing surfaced until a session tried to run a script. awk with
+# index/substr does plain string replacement, and the values arrive through ENVIRON,
+# so nothing processes escapes on the way in either.
+render() {
+  R_BASE_PATH="$BASE_PATH" R_PY="$PY" R_DB="$SUPERCHARGED_MEMORY_TURSO_PATH" \
+  R_EPISODIC_MODE="$EPISODIC_MODE" R_EPISODIC_RULE="$EPISODIC_RULE" \
+  awk '
+    function rep(s, from, to,   out, i) {
+      out = ""
+      while ((i = index(s, from)) > 0) {
+        out = out substr(s, 1, i - 1) to
+        s = substr(s, i + length(from))
+      }
+      return out s
+    }
+    {
+      l = $0
+      l = rep(l, "{{BASE_PATH}}", ENVIRON["R_BASE_PATH"])
+      l = rep(l, "{{PY}}", ENVIRON["R_PY"])
+      l = rep(l, "{{SUPERCHARGED_MEMORY_TURSO_PATH}}", ENVIRON["R_DB"])
+      l = rep(l, "{{EPISODIC_MODE}}", ENVIRON["R_EPISODIC_MODE"])
+      l = rep(l, "{{EPISODIC_RULE}}", ENVIRON["R_EPISODIC_RULE"])
+      print l
+    }
+  ' "$1"
+}
+
+# Append the freshly rendered block.
 {
   printf '\n%s\n' "$BEGIN"
   printf '%s\n' "$STAMP"
-  sed -e "s|{{BASE_PATH}}|$BASE_PATH|g" \
-      -e "s|{{SUPERCHARGED_MEMORY_TURSO_PATH}}|$SUPERCHARGED_MEMORY_TURSO_PATH|g" \
-      -e "s|{{EPISODIC_MODE}}|$EPISODIC_MODE|g" \
-      -e "s|{{EPISODIC_RULE}}|$EPISODIC_RULE|g" "$TEMPLATE"
+  render "$TEMPLATE"
   printf '%s\n' "$END"
 } >> "$TARGET"
 
@@ -254,6 +354,7 @@ echo "installed agentic-memory block into $TARGET"
 echo "BASE_PATH                      = $BASE_PATH   [$BASE_SRC]"
 echo "SUPERCHARGED_MEMORY_TURSO_PATH = $SUPERCHARGED_MEMORY_TURSO_PATH   [$DB_SRC]"
 echo "EPISODIC_MODE                  = $EPISODIC_MODE   [$EPISODIC_SRC]"
+echo "PY                             = $PY   (as rendered)"
 echo "synced-at                      = $SYNC_SHA"
 if [ -n "$BLOCK" ]; then
   echo "replaced a block rendered from ${PREV_BASE:-<unrecognised>} with EPISODIC_MODE ${PREV_MODE:-<unreadable>}"

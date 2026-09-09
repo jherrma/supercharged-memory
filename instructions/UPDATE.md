@@ -10,6 +10,16 @@ Work from the repository root. Report each step in one line. **Ask before
 applying anything** — this runbook reads and reports on its own, but never
 changes the machine without the user's ok.
 
+> **On Windows, run every `python3` in this file as `python`, and add `--vfs
+> experimental_win_iocp` to every `tursodb` command in it.** There is no
+> `python3` on Windows: the name is a Microsoft Store alias stub that prints
+> `Python was not found` **and exits 0**, so a command reads as a successful,
+> empty result and the agent reports work it never did. And
+> `--experimental-multiprocess-wal` on its own is refused by Windows' default IO
+> backend (`experimental multiprocess WAL is not supported by the active IO
+> backend`), so a `tursodb` line without the VFS does nothing at all — pair the
+> two flags, never drop the WAL one. See `instructions/SETUP.md`, section *Windows*.
+
 Two variables used throughout:
 
 - `TARGET` — the installed instructions, default `~/.claude/CLAUDE.md`

@@ -37,7 +37,7 @@ MARK = "@@Q"
 def sql(db, statements):
     """Pipe a chunk of statements. Every statement must be ONE physical line: the
     CLI splits piped input on line boundaries."""
-    p = subprocess.run([M.TURSO, str(db), M.FLAG, "-q", "-m", "list"],
+    p = subprocess.run([M.TURSO, str(db), *M.OPEN_ARGS, "-q", "-m", "list"],
                        input="\n".join(statements) + "\n",
                        capture_output=True, text=True, encoding="utf-8", timeout=900)
     if p.returncode != 0 or "error" in p.stderr.lower():

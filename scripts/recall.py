@@ -69,7 +69,12 @@ def token_weights(cands, table, base):
         for t in cands)
     out = M.exec_sql(f"SELECT {sums}, COUNT(*) FROM {table}_memory WHERE {base};",
                      mode="list").strip().splitlines()
-    vals = [int(x) for x in out[0].split("|")] if out else []
+    # SUM() over zero matching rows is NULL, which -m list renders as an empty
+    # field ("|0" for one token) -- so a table with no rows yet raised ValueError
+    # here instead of reaching the shape guard below. Hits the FIRST search after
+    # a fresh setup, where episodic_memory is empty and --table defaults to both.
+    # NULL means df=0, which is exactly what the IDF below wants.
+    vals = [int(x or 0) for x in out[0].split("|")] if out else []
     if len(vals) != len(cands) + 1:          # unexpected shape: fall back to flat weights
         toks = cands[:MAX_TOKENS]
         return toks, {t: 1.0 for t in toks}

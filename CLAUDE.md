@@ -47,12 +47,12 @@ A commit cannot reference its own sha, so **the note goes in the commit immediat
 
 ## Runtime dependencies (not installed by this repo)
 
-- **tursodb** (Turso 0.7.1, Rust SQLite rewrite w/ native vectors) — `curl -sSL tur.so/install | sh`. Registered as the `turso` MCP server for ad-hoc SQL. Its `current_database` MCP tool misreports `:memory: (default)` for a CLI-opened DB ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061)) — verify with a real `SELECT`, never `open_database`.
+- **tursodb** (Turso 0.7.2 — the targeted version; 0.7.0+ is the floor. Rust SQLite rewrite w/ native vectors) — `curl -sSL tur.so/install | sh`. Registered as the `turso` MCP server for ad-hoc SQL. Its `current_database` MCP tool misreports `:memory: (default)` for a CLI-opened DB ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061)) — verify with a real `SELECT`, never `open_database`.
 - **Ollama** at `localhost:11434` running the **bge-m3** embedding model (`ollama pull bge-m3`), 1024-dim.
 
 ## Common commands
 
-All scripts honor env overrides `TURSO_BIN`, `SUPERCHARGED_MEMORY_TURSO_PATH`, `BACKUP_DIR`, `OLLAMA_URL`, `EMBED_MODEL` (defaults in `scripts/memlib.py`), plus `RECALL_ALPHA` (`scripts/recall.py`).
+All scripts honor env overrides `TURSO_BIN`, `SUPERCHARGED_MEMORY_TURSO_PATH`, `BACKUP_DIR`, `OLLAMA_URL`, `EMBED_MODEL` (defaults in `scripts/memlib.py`), plus `RECALL_ALPHA` (`scripts/recall.py`), `TURSO_VFS` (tursodb IO backend; `none` disables it — Windows detail, see `instructions/SETUP.md`) and `PYTHON_BIN` (`scripts/install-claude-md.sh`).
 
 ```bash
 # Activation — render template into ~/.claude/CLAUDE.md (idempotent; re-run after any edit)
@@ -100,13 +100,14 @@ bash scripts/supercharged-memory-backup.sh
 # boundaries and then COUNTS every table against the dump; it exits non-zero on a mismatch.
 python3 scripts/restore.py --out /path/to/new.db          # defaults to the newest backup
 python3 scripts/restore.py --dump Backups/<file>.sql.gz --out /path/to/new.db
+# every hand-run tursodb command needs --vfs experimental_win_iocp on Windows (the scripts add it themselves)
 tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql   # rebuild empty schema — PIPE it, don't pass as arg
 python3 scripts/seed.py                          # empty by default; add SEM/EPI entries first
 ```
 
 ## Architecture
 
-**`scripts/memlib.py` is the shared core** every script imports — config/env, `embed()` (asserts 1024 dims), vector literal formatting, SQL escaping (`q`, `like_lit`), and `exec_sql()`, the one tursodb runner: it detects errors on **stderr only** (so row data on stdout can't false-trigger) and retries with backoff on `busy|locked`. Everything else is a thin CLI on top of it.
+**`scripts/memlib.py` is the shared core** every script imports — config/env, `embed()` (asserts 1024 dims), vector literal formatting, SQL escaping (`q`, `like_lit`), and `exec_sql()`, the one tursodb runner: it detects a failure on the **exit status, on stderr, and on stdout** — tursodb reports SQL-level errors on stdout with an *empty* stderr, so stdout has to count, but only when it holds a diagnostic and **nothing else** (this corpus stores tursodb's error messages as memories, so a successful `SELECT` can print lines byte-identical to a real diagnostic; what separates them is the absence of row output around them). It then retries with backoff only on the phrase `database is busy|locked`, searched **unanchored** across stderr and — once the run has already failed — stdout, because contention prints a bare `database is busy` with no diagnostic prefix at all; never on the bare words, which a query text or a row body can contain. Everything else is a thin CLI on top of it.
 
 **Two memory tables (`schema.sql`), one row per memory, no chunking:**
 - `semantic_memory` — timeless facts, **revisable** via a supersede chain (`superseded_by IS NULL` = current truth) and soft-deletable via `retired_at` (set only by `sleep.py --retire`; current truth also requires `retired_at IS NULL`). Category ∈ `baseline|user|feedback|project|reference`.
@@ -125,7 +126,7 @@ This replaced an `ORDER BY kw DESC, dist ASC` lexicographic sort, which measured
 
 ## Invariants — do not break these
 
-- **`--experimental-multiprocess-wal` on EVERY opener** (MCP, scripts, backup). tursodb takes an exclusive file lock otherwise — a process without the flag is *refused*, and one without it would block all readers. This is what lets multiple Claude instances share the DB (concurrent reads, serialized writes). It's experimental — that's the trade.
+- **`--experimental-multiprocess-wal` on EVERY opener** (MCP, scripts, backup). tursodb takes an exclusive file lock otherwise — a process without the flag is *refused*, and one without it would block all readers. This is what lets multiple Claude instances share the DB (concurrent reads, serialized writes). It's experimental — that's the trade. **On Windows it must be paired with `--vfs experimental_win_iocp`** or the open is refused with `experimental multiprocess WAL is not supported by the active IO backend`; the scripts pair it themselves via `memlib.OPEN_ARGS`/`TURSO_VFS`, but every `tursodb` line a doc or runbook hands an agent to execute needs both flags written out — the runbooks say so in the note at the top of each file.
 - **One embedding model per DB** (bge-m3, 1024-dim, recorded in `embed_model`). Mixing models makes cosine meaningless; `remember.py` refuses a table that already holds another model. To switch models you must rebuild + re-embed.
 - **Keywords are not a column** — `remember.py --keywords` appends them into `memory_text` so they're both embedded and LIKE-searchable.
 - **Length caps are enforced by `CHECK`, not VARCHAR** (SQLite ignores declared sizes): `memory_text` ≤ 2000; most metadata ≤ 128.

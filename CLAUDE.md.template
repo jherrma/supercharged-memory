@@ -2,7 +2,7 @@
 
 ALL cross-session memory goes here, through the scripts (not raw MCP calls). DO NOT USE THE BUILT IN MEMORY MECHANISMS USING MARKDOWN FILES!
 Details: `{{BASE_PATH}}/README.md`. Commands below omit their prefix — always run
-them as `python3 "{{BASE_PATH}}/scripts/<cmd>"`.
+them as `{{PY}} "{{BASE_PATH}}/scripts/<cmd>"`.
 
 ## Session start (before anything else)
 1. `recall.py --status`

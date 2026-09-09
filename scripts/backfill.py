@@ -35,7 +35,9 @@ def main():
 
     done = skipped = 0
     for f in files:
-        text = f.read_text(errors="replace").strip()
+        # Explicit UTF-8: without it a Windows run decodes with the ANSI codepage
+        # and stores AND embeds mojibake, with no error to notice.
+        text = f.read_text(encoding="utf-8", errors="replace").strip()
         if not text:
             continue
         if len(text) > M.MAX_TEXT:

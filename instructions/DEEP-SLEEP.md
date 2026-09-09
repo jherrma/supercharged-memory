@@ -13,6 +13,16 @@ Phases are numbered in execution order. **Every phase that writes runs its
 judgment in subagents and its decisions past the user** — see *Subagent contract*
 below for why, and how.
 
+> **On Windows, run every `python3` in this file as `python`, and add `--vfs
+> experimental_win_iocp` to every `tursodb` command in it.** There is no
+> `python3` on Windows: the name is a Microsoft Store alias stub that prints
+> `Python was not found` **and exits 0**, so a command reads as a successful,
+> empty result and the agent reports work it never did. And
+> `--experimental-multiprocess-wal` on its own is refused by Windows' default IO
+> backend (`experimental multiprocess WAL is not supported by the active IO
+> backend`), so a `tursodb` line without the VFS does nothing at all — pair the
+> two flags, never drop the WAL one. See `instructions/SETUP.md`, section *Windows*.
+
 ## Subagent contract
 
 The orchestrating agent must never hold `memory_text` in bulk: that context cost
@@ -32,6 +42,7 @@ scales with the corpus and is the reason this file exists. So:
 Read rows in a worker with:
 
 ```bash
+# On Windows this needs `--vfs experimental_win_iocp` too, or the open is refused.
 tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list \
   "SELECT id, topic, category, memory_text FROM semantic_memory WHERE id IN (...);"
 ```
@@ -142,6 +153,7 @@ length, `why_safe` — **not** the full texts. Ask the user which to apply ("do
 1,3,4"). Then per approved merge:
 
 ```bash
+# On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
 python3 scripts/remember.py --table semantic --category <c> --topic "<t>" \
   --keywords "<k1, k2, ...>" --source deep-sleep --model <your-model-id> \
   --supersedes <id1,id2,id3> --text "<merged>"
@@ -198,6 +210,7 @@ session can check the claim against the episodic rows instead of trusting it.
 **5. Apply after approval:**
 
 ```bash
+# On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
 python3 scripts/remember.py --table semantic --category pattern --topic "<t>" \
   --keywords "<k1, k2, ...>" --source deep-sleep --model <your-model-id> \
   --text "<claim> ... Derived from episodic ids: 12, 44, 91." \
@@ -419,7 +432,9 @@ this rule verbatim:
 > "stale":["--old-flag"],"verdict":"current|stale|unverifiable","evidence":"one line
 > naming what you ran or read"}`. `stale` lists only artifacts you CONFIRMED are
 > gone or renamed — an artifact you could not check is `unverifiable`, never
-> `stale`. Do not propose replacement text and do not retire anything.
+> `stale`. On Windows invoke a script as `python`: the `python3` stub prints an
+> advert and exits 0, so a flag checked through it is `unverifiable`, not `stale`.
+> Do not propose replacement text and do not retire anything.
 
 **3. Present the batch.** One compact table: id, topic, age, verdict, the stale
 artifact, and the worker's evidence line — **not** the full texts. Then ask the user

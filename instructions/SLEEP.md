@@ -13,6 +13,16 @@ ones — `episodic_memory`/`semantic_memory` are unchanged; sleep just adds a
 `processed_at` marker (episodic) and a `retired_at` soft-delete (semantic), plus
 one small unlinked `topic_keywords` table.
 
+> **On Windows, run every `python3` in this file as `python`, and add `--vfs
+> experimental_win_iocp` to every `tursodb` command in it.** There is no
+> `python3` on Windows: the name is a Microsoft Store alias stub that prints
+> `Python was not found` **and exits 0**, so a command reads as a successful,
+> empty result and the agent reports work it never did. And
+> `--experimental-multiprocess-wal` on its own is refused by Windows' default IO
+> backend (`experimental multiprocess WAL is not supported by the active IO
+> backend`), so a `tursodb` line without the VFS does nothing at all — pair the
+> two flags, never drop the WAL one. See `instructions/SETUP.md`, section *Windows*.
+
 ## How the work is split — read this first
 
 **The orchestrating agent never holds `memory_text` in bulk.** Reading every row's
@@ -30,6 +40,7 @@ only** (ids, topics, dates) and hands the actual reading to subagents:
 Read rows inside a worker with:
 
 ```bash
+# On Windows this needs `--vfs experimental_win_iocp` too, or the open is refused.
 tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list \
   "SELECT id, created_at, topic, event_type, importance, memory_text
    FROM episodic_memory WHERE id IN (...);"
@@ -41,7 +52,8 @@ Ad-hoc SQL via the turso MCP (read-only, no script needed). Ignore the MCP's
 `current_database` tool — it reports `:memory: (default)` even when correctly
 attached to the real file ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061));
 confirm with the query itself, or read via
-`tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list "<sql>"`.
+`tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list "<sql>"`
+(plus `--vfs experimental_win_iocp` on Windows).
 
 Pull **metadata only** — the text belongs in the workers, not here:
 
@@ -75,6 +87,7 @@ condensing several episodic rows into a single semantic memory is encouraged,
 don't force a 1:1 mapping):
 
 ```bash
+# On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
 python3 scripts/remember.py --table semantic --category <c> --topic "<t>" \
   --keywords "<k1, k2, ...>" --source sleep --model <your-model-id> \
   --text "<condensed, self-contained fact>"
@@ -117,6 +130,7 @@ or overlapping facts — same signal as `remember.py`'s own dedup guard
 and proposes merges. Apply an approved merge with:
 
 ```bash
+# On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
 python3 scripts/remember.py --table semantic --supersedes <id[,id...]> --text "<merged>" ...
 ```
 

@@ -22,13 +22,17 @@ Neither dependency is bundled — install both before setup.
 
 ### Turso (`tursodb`)
 
-Turso 0.7.0+ — the Rust rewrite of SQLite with native vector support.
+Turso 0.7.0+ — the Rust rewrite of SQLite with native vector support. **0.7.2 is
+what this project targets**, and what the behaviour documented here was verified
+against; 0.7.0 remains the floor, not a tested version.
 
 ```bash
 curl -sSL tur.so/install | sh
 ```
 
-`tursodb` is always opened with `--experimental-multiprocess-wal` (see [Concurrency](#concurrency--locking)).
+`tursodb` is always opened with `--experimental-multiprocess-wal`, and on Windows
+with `--vfs experimental_win_iocp` beside it (see
+[Concurrency](#concurrency--locking)).
 
 ### Ollama + an embedding model
 
@@ -70,7 +74,10 @@ activates the instructions, creates the DB, and finally offers to set up coworke
    export SUPERCHARGED_MEMORY_TURSO_PATH="${XDG_DATA_HOME:-$HOME/.local/share}/turso/supercharged-memory.db"   # your choice
    ```
 4. Register Turso as a Claude Code MCP server named `turso`, launched as
-   `tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --mcp --experimental-multiprocess-wal`.
+   `tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --mcp --experimental-multiprocess-wal`
+   (on Windows append `--vfs experimental_win_iocp` — see
+   [Concurrency](#concurrency--locking); this applies to every `tursodb`
+   command below too).
 5. Activate the memory instructions in your agent, baking in your database path and
    episodic policy:
 
@@ -89,7 +96,7 @@ activates the instructions, creates the DB, and finally offers to set up coworke
    silently create an empty DB, so build the schema first):
 
    ```bash
-   tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql
+   tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql   # +`--vfs experimental_win_iocp` on Windows
    python3 scripts/recall.py --status     # MISSING | EMPTY | DEGRADED n | READY n
    ```
 
@@ -105,6 +112,7 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 | `EMBED_MODEL` | `bge-m3` | Embedding model; one per DB. |
 | `RECALL_ALPHA` | `0.15` | Keyword weight in recall ranking. Corpus-calibrated — see below. |
 | `BACKUP_DIR` | `./Backups` | Where daily dumps are written. |
+| `TURSO_VFS` | `experimental_win_iocp` on Windows, else unset | tursodb IO backend, paired with `--experimental-multiprocess-wal`. Set it to `none` (or empty) to drop `--vfs` entirely. See `instructions/SETUP.md`, *Windows*. |
 | `SUPERCHARGED_MEMORY_EVAL_DIR` | `<db parent>/eval` | Query-embedding cache for the eval harness. Derived data; the cases themselves live in the DB. |
 
 `install-claude-md.sh` reads three more env vars. `bash scripts/install-claude-md.sh --help`
@@ -115,6 +123,8 @@ is the authoritative copy of this list; the table below is the prose one.
 | `EPISODIC_MODE` | `major-events`, **but recovered from the managed block being replaced** when there is one | Episodic-storage policy (see below), rendered into the block. Validated to one of the four keys. A block whose policy line can't be read is refused rather than silently defaulted. |
 | `BASE_PATH` | repo root (the parent of the folder holding the script) | Points at this repo; rendered into every path in the block. If the existing block was rendered from a *different* `BASE_PATH`, the run is refused — a stray run from a temporary clone or git worktree would otherwise repoint a live config at it. |
 | `ALLOW_BASE_PATH_CHANGE` | unset | Set to `1` to allow that repoint (the repo genuinely moved). |
+| `PYTHON_BIN` | `python3`, `python` on Windows | Interpreter rendered into the command prefix. Windows has no `python3` — the name is a Store alias stub that prints "Python was not found" and EXITS 0, so a rendered `python3` command reads as a successful empty result. Takes a command (`python`, `py -3`) or a path; a path with spaces (`C:/Program Files/Python314/python.exe`) is quoted for you, and whitespace that is neither is refused rather than rendered into a prefix that splits at the space. |
+| `TURSO_VFS` | unset; `experimental_win_iocp` on Windows | VFS passed to every `tursodb` open. Windows' default IO backend refuses `--experimental-multiprocess-wal` without it. Set `TURSO_VFS=none` to pass no `--vfs` at all, should a later release rename the backend. |
 
 `SUPERCHARGED_MEMORY_TURSO_PATH` is read too, and falls back to the value in
 `~/.claude/settings.json` before the XDG default, but the template stopped
@@ -254,8 +264,10 @@ agent's Bash tool runs non-interactively and never sources `~/.zshrc` or `~/.bas
 
 `scripts/memlib.py` is the shared core every script imports: config, embedding
 (with a dimension assert), compact vector literals, SQL escaping, and a robust
-`tursodb` runner (stderr-scoped error detection + busy backoff). The rest are
-thin CLIs on top:
+`tursodb` runner — a failure is a non-zero exit, an error on stderr, or a stdout
+that is nothing but a diagnostic, and the busy backoff fires on the unanchored
+phrase `database is busy|locked` in either stream (see
+[Concurrency](#concurrency--locking)). The rest are thin CLIs on top:
 
 - **`remember.py`** — one memory = one row (no chunking). Folds `--keywords` into
   the text, embeds it, inserts. Guards: baseline needs `--confirm-baseline`;
@@ -509,6 +521,31 @@ reads run concurrently, and writes serialize (a clash returns `database is busy`
 scripts retry with backoff). A process without the flag is refused. The flag is
 **experimental** — that's the trade for concurrency.
 
+On Windows the flag needs `--vfs experimental_win_iocp` alongside it, or the open
+fails with `experimental multiprocess WAL is not supported by the active IO
+backend`. The scripts add it themselves (`TURSO_VFS`, see the table above); every
+`tursodb` command you type by hand needs both flags. Dropping the WAL flag is not
+an alternative — that is what re-introduces the exclusive lock.
+
+How `exec_sql` decides what failed and what to retry. A **failure** is a non-zero
+exit, an error on stderr, or a stdout that carries a tursodb diagnostic and
+nothing else — SQL-level errors go to stdout with an empty stderr, so stdout has
+to count, but only structurally: this corpus stores tursodb's own error messages
+as memories, so a successful `SELECT memory_text` can print lines byte-identical
+to a diagnostic, and what tells them apart is that a real failure prints no rows
+around them (a successful write prints nothing; a successful read always prints at
+least one non-diagnostic line). Only a failure then retries, and only when the
+phrase `database is busy|locked` appears anywhere in stderr or stdout.
+That search is **unanchored on purpose** — deliberately *not* restricted to
+diagnostic-shaped lines (`  × …`, `  x …` under miette's ASCII theme on a legacy
+Windows codepage, a wrapped `  │ …` continuation, a line-initial `Error:`),
+because contention is the one error that carries no prefix at all: a contended
+write prints exactly `database is busy`, so the prefix gate meant the backoff
+never fired. Reading all of stdout is safe because it is read only once the run
+has already failed — nothing landed, so a retry cannot duplicate a write, and a
+row body that merely quotes the phrase costs a few seconds of pointless backoff
+before the same exception.
+
 ## Backup & restore
 
 - **Daily backup** — schedule `scripts/supercharged-memory-backup.sh` (e.g. a
@@ -545,7 +582,7 @@ scripts retry with backoff). A process without the flag is refused. The flag is
 - **Rebuild empty schema** — **pipe** the file; don't pass it as a SQL argument
   (`tursodb "$(cat schema.sql)"` fails: the leading `--` comment parses as a CLI flag):
   ```bash
-  tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql
+  tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql   # +`--vfs experimental_win_iocp` on Windows
   python3 scripts/seed.py    # empty by default — add entries first if you want a seeded start
   ```
 - **New machine:** run `instructions/SETUP.md` (or manually: install `tursodb` +

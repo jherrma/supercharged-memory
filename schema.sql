@@ -1,4 +1,4 @@
--- Supercharged memory schema for tursodb (Turso 0.7.0). Vectors = bge-m3, 1024-dim.
+-- Supercharged memory schema for tursodb (Turso 0.7.2). Vectors = bge-m3, 1024-dim.
 -- ONE row per memory (no chunking). Hard caps via CHECK: memory_text <= 2000;
 -- project/topic/source/model/embed_model <= 128. Keywords are NOT a column —
 -- they are appended into memory_text by remember.py (embedded + LIKE-searchable).
