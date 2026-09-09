@@ -23,6 +23,10 @@ for `remember.py --project`) and `kind`:
 Scope is deliberately the user's own memory: $CLAUDE_CONFIG_DIR (default
 ~/.claude). Repo-checked-in CLAUDE.md files are excluded -- they belong to the
 repo, are already loaded per session, and are not the user's to migrate.
+
+Both memory directories are walked RECURSIVELY (they nest -- `team/` is shared
+memory) for `*.md` only, which is the one thing the built-in memory writes; see
+MEMORY_SUFFIX and SKIP_DIRS.
 """
 import argparse, json, os, sys
 from pathlib import Path
@@ -32,6 +36,20 @@ from pathlib import Path
 BEGIN = "<!-- BEGIN agentic-memory (managed by install-claude-md.sh) -->"
 END = "<!-- END agentic-memory -->"
 MAX_TEXT = 2000        # keep in step with memlib.MAX_TEXT
+
+# `.md` ONLY, deliberately: the built-in file-based memory writes nothing else.
+# Claude Code's memory-tool permission gate is literally `path.endswith(".md")`
+# under the memory directory (verified against the 2.1.266 CLI binary,
+# 2026-09-09), and its own prune pass describes itself as deleting "`.md` files
+# inside the memory directory only". Widening this to every file would report
+# whatever else a user parked there as memory to import.
+MEMORY_SUFFIX = "*.md"
+# Subdirectories of a memory directory that are NOT memory. Claude Code calls
+# these "protected subdirectories like `.git` or `agents`" and excludes them
+# from its own memory writes/prunes: `agents/` holds subagent definitions, `.git`
+# a work tree. `team/` is deliberately NOT here -- it is repo-shared memory, and
+# it is the reason this walk has to be recursive at all.
+SKIP_DIRS = {".git", "agents"}
 
 
 def config_dir():
@@ -70,6 +88,22 @@ def read_text(path):
         return None
 
 
+def memory_files(base):
+    """Every `.md` file under `base`, recursively, sorted, minus SKIP_DIRS.
+
+    Recursive on purpose: memory directories nest (Claude Code's own `team/`
+    subdirectory is shared memory), and a single-level `memory/*.md` glob left
+    `memory/nested/deep.md` out of the report entirely -- so SETUP.md Step 7
+    said "nothing to do" about memory that exists. `rglob` does not follow
+    symlinked directories, so a symlink loop cannot hang the probe."""
+    out = []
+    for f in sorted(base.rglob(MEMORY_SUFFIX)):
+        if SKIP_DIRS.intersection(f.relative_to(base).parts[:-1]):
+            continue
+        out.append(f)
+    return out
+
+
 def scan():
     root = config_dir()
     found, sources, unreadable = [], [], []
@@ -88,11 +122,15 @@ def scan():
     # Global memory, then per-project memory. Same shape, different scope: a
     # project-scoped file is only loaded when cwd matches, so its facts are
     # narrower and that has to survive the move.
-    globs = [("global memory files", root / "memory", root.glob("memory/*.md"), "global"),
-             ("project memory files", root / "projects", root.glob("projects/*/memory/*.md"), "project")]
-    for label, base, it, scope in globs:
+    projects = root / "projects"
+    groups = [("global memory file", root / "memory",
+               memory_files(root / "memory"), "global"),
+              ("project memory file", projects,
+               [f for d in sorted(projects.glob("*/memory"))
+                for f in memory_files(d)], "project")]
+    for label, base, files, scope in groups:
         n = 0
-        for f in sorted(it):
+        for f in files:
             if not f.is_file():
                 continue          # a directory named *.md, or a broken symlink
             text = read_text(f)
@@ -100,12 +138,20 @@ def scan():
                 unreadable.append(str(f))
                 continue
             kind = "index" if f.name.upper() == "MEMORY.MD" else "memory"
-            # ~/.claude/projects/<slug>/memory/<file>.md -- the slug is 3 up.
-            project = f.parent.parent.name if scope == "project" else None
+            # ~/.claude/projects/<slug>/memory/[<sub>/...]<file>.md -- the slug is
+            # the first component under `projects/`, at any nesting depth. It is
+            # NOT `f.parent.parent.name`, which reads "memory" for a nested file.
+            project = (f.relative_to(projects).parts[0]
+                       if scope == "project" else None)
             found.append(entry(f, kind, len(text.strip()), scope, project))
-            n += 1
+            # `kind: memory` only, so this human-readable line cannot disagree
+            # with `n_memory_files`/`n_global`/`n_project` below. Counting an
+            # index here reported "2 global memory files" next to
+            # `n_memory_files: 1`.
+            if kind == "memory":
+                n += 1
         if n:
-            sources.append(f"{n} {label} under {base}")
+            sources.append(f"{n} {label}{'' if n == 1 else 's'} under {base}")
 
     return root, found, sources, unreadable
 
