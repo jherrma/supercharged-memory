@@ -142,8 +142,11 @@ length, `why_safe` — **not** the full texts. Ask the user which to apply ("do
 1,3,4"). Then per approved merge:
 
 ```bash
+# Pair --experimental-multiprocess-wal with a --vfs wherever a tursodb line is handed
+# out: on Windows the default IO backend refuses the flag outright, so this lookup
+# returns nothing and the merge below then backdates the survivor to an empty string.
 oldest="$("${TURSO_BIN:-$HOME/.turso/tursodb}" "$SUPERCHARGED_MEMORY_TURSO_PATH" \
-  --experimental-multiprocess-wal -q -m list \
+  --experimental-multiprocess-wal ${TURSO_VFS:+--vfs "$TURSO_VFS"} -q -m list \
   "SELECT min(created_at) FROM semantic_memory WHERE id IN (<id1,id2,id3>);")"
 python3 scripts/remember.py --table semantic --category <c> --topic "<t>" \
   --keywords "<k1, k2, ...>" --source deep-sleep --model <your-model-id> \
