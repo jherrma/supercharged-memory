@@ -128,6 +128,30 @@ gotchas, or corrections — those are always stored autonomously):
 Change it later by re-running `install-claude-md.sh` with a different
 `EPISODIC_MODE`.
 
+## Migrating existing file-based memory
+
+If you were running Claude Code with ordinary file-based memory before installing
+this — a curated `~/.claude/CLAUDE.md`, a `~/.claude/memory/*.md` set,
+project-scoped `~/.claude/projects/<slug>/memory/*.md` — none of it is in the
+database, and the setup runbook's candidate check will not find it: that looks for
+a Turso DB or a backup dump, which is a different thing.
+
+`instructions/MIGRATE-EXISTING-MEMORY.md` imports those files as semantic memory
+and then runs the deep-sleep phases that apply (compaction, the required
+topic-index rebuild, the Verify pass — imported memory is old by definition).
+Setup Step 7 offers it; you can also ask for it later ("migrate my memory").
+
+- **`scripts/find-existing-memory.py`** — read-only scan, needs neither the
+  database nor Ollama. Reports what exists per file: `kind` (`memory` / `index` /
+  `claude`), `scope` (`global` / `project`), char count against the 2000-char
+  `MAX_TEXT`, and files it could not read. Counts cover `kind: memory` only, so a
+  plain `CLAUDE.md` is not reported as memory to migrate.
+- **Additive, not reversible.** No source file is deleted or edited, and every row
+  carries `source='migration'` plus a `file_reference` back to its file. There is
+  no bulk undo, though — the pre-import backup is the way back.
+- **Classification runs in subagents**, the same contract the sleep runbooks use;
+  the orchestrator never reads the corpus in bulk.
+
 ## Staying up to date
 
 The runtime state lives *outside* this repo — the database, `~/.claude/CLAUDE.md`,
