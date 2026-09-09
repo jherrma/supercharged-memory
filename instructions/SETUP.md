@@ -209,18 +209,37 @@ database nor Ollama:
 python3 scripts/find-existing-memory.py
 ```
 
-- **`n_memory_files` is 0** → nothing to do. Say so in one line and continue to
+**Gate on `nothing_to_do`, never on `n_memory_files` alone.** That count covers
+what can be imported; `unreadable` and `excluded_dirs` hold what the probe could
+not or would not read, and nothing else reports those — so a config dir whose only
+memory file is mode 000 comes back `n_memory_files: 0` with a populated
+`unreadable`, and a step reading just the count would tell the user there is
+nothing to migrate. The probe computes the combined verdict for you:
+
+- **`nothing_to_do` is `true`** → nothing to do. Say so in one line and continue to
   Step 8. A `CLAUDE.md` on its own counts as `n_claude_files`, not as memory:
   instructions are not facts, and there is nothing there to import. Same for an
-  empty `.md` file (`n_empty_files`) — the writer refuses an empty `--text`.
-- **Anything found** → report the totals — `n_memory_files`, `total_chars`, and
-  `over_max_text` (the files above the 2000-char `MAX_TEXT`) — plus any non-empty
-  `unreadable` / `excluded_dirs` / `empty`, which are the probe's own gaps and are
-  reported nowhere else. Then **ask whether to migrate it into the database**. On
-  yes, follow `instructions/MIGRATE-EXISTING-MEMORY.md`, which imports the files
-  as semantic memory and then runs the deep-sleep phases that apply (compaction,
-  the required topic-index rebuild, and the Verify pass — imported memory is old
-  by definition). On no, continue to Step 8; the files keep working as they did.
+  empty `.md` file (`empty` / `n_empty_files`) — the writer refuses an empty
+  `--text` — so mention it in that same line and move on; there is genuinely
+  nothing in the file.
+- **`nothing_to_do` is `false` but `n_memory_files` is 0** → do **not** say nothing
+  to do. There is nothing *importable*, but the probe could not see everything, and
+  what it could not see may be exactly the memory this step exists to find (a
+  mode-000 memory file, a directory that could not be listed, a topic directory
+  named `agents`). Report each `unreadable` / `excluded_dirs` entry's `path` and
+  `reason` — plus `n_md` for an excluded directory, which says how much is in
+  there — and let the user decide: fix the permission and re-run this probe, or
+  accept the skip and continue to Step 8. Do not fix anything on their behalf.
+- **`n_memory_files` is above 0** → report the totals — `n_memory_files`,
+  `total_chars`, and `over_max_text` (each entry carries the file, its `chars` and
+  a `reason`: over the 2000-char `MAX_TEXT`, or over the 1800-char effective
+  budget, since `remember.py` appends `--keywords` into the same capped field) —
+  plus any non-empty `unreadable` / `excluded_dirs` / `empty`, for the same reason
+  as above. Then **ask whether to migrate it into the database**. On yes, follow
+  `instructions/MIGRATE-EXISTING-MEMORY.md`, which imports the files as semantic
+  memory and then runs the deep-sleep phases that apply (compaction, the required
+  topic-index rebuild, and the Verify pass — imported memory is old by
+  definition). On no, continue to Step 8; the files keep working as they did.
 
 The migration is additive: it never deletes or edits a source file, and every row
 it writes is tagged `source='migration'` with a `file_reference` back to its

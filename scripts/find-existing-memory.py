@@ -18,8 +18,16 @@ read, a broken symlink, a directory that could not be listed, a symlink loop) or
 `excluded_dirs` (a protected subdirectory of a memory root, or a symlink pointing
 above it).
 
-The interesting fields per file are `chars` (against the 2000-char MAX_TEXT the
-writer enforces), `scope` (`global` or `project`), `project_dir` (the
+`nothing_to_do` is that gate, computed here rather than left to a reader:
+`n_memory_files == 0` AND nothing in `unreadable` or `excluded_dirs`. A config dir
+holding one mode-000 memory file reports `n_memory_files: 0` with a populated
+`unreadable`, and a step that reads only the count tells the user there is nothing
+to migrate -- the exact failure the skip reporting above exists to prevent. `empty`
+is deliberately NOT part of it: an empty `.md` file has no content to import at
+all, so it is worth a mention and not worth a decision.
+
+The interesting fields per file are `chars` (against EFFECTIVE_MAX_TEXT, not the
+raw 2000-char cap -- see there), `scope` (`global` or `project`), `project_dir` (the
 `projects/<slug>` directory name -- Claude Code's mangled cwd, NOT a work-item id
 for `remember.py --project`) and `kind`:
 
@@ -48,6 +56,20 @@ from pathlib import Path
 BEGIN = "<!-- BEGIN agentic-memory (managed by install-claude-md.sh) -->"
 END = "<!-- END agentic-memory -->"
 MAX_TEXT = 2000        # keep in step with memlib.MAX_TEXT
+# `remember.py` appends `--keywords` INTO memory_text and the schema's
+# `CHECK (length(memory_text) <= 2000)` counts the result, so a file that fits
+# the cap on its own is still refused once a worker's keyword list is on the end.
+# Measured 2026-09-09: a 1948-char file plus a realistic 11-term keyword list was
+# refused as `memory is 2096 chars; hard cap 2000` -- after this probe had
+# reported it as fitting, i.e. mid-import, after the composing work was paid for.
+#
+# The probe cannot know the keywords a worker has not written yet, so it does not
+# pretend to: it flags against a STATED reserve and names the reason per file in
+# `over_max_text`. 200 chars is what MIGRATE-EXISTING-MEMORY.md's Rules section
+# already asks for ("aim at roughly 1800 chars of prose"), so the number a worker
+# is told to aim at and the number this probe checks are now the same one.
+KEYWORD_RESERVE = 200
+EFFECTIVE_MAX_TEXT = MAX_TEXT - KEYWORD_RESERVE
 
 # `.md` ONLY, deliberately: the built-in file-based memory writes nothing else.
 # Claude Code's memory-tool permission gate is literally `path.endswith(".md")`
@@ -83,9 +105,24 @@ def outside_managed_block(text):
     return head + tail
 
 
+def over_reason(chars):
+    """Why a file was flagged, in the words a worker needs to act on it."""
+    if chars > MAX_TEXT:
+        return (f"{chars} chars, over the {MAX_TEXT}-char hard cap "
+                "(schema CHECK): split it or condense it, never truncate")
+    return (f"{chars} chars, over the {EFFECTIVE_MAX_TEXT}-char effective budget "
+            f"({MAX_TEXT} cap minus {KEYWORD_RESERVE} chars reserved for the "
+            "'Keywords:' line remember.py appends into the same field). It fits "
+            "the cap on its own and is refused once keywords are added, so treat "
+            "it like an over-cap file: split or condense")
+
+
 def entry(path, kind, chars, scope, project=None):
     return {"path": str(path), "kind": kind, "chars": chars,
-            "over_max_text": chars > MAX_TEXT,
+            # Against EFFECTIVE_MAX_TEXT, not MAX_TEXT: `chars` is the file, and
+            # what the writer caps is the file PLUS the keywords it has yet to be
+            # given. See KEYWORD_RESERVE.
+            "over_max_text": chars > EFFECTIVE_MAX_TEXT,
             # Which memory a file is: `global` applies everywhere, `project` only
             # when cwd matches. A worker must not have to re-derive that from the
             # path, and the M1 scope choice is unanswerable without it.
@@ -291,6 +328,11 @@ def main():
     memories = [f for f in found if f["kind"] == "memory"]
     report = {
         "config_dir": str(root),
+        # The one field SETUP.md Step 7's "nothing to do" branch is allowed to
+        # gate on. See the docstring: `n_memory_files` alone says nothing about
+        # what could not be read, and a skipped mode-000 memory file is exactly
+        # the memory that step exists to find.
+        "nothing_to_do": not memories and not unreadable and not excluded_dirs,
         # No aggregate "n_files": one number covering every kind read as the
         # count of memory to import, contradicting the docstring and the three
         # per-kind counts below. Every count here says which kind it counts.
@@ -302,7 +344,12 @@ def main():
         "n_project": len([f for f in memories if f["scope"] == "project"]),
         "projects": sorted({f["project_dir"] for f in memories if f["project_dir"]}),
         "total_chars": sum(f["chars"] for f in memories),
-        "over_max_text": [f["path"] for f in memories if f["over_max_text"]],
+        # `{path, chars, reason}`, not bare paths: the flag now covers two
+        # different situations (over the hard cap, and over the cap once the
+        # appended keywords are counted) and a reader has to be told which.
+        "over_max_text": [{"path": f["path"], "chars": f["chars"],
+                           "reason": over_reason(f["chars"])}
+                          for f in memories if f["over_max_text"]],
         "empty": [f["path"] for f in found if f["kind"] == "empty"],
         "unreadable": unreadable,
         "excluded_dirs": excluded_dirs,
@@ -311,12 +358,18 @@ def main():
         "note": ("counts and totals of memory to import cover `kind: memory` only. "
                  "An index file is a pointer list and a `claude` entry is "
                  "instructions -- read both for context, import neither as a fact. "
-                 f"A memory file over {MAX_TEXT} chars must be split or condensed, "
-                 "never truncated. Nothing is skipped silently: report `unreadable` "
+                 f"A memory file is flagged in `over_max_text` above "
+                 f"{EFFECTIVE_MAX_TEXT} chars, not {MAX_TEXT}: remember.py appends "
+                 f"--keywords into the same field the {MAX_TEXT}-char CHECK counts, "
+                 f"so {KEYWORD_RESERVE} chars are reserved for them and each entry's "
+                 "`reason` says which limit it hit. Split or condense such a file, "
+                 "never truncate it. Nothing is skipped silently: report `unreadable` "
                  "(unreadable file or directory, broken symlink, symlink loop), "
                  "`excluded_dirs` (protected subdirectory of a memory root) and "
                  "`empty` (nothing to import -- the writer refuses an empty "
-                 "--text) as gaps."),
+                 "--text) as gaps. `nothing_to_do` is true only when there is "
+                 "nothing to import AND nothing was skipped; do not derive that "
+                 "verdict from `n_memory_files` alone."),
     }
     if a.quiet:
         print("found" if memories else "nothing")
