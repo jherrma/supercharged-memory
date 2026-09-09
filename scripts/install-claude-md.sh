@@ -9,7 +9,46 @@
 #   TARGET=...         where to write the block (default ~/.claude/CLAUDE.md)
 #   SUPERCHARGED_MEMORY_TURSO_PATH=...        where the live Turso DB lives (must match what scripts use)
 #   EPISODIC_MODE=...  every-prompt | major-actions | major-events | manual
+#
+# Configuration is env-only: this script takes NO positional arguments and no
+# flags but -h/--help. That is enforced below rather than merely documented,
+# because every invocation WRITES ~/.claude/CLAUDE.md. Ignoring argv meant a
+# reflexive `install-claude-md.sh --help` performed a full install instead of
+# printing usage -- rendered from whatever directory the script sat in, and with
+# EPISODIC_MODE silently falling back to its default. That cost one machine its
+# live configuration, and a machine's chosen episodic mode is recoverable only
+# from the block the run just overwrote.
 set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+usage: install-claude-md.sh          (no arguments; configure via env)
+
+Renders CLAUDE.md.template and installs it into ~/.claude/CLAUDE.md between
+managed markers. Idempotent: re-running REPLACES the managed block.
+
+  BASE_PATH=...       repo root (holds README.md, scripts/, CLAUDE.md.template)
+                      default: this script's parent folder
+  TARGET=...          where to write the block   default: ~/.claude/CLAUDE.md
+  SUPERCHARGED_MEMORY_TURSO_PATH=...  where the live Turso DB lives
+  EPISODIC_MODE=...   every-prompt | major-actions | major-events | manual
+                      default: major-events -- pass this explicitly, it is not
+                      recoverable from anywhere but the block being replaced
+
+Every run writes TARGET. To render without touching a live config, pass an
+explicit throwaway TARGET together with an explicit BASE_PATH.
+USAGE
+}
+
+if [ "$#" -gt 0 ]; then
+  if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+    usage
+    exit 0
+  fi
+  printf 'install-claude-md.sh takes no arguments (got: %s)\n\n' "$*" >&2
+  usage >&2
+  exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_PATH="${BASE_PATH:-$(dirname "$SCRIPT_DIR")}"
