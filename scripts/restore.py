@@ -19,7 +19,7 @@ an argv argument, then COUNT what landed against what the dump contained. A rest
 that is not counted is not a restore.
 
     restore.py --out /tmp/check.db                 # newest backup, verify it restores
-    restore.py --dump Backups/2026-08-18-*.sql.gz --out ~/.local/share/turso/new.db
+    restore.py --dump backups/2026-08-18-*.sql.gz --out ~/.local/share/turso/new.db
 
 Refuses to write to a path that already exists — move the old file aside yourself.
 That is deliberate: restoring over a live DB loses everything since the backup.

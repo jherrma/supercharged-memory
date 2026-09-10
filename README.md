@@ -111,7 +111,7 @@ Scripts read these environment variables (defaults in `scripts/memlib.py`):
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint. |
 | `EMBED_MODEL` | `bge-m3` | Embedding model; one per DB. |
 | `RECALL_ALPHA` | `0.15` | Keyword weight in recall ranking. Corpus-calibrated — see below. |
-| `BACKUP_DIR` | `./Backups` | Where daily dumps are written. |
+| `BACKUP_DIR` | `./backups` | Where daily dumps are written. |
 | `TURSO_VFS` | `experimental_win_iocp` on Windows, else unset | tursodb IO backend, paired with `--experimental-multiprocess-wal`. Set it to `none` (or empty) to drop `--vfs` entirely. See `instructions/SETUP.md`, *Windows*. |
 | `SUPERCHARGED_MEMORY_EVAL_DIR` | `<db parent>/eval` | Query-embedding cache for the eval harness. Derived data; the cases themselves live in the DB. |
 
@@ -592,12 +592,12 @@ before the same exception.
 
 - **Daily backup** — schedule `scripts/supercharged-memory-backup.sh` (e.g. a
   launchd/cron job) to produce a **validated** gzipped SQL dump
-  `YYYY-MM-DD-supercharged-memory.sql.gz` in `Backups/` (concurrent-safe reader;
+  `YYYY-MM-DD-supercharged-memory.sql.gz` in `backups/` (concurrent-safe reader;
   checks non-empty + has INSERTs + gzip intact). Retains **3 daily + 4 weekly**
   (Monday) copies, and runs even while a session is open.
 - **Manual backup:** `bash scripts/supercharged-memory-backup.sh` — this is also what
   the agent runs when the user asks for a backup (`CLAUDE.md.template` points at
-  the script by absolute path). Dumps always land in this repo's `Backups/`, the
+  the script by absolute path). Dumps always land in this repo's `backups/`, the
   `BACKUP_DIR` default; `recall.py --candidates` looks there for restorable dumps,
   so keep them together rather than scattering them per-machine. Taking a backup is
   additive and non-destructive; **restoring is neither** — never restore without the
@@ -605,7 +605,7 @@ before the same exception.
 - **Restore** — `scripts/restore.py`, into a fresh DB file:
   ```bash
   python3 scripts/restore.py --out /path/to/new.db        # newest backup by default
-  python3 scripts/restore.py --dump Backups/<file>.sql.gz --out /path/to/new.db
+  python3 scripts/restore.py --dump backups/<file>.sql.gz --out /path/to/new.db
   ```
   It refuses a target that already exists (pass `--force` to override), reads `.sql`
   and `.sql.gz` alike, and prints a per-table `in dump` vs `restored` comparison,

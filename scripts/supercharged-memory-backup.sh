@@ -38,7 +38,7 @@ else
   esac
 fi
 DB="${SUPERCHARGED_MEMORY_TURSO_PATH:-${XDG_DATA_HOME:-$HOME/.local/share}/turso/supercharged-memory.db}"
-DEST="${BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/Backups}"
+DEST="${BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/backups}"
 ERR=/tmp/supercharged-memory-backup.err
 
 [ -f "$DB" ] || { echo "[backup] DB missing: $DB" >&2; exit 1; }

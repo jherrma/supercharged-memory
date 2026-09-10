@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
-Backups/
+backups/
 coworkers/*.md
 !coworkers/README.md
 **/.DS_Store
+stories/

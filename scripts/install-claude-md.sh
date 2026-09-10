@@ -181,7 +181,7 @@ if [ -n "$BLOCK" ]; then
     | sed -E 's/^`//; s/`$//'  \
     | sed -E 's/^(bash|python3|python|py -3) //; s/^"[^"]*python[^"]*" //'  \
     | sed -E 's/^"//; s/"$//'  \
-    | sed -nE 's;^([A-Za-z]:/.+|/.+)/(README\.md|scripts|instructions|Backups)(/.*)?$;\1;p'  \
+    | sed -nE 's;^([A-Za-z]:/.+|/.+)/(README\.md|scripts|instructions|[Bb]ackups)(/.*)?$;\1;p'  \
     | sort | uniq -c | sort -rn | head -1 | sed -E 's/^ *[0-9]+ //' || true)"
 fi
 

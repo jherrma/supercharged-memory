@@ -8,7 +8,7 @@ The **source-controlled bootstrap** for a local, Turso-only long-term memory sys
 
 - **The DB** (default `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db`, XDG-conformant; override with `SUPERCHARGED_MEMORY_TURSO_PATH`) — the single source of truth. Must be **local only, never in a cloud-synced folder** (cloud sync corrupts live SQLite).
 - **The active instructions** (`~/.claude/CLAUDE.md`) — rendered from `CLAUDE.md.template` and installed between managed markers by `install-claude-md.sh`.
-- **Backups** — a local `Backups/` folder written by a daily launchd job.
+- **Backups** — a local `backups/` folder written by a daily launchd job.
 
 So editing `CLAUDE.md.template` or `scripts/*` here changes behavior only after re-running the installer / the next session. There is **no build, lint, or test tooling** — the scripts are plain Python 3 stdlib (no dependencies) plus bash.
 
@@ -108,7 +108,7 @@ bash scripts/supercharged-memory-backup.sh
 # plus a misleading "table ... does not exist". restore.py splits on real statement
 # boundaries and then COUNTS every table against the dump; it exits non-zero on a mismatch.
 python3 scripts/restore.py --out /path/to/new.db          # defaults to the newest backup
-python3 scripts/restore.py --dump Backups/<file>.sql.gz --out /path/to/new.db
+python3 scripts/restore.py --dump backups/<file>.sql.gz --out /path/to/new.db
 # every hand-run tursodb command needs --vfs experimental_win_iocp on Windows (the scripts add it themselves)
 tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql   # rebuild empty schema — PIPE it, don't pass as arg
 python3 scripts/seed.py                          # empty by default; add SEM/EPI entries first

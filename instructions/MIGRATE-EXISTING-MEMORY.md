@@ -463,7 +463,7 @@ and that column is the half worth having):
 "${TURSO_BIN:-$HOME/.turso/tursodb}" "$SUPERCHARGED_MEMORY_TURSO_PATH" \
   --experimental-multiprocess-wal -q -m list \
   "SELECT id, superseded_by, file_reference, topic FROM semantic_memory WHERE source='migration' ORDER BY id;" \
-  > "${BACKUP_DIR:-$PWD/Backups}/migration-manifest-$(date +%F).psv"
+  > "${BACKUP_DIR:-$PWD/backups}/migration-manifest-$(date +%F).psv"
 ```
 
 Three details that are wrong if copied carelessly: `-m list` emits `|`-delimited
