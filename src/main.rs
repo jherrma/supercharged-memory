@@ -9,6 +9,8 @@ mod cli;
 mod config;
 mod embed;
 mod error;
+mod recall;
+mod render;
 mod status;
 mod store;
 mod version;

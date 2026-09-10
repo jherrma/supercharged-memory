@@ -6,10 +6,11 @@
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::{Config, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
+use crate::recall;
 use crate::{status, version};
 
 #[derive(Parser, Debug)]
@@ -28,6 +29,25 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// clap's view of `--table`, kept separate from the domain enum so the CLI can
+/// change wording without touching the search path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TableArg {
+    Semantic,
+    Episodic,
+    Both,
+}
+
+impl From<TableArg> for recall::TableArg {
+    fn from(t: TableArg) -> Self {
+        match t {
+            TableArg::Semantic => recall::TableArg::Semantic,
+            TableArg::Episodic => recall::TableArg::Episodic,
+            TableArg::Both => recall::TableArg::Both,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Report database health: MISSING | EMPTY | DEGRADED n | ERROR | READY n.
@@ -38,10 +58,45 @@ pub enum Command {
 
     /// Search memory, or load a session-start slot.
     ///
-    /// Story 004 must reproduce the ranking exactly:
-    /// `score = vector_distance_cos - RECALL_ALPHA * kw`, lowest first. It stays
-    /// a PURE READER -- no hit counters, no last-accessed column.
-    Recall,
+    /// `score = vector_distance_cos - RECALL_ALPHA * kw`, lowest first. A PURE
+    /// READER: no hit counters, no last-accessed column. Ranking by true
+    /// "hotness" would make every query a write, and that trade was refused.
+    Recall {
+        /// What to search for. Omit it when using one of the session-start slots.
+        query: Option<String>,
+
+        /// Which memories to search.
+        #[arg(long, value_enum, default_value_t = TableArg::Both)]
+        table: TableArg,
+
+        /// Narrow to one tracking-tool work item id.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// How many hits per table.
+        #[arg(long, default_value_t = 5)]
+        k: u32,
+
+        /// Scope to memories visible to this coworker persona.
+        #[arg(long)]
+        coworker: Option<String>,
+
+        /// Load the must-always-apply rules (pure SQL; works without Ollama).
+        #[arg(long)]
+        baseline: bool,
+
+        /// Load the topic index (pure SQL; load every session, like --baseline).
+        #[arg(long)]
+        topics: bool,
+
+        /// List memory databases and backups found outside the configured path.
+        #[arg(long)]
+        candidates: bool,
+
+        /// Print the total memory count and nothing else.
+        #[arg(long)]
+        count: bool,
+    },
 
     /// Store one memory, or supersede existing ones.
     ///
@@ -111,7 +166,7 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Command::Status => "status",
-            Command::Recall => "recall",
+            Command::Recall { .. } => "recall",
             Command::Remember => "remember",
             Command::Coworkers => "coworkers",
             Command::Sleep => "sleep",
@@ -128,7 +183,7 @@ impl Command {
     /// The story that fills this command in.
     pub fn story(&self) -> &'static str {
         match self {
-            Command::Status | Command::Recall => "004",
+            Command::Status | Command::Recall { .. } => "004",
             Command::Remember => "005",
             Command::Coworkers => "006",
             Command::Sleep => "007",
@@ -145,6 +200,30 @@ impl Command {
     fn run(&self) -> Result<()> {
         match self {
             Command::Status => status::run(&config()?),
+            Command::Recall {
+                query,
+                table,
+                project,
+                k,
+                coworker,
+                baseline,
+                topics,
+                candidates,
+                count,
+            } => recall::run(
+                &config()?,
+                &recall::Args {
+                    query: query.clone(),
+                    table: (*table).into(),
+                    project: project.clone(),
+                    k: *k,
+                    coworker: coworker.clone(),
+                    baseline: *baseline,
+                    topics: *topics,
+                    candidates: *candidates,
+                    count: *count,
+                },
+            ),
             _ => Err(Error::NotImplemented {
                 command: self.name(),
                 story: self.story(),
@@ -192,7 +271,7 @@ mod tests {
     use clap::CommandFactory;
 
     use super::*;
-    use crate::error::EXIT_ERROR;
+    use crate::error::{EXIT_ERROR, EXIT_REFUSED};
 
     #[test]
     fn clap_definition_is_wellformed() {
@@ -232,7 +311,17 @@ mod tests {
     fn every_subcommand_reports_a_story_and_a_name() {
         for cmd in [
             Command::Status,
-            Command::Recall,
+            Command::Recall {
+                query: None,
+                table: TableArg::Both,
+                project: None,
+                k: 5,
+                coworker: None,
+                baseline: false,
+                topics: false,
+                candidates: false,
+                count: false,
+            },
             Command::Remember,
             Command::Coworkers,
             Command::Sleep,
@@ -246,7 +335,7 @@ mod tests {
         ] {
             assert!(!cmd.name().is_empty());
             assert!(!cmd.story().is_empty());
-            if !matches!(cmd, Command::Status) {
+            if !matches!(cmd, Command::Status | Command::Recall { .. }) {
                 assert!(matches!(cmd.run(), Err(Error::NotImplemented { .. })));
             }
         }
@@ -272,9 +361,14 @@ mod tests {
     #[test]
     fn exit_codes() {
         assert_eq!(
-            code(&["sm", "recall"]),
+            code(&["sm", "remember"]),
             EXIT_ERROR,
             "a stub is an error, not a refusal"
+        );
+        assert_eq!(
+            code(&["sm", "recall"]),
+            EXIT_REFUSED,
+            "recall with no query and no mode is a refusal, and must not open the database"
         );
         assert_eq!(
             code(&["sm", "recall", "--nope"]),
