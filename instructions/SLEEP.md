@@ -8,9 +8,10 @@ always.
 Sleep is **never proactive** — do not decide on your own that the corpus looks
 untidy and start one. It has exactly two triggers: the user asking, and the
 optional schedule (`scripts/install-schedule.py`), which runs
-`scripts/scheduled-sleep.py --mode daily` headless. When you are that scheduled
-run, the prompt says so: do not stop to ask for confirmation, and remember nobody
-is watching — anything needing a decision stays untouched and goes in the report.
+`scripts/scheduled-sleep.py` headless — either directly as the daily pass, or as
+the deep-sleep preparation's prerequisite. When you are that scheduled run, the
+prompt says so: do not stop to ask for confirmation, and remember nobody is
+watching — anything needing a decision stays untouched and goes in the report.
 
 Sleep does three things: condenses the raw episodic log into durable semantic
 facts, consolidates/retires semantic memory, and rebuilds the topic index that
@@ -19,15 +20,14 @@ ones — `episodic_memory`/`semantic_memory` are unchanged; sleep just adds a
 `processed_at` marker (episodic) and a `retired_at` soft-delete (semantic), plus
 one small unlinked `topic_keywords` table.
 
-> **On Windows, run every `python3` in this file as `python`, and add `--vfs
-> experimental_win_iocp` to every `tursodb` command in it.** There is no
+> **On Windows, run every `python3` in this file as `python`.** There is no
 > `python3` on Windows: the name is a Microsoft Store alias stub that prints
 > `Python was not found` **and exits 0**, so a command reads as a successful,
-> empty result and the agent reports work it never did. And
-> `--experimental-multiprocess-wal` on its own is refused by Windows' default IO
-> backend (`experimental multiprocess WAL is not supported by the active IO
-> backend`), so a `tursodb` line without the VFS does nothing at all — pair the
-> two flags, never drop the WAL one. See `instructions/SETUP.md`, section *Windows*.
+> empty result and the agent reports work it never did. Every snippet below is a
+> `python3` one, so this applies to all of them. The `tursodb` VFS rule that used
+> to sit here has no instances left in this file — it lives in
+> `instructions/DEEP-SLEEP.md`, which still runs `tursodb` directly, and in
+> `instructions/SETUP.md`, section *Windows*.
 
 ## How the work is split — read this first
 
