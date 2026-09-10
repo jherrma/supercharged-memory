@@ -479,7 +479,12 @@ clustering and its proposal workers, D4 proposals and D6.2, then writes a
 decision queue to `<state dir>/deep-sleep-review-<date>.md`. It never purges,
 merges, writes a pattern row or touches an eval case — those gates are the
 design, and D2 is the one operation in this system that destroys a memory. You
-approve the queue in a normal session.
+approve the queue in a normal session — starting with a fresh
+`scripts/supercharged-memory-backup.sh`, because by then the corpus has moved on
+and `sleep.py --purge` refuses unless it finds a dump newer than the DB file. The
+queue's command block opens with exactly that. `install-schedule.py --status`
+names the newest review file, so a queue waiting for a decision does not go
+unnoticed once the log line has scrolled away.
 
 Other things worth knowing before you install it:
 

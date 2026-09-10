@@ -391,6 +391,14 @@ def pass_status():
         path = state / marker
         value = path.read_text(encoding="utf-8").strip() if path.is_file() else "never"
         print(f"{label}: {value}")
+    # The weekly pass exists to leave a decision queue, so name it here. The log
+    # tail below carries a "review ready" line only until it scrolls off, and a
+    # queue nobody is pointed at is a queue nobody acts on.
+    reviews = sorted(state.glob("deep-sleep-review-*.md"))
+    if reviews:
+        print(f"review queue awaiting you: {reviews[-1]}")
+        if len(reviews) > 1:
+            print(f"  ({len(reviews) - 1} older review file(s) alongside it)")
     log_file = state / "scheduled-sleep.log"
     if not log_file.is_file():
         print("log: none yet")

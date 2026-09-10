@@ -247,9 +247,10 @@ class Lock:
 
 DAILY_PROMPT = """Run the supercharged-memory sleep (consolidation pass) now.
 
-This is the scheduled run, which the user set up deliberately - the runbook's
-"never scheduled" wording does not apply to this invocation. Do not stop to ask
-for confirmation.
+This is the scheduled run the user set up deliberately, which SLEEP.md names as
+one of its two legitimate triggers. "Never proactive" is about starting a pass on
+your own judgement; it does not apply to this invocation. Do not stop to ask for
+confirmation.
 
 Follow {runbook} step by step, including running the reading in subagents rather
 than pulling memory_text into your own context.
@@ -269,7 +270,7 @@ NOBODY IS WATCHING IT. That changes what you may do, not how carefully you do it
 
 Follow {runbook}, these phases only:
   - D0 health check
-  - D1 backup (run it: it is the undo for any purge the user later approves)
+  - D1 backup (run it: it snapshots the corpus these proposals were computed against)
   - D3 step 1 mechanical clustering, and step 2 the per-cluster proposal workers
   - D4 pattern mining, map and reduce, proposals only
   - D6.2 regression report if an eval set exists; skip and say so if eval_cases is empty
@@ -295,7 +296,10 @@ Make it a decision queue that can be acted on in one pass, not a narrative:
   - Eval-case proposals, split into repoint and retire.
   - Anything skipped, and why. A worker that died is a gap: say so.
 End the file with the exact commands to apply each section, so approving is a
-matter of deleting the lines the user does not want.
+matter of deleting the lines the user does not want. Open that block with
+`bash scripts/supercharged-memory-backup.sh`: today's dump will be older than the
+database by the time anyone approves this, and `sleep.py --purge` refuses unless
+it finds one newer than the DB file.
 
 Then print a short plain-text summary to stdout: counts per section and the path.
 
