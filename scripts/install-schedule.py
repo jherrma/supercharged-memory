@@ -349,16 +349,22 @@ def linux_status():
 # so its own "Last Run Time" is always minutes ago and its "Last Result: 0" is
 # what a not-due tick returns - reading either as health is the mistake this
 # section exists to prevent.
+_RUNNER_MODULE = None
+
+
 def _runner():
     """Load the runner itself rather than re-deriving its state directory and its
     due rule here - two answers to either question is how they drift. Importing it
     also adopts ~/.claude/settings.json env, which is usually where the DB path is
     set, so this resolves the same paths a scheduled run would."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("scheduled_sleep", RUNNER)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    global _RUNNER_MODULE
+    if _RUNNER_MODULE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("scheduled_sleep", RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RUNNER_MODULE = module
+    return _RUNNER_MODULE
 
 
 def due_now():

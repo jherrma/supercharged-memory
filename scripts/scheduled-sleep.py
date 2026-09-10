@@ -344,9 +344,11 @@ def main():
         # first mode is what covers the weekly-skipped-on-the-lock case; otherwise
         # that tick would drop the daily pass too.
         code = 0
+        ran_any = False
         for mode in ("weekly", "daily"):
             if not is_due(mode, args.force):
                 continue
+            ran_any = True
             argv = [sys.executable, str(Path(__file__).resolve()), "--mode", mode]
             if args.force:
                 argv.append("--force")
@@ -357,8 +359,13 @@ def main():
                 continue  # the lock holder may be finishing; the other pass may fit
             if result != 0:
                 code = result
-            elif mode == "weekly":
-                break  # weekly already ran the daily pass as its prerequisite
+            elif mode == "weekly" and not args.dry_run:
+                # The weekly run performed the daily pass as its prerequisite. A dry
+                # run performed nothing, so breaking there would drop the daily plan
+                # out of the preview.
+                break
+        if args.dry_run and not ran_any:
+            log("[auto] dry run: nothing is due right now")
         return code
 
     spec = MODES[args.mode]
@@ -370,6 +377,12 @@ def main():
         if reason.startswith("abort"):
             log(f"[{args.mode}] {reason}")
             return 1
+        # A real tick stays quiet about a skip - it happens most hours and the log
+        # is not a heartbeat. A dry run is a preview and must always answer: it is
+        # the command SETUP.md hands people to check their install, and silence
+        # reads as broken.
+        if args.dry_run:
+            log(f"[{args.mode}] dry run: {reason}")
         return 0
 
     if args.dry_run:
