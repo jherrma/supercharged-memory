@@ -36,8 +36,8 @@ full text into the session that is running sleep is the single largest context c
 in this system, and it grows with the corpus. So sleep queries **skinny metadata
 only** (ids, topics, dates) and hands the actual reading to subagents:
 
-- Each worker prompt is **self-contained**: the ids it owns, the exact `tursodb`
-  read command, its judgment rules, the exact `remember.py` invocation, and your
+- Each worker prompt is **self-contained**: the ids it owns, the exact read
+  command, its judgment rules, the exact `remember.py` invocation, and your
   model id to pass as `--model`.
 - Spawn workers **in one message** so they run concurrently.
 - Workers report back **one line per row**, not the text they read.
@@ -66,9 +66,17 @@ a platform footnote.
 Ad-hoc SQL via the turso MCP (read-only, no script needed). Ignore the MCP's
 `current_database` tool — it reports `:memory: (default)` even when correctly
 attached to the real file ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061));
-confirm with the query itself, or read via
-`tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list "<sql>"`
-(plus `--vfs experimental_win_iocp` on Windows).
+confirm with the query itself, or fall back to the same `memlib` snippet the
+workers use — the orchestrator of a scheduled run is just as unattended as they
+are, so `tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" …` is refused here too:
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+import memlib as M
+print(M.exec_sql('<sql>'))
+"
+```
 
 Pull **metadata only** — the text belongs in the workers, not here:
 

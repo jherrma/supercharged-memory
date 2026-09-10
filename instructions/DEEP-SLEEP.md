@@ -42,8 +42,8 @@ scales with the corpus and is the reason this file exists. So:
 
 - The orchestrator queries **skinny metadata only** (ids, topics, dates, counts)
   and dispatches subagents that read the actual text themselves.
-- Each worker prompt is **self-contained**: the ids it owns, the exact `tursodb`
-  read command, its judgment rules, and (if it writes) the exact `remember.py`
+- Each worker prompt is **self-contained**: the ids it owns, the exact read
+  command, its judgment rules, and (if it writes) the exact `remember.py`
   invocation plus your model id for `--model`.
 - Workers are spawned **in one message** so they run concurrently.
 - **Compaction and pattern workers propose only.** They return JSON; the
