@@ -398,9 +398,9 @@ row per coworker, history via `superseded_by`).
 
 ## Sleep cycle
 
-A user-triggered ("sleep" / "go to sleep") consolidation pass — never
-scheduled automatically. Full procedure in `instructions/SLEEP.md`; no new
-memory tables, just three additions.
+A consolidation pass, triggered by the user ("sleep" / "go to sleep") or by the
+optional schedule below — never started by the agent on its own judgement. Full
+procedure in `instructions/SLEEP.md`; no new memory tables, just three additions.
 
 `CLAUDE.md.template` deliberately carries only a **one-line pointer** to that
 file, not a summary of the procedure — sleep happens rarely, so its steps are
@@ -445,6 +445,76 @@ themselves (high volume, low stakes), while compaction and pattern workers only
 *propose* and the user approves in one batch. `--mark-processed` stays with the
 orchestrator and covers only ids a worker actually reported back — a worker that
 dies leaves its rows unprocessed, which is the recoverable state.
+
+## Scheduling the passes (optional)
+
+Consolidation that only happens when someone remembers to ask for it does not
+happen. Two scripts make it automatic without handing an unattended job the
+decisions that belong to you:
+
+```bash
+python3 scripts/install-schedule.py            # register the trigger
+python3 scripts/install-schedule.py --dry-run  # print the unit/plist/XML, change nothing
+python3 scripts/install-schedule.py --status   # registered? when did it last run?
+python3 scripts/install-schedule.py --uninstall
+```
+
+| Platform | What gets registered |
+|---|---|
+| Windows | Task Scheduler task `SuperchargedMemorySleep`, from a task XML |
+| macOS | launchd agent `~/Library/LaunchAgents/com.supercharged-memory.sleep.plist` |
+| Linux | `systemd --user` timer `supercharged-memory-sleep.timer`, falling back to a crontab line |
+
+**One hourly trigger, two passes.** The schedule owns *how often we check*;
+`scripts/scheduled-sleep.py` owns *whether a pass is due*, from a per-period
+marker file plus an earliest-hour window — a normal sleep once a day, not before
+12:00, and the deep-sleep preparation once an ISO week, Mondays not before 07:00.
+Keeping that decision in one place is what makes the platforms behave
+identically, including catch-up: a laptop that was off at noon runs at the first
+tick after it boots, whether the scheduler underneath has `StartWhenAvailable`,
+`Persistent=true`, launchd's wake behaviour, or (plain cron) nothing at all.
+
+**The weekly pass proposes, it does not decide.** It runs D0, D1 backup, D3
+clustering and its proposal workers, D4 proposals and D6.2, then writes a
+decision queue to `<state dir>/deep-sleep-review-<date>.md`. It never purges,
+merges, writes a pattern row or touches an eval case — those gates are the
+design, and D2 is the one operation in this system that destroys a memory. You
+approve the queue in a normal session — starting with a fresh
+`scripts/supercharged-memory-backup.sh`, because by then the corpus has moved on
+and `sleep.py --purge` refuses unless it finds a dump newer than the DB file. The
+queue's command block opens with exactly that. `install-schedule.py --status`
+names the newest review file, so a queue waiting for a decision does not go
+unnoticed once the log line has scrolled away.
+
+Other things worth knowing before you install it:
+
+- The marker is written **only on success**, so a failed run retries on the next
+  tick rather than being skipped for the period. "Success" means the pass left
+  evidence — the weekly its review file, the daily its summary — because an agent
+  that declines or is denied a tool still exits 0.
+- **The first pass starts within the hour of installing.** A fresh install has no
+  markers, so on any day but Monday the weekly preparation is already due, and it
+  runs the normal sleep first. `install-schedule.py` prints what is due before it
+  finishes.
+- Exit codes the trigger records: `0` nothing was due or a pass completed, `75`
+  another pass held the lock, anything else a real failure. `--status` prints the
+  same legend next to the markers.
+- `claude` runs with an explicit `--allowedTools` list and
+  `--permission-prompts none`. What that buys is that the job cannot **hang** —
+  anything that would prompt is denied instead of waiting for a human. It is not
+  a sandbox: `--allowedTools` is additive to your `~/.claude/settings.json`,
+  which `claude -p` also reads, so on a machine with broad settings the list
+  constrains nothing. The weekly pass is propose-only because its **prompt** says
+  so, not because of the tool list. Widen `ALLOWED_TOOLS` in
+  `scheduled-sleep.py` if the log shows a denial.
+- State (log, markers, lock, review files) lives next to the database, or at
+  `SUPERCHARGED_MEMORY_STATE_DIR`.
+- Claude Code injects `~/.claude/settings.json` `env` into **sessions only**. A
+  scheduled job inherits none of it, so `scheduled-sleep.py` reads that block as a
+  fallback — otherwise a database configured there is simply not found, and the
+  run reports `MISSING`, which reads like data loss.
+- On Linux, `loginctl enable-linger $USER` keeps a user timer running while you
+  are logged out — which is exactly the state a catch-up is for.
 
 ## Deep sleep
 
