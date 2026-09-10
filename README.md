@@ -495,8 +495,12 @@ Other things worth knowing before you install it:
   another pass held the lock, anything else a real failure. `--status` prints the
   same legend next to the markers.
 - `claude` runs with an explicit `--allowedTools` list and
-  `--permission-prompts none`, so anything outside the list is denied instead of
-  waiting for a human. The job can fail; it cannot hang. Widen `ALLOWED_TOOLS` in
+  `--permission-prompts none`. What that buys is that the job cannot **hang** —
+  anything that would prompt is denied instead of waiting for a human. It is not
+  a sandbox: `--allowedTools` is additive to your `~/.claude/settings.json`,
+  which `claude -p` also reads, so on a machine with broad settings the list
+  constrains nothing. The weekly pass is propose-only because its **prompt** says
+  so, not because of the tool list. Widen `ALLOWED_TOOLS` in
   `scheduled-sleep.py` if the log shows a denial.
 - State (log, markers, lock, review files) lives next to the database, or at
   `SUPERCHARGED_MEMORY_STATE_DIR`.

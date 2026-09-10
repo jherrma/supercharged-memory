@@ -39,9 +39,16 @@ its summary on stdout - because an agent that declines or is denied a tool still
 exits 0, and stamping the marker for that consumes the period.
 
 PERMISSIONS: unattended, so `claude` is invoked with an explicit --allowedTools
-list plus --permission-prompts none. Anything outside the list is DENIED rather
-than waiting for a human, so the job can fail but can never hang. If the log
-shows a denial, widen ALLOWED_TOOLS below - do not reach for
+list plus --permission-prompts none. What that buys is that the job cannot HANG:
+anything that would prompt is denied instead of waiting for a human. It is not a
+sandbox. --allowedTools is ADDITIVE to the user's ~/.claude/settings.json, which
+`claude -p` also reads, so on a machine with broad settings the list constrains
+nothing (verified: with only `Edit(<one file>)` allowed, a write to an unrelated
+path outside every working directory still succeeded). The propose-only
+guarantee for --mode weekly therefore rests on WEEKLY_PROMPT, not on this list.
+Confining the run for real would need an isolated --settings file.
+
+If the log shows a denial, widen ALLOWED_TOOLS below - do not reach for
 --dangerously-skip-permissions, which hands an unattended job every tool on the
 machine.
 
@@ -88,7 +95,7 @@ STATE_DIR = Path(os.environ.get("SUPERCHARGED_MEMORY_STATE_DIR", Path(M.DB).pare
 LOG_FILE = STATE_DIR / "scheduled-sleep.log"
 LOCK_FILE = STATE_DIR / "sleep.lock"
 LOG_MAX_BYTES = 1_000_000
-LOCK_STALE_HOURS = 3
+LOCK_STALE_HOURS = 4  # must EXCEED the weekly path's budget (60min daily + 120min weekly)
 EXIT_BUSY = 75  # EX_TEMPFAIL: another sleep job holds the lock. Not a failure.
 
 ALLOWED_TOOLS = [
@@ -96,7 +103,11 @@ ALLOWED_TOOLS = [
     "Read", "Glob", "Grep", "Task",
     "mcp__turso__execute_query", "mcp__turso__list_tables", "mcp__turso__describe_table",
 ]
-WEEKLY_EXTRA_TOOLS = ["Write"]  # the review file
+# The review file. Unscoped on purpose: a `Write(<path>)` rule is rejected by the
+# CLI ("not matched by file permission checks - only Edit(path) rules are"), and an
+# `Edit(<path>)` rule would still not confine anything, because the list only adds
+# to the user's settings. See PERMISSIONS above.
+WEEKLY_EXTRA_TOOLS = ["Write"]
 
 MODES = {
     "daily": {
@@ -165,6 +176,29 @@ def find_claude():
     return None
 
 
+def holder_alive(lock_path):
+    """Is the process recorded in the lock file still running? Unknown counts as
+    alive - the cost of guessing wrong the other way is two agents writing to one
+    database. Deliberately NOT os.kill(pid, 0): on Windows CPython routes os.kill
+    through TerminateProcess for any signal that is not a CTRL_ event, so the
+    POSIX liveness idiom would kill the holder it was asked about."""
+    try:
+        pid = int(lock_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return True
+    if sys.platform == "win32":
+        done = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                              capture_output=True, text=True)
+        return done.returncode != 0 or str(pid) in done.stdout
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # e.g. EPERM: it exists and belongs to someone else
+    return True
+
+
 class Lock:
     """Daily and weekly drive `claude` against the same database, and the weekly
     run calls the daily one. Whichever starts second backs off; its next hourly
@@ -186,9 +220,16 @@ class Lock:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
             age_h = (dt.datetime.now().timestamp() - self.path.stat().st_mtime) / 3600
-            if age_h < LOCK_STALE_HOURS:
+            # The PID is the fast path: after a hard power-off mid-pass the holder
+            # is provably gone, and waiting out the staleness window would back the
+            # trigger off for hours over a process that no longer exists. The age
+            # check is the backstop for a PID that has been recycled, and it has to
+            # EXCEED the longest legitimate run - the mtime is set once at creation
+            # and never refreshed, so a window equal to the budget would let a tick
+            # clear the lock of a pass that is still writing.
+            if holder_alive(self.path) and age_h < LOCK_STALE_HOURS:
                 return self
-            log(f"note: clearing a stale lock ({age_h:.1f}h old)")
+            log(f"note: clearing a stale lock ({age_h:.1f}h old, holder gone or timed out)")
             self.path.unlink(missing_ok=True)
         try:
             handle = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
