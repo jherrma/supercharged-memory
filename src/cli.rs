@@ -1,15 +1,16 @@
 //! The CLI surface: every subcommand the Python scripts exposed, plus dispatch.
 //!
 //! Each variant carries the constraint its story must honour, so the brief is
-//! next to the signature rather than only in stories/17-go-rewrite/.
+//! next to the signature rather than only in stories/17-native-cli/.
 
 use std::ffi::OsString;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use crate::config::{Config, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
-use crate::version;
+use crate::{status, version};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -142,11 +143,19 @@ impl Command {
     }
 
     fn run(&self) -> Result<()> {
-        Err(Error::NotImplemented {
-            command: self.name(),
-            story: self.story(),
-        })
+        match self {
+            Command::Status => status::run(&config()?),
+            _ => Err(Error::NotImplemented {
+                command: self.name(),
+                story: self.story(),
+            }),
+        }
     }
+}
+
+/// Resolve configuration from the real environment, once per invocation.
+fn config() -> Result<Config> {
+    Config::from_env(&Env::system()).map_err(|e| Error::failed(e.to_string()))
 }
 
 /// Parse and dispatch one invocation, returning the process exit code.
@@ -237,7 +246,9 @@ mod tests {
         ] {
             assert!(!cmd.name().is_empty());
             assert!(!cmd.story().is_empty());
-            assert!(matches!(cmd.run(), Err(Error::NotImplemented { .. })));
+            if !matches!(cmd, Command::Status) {
+                assert!(matches!(cmd.run(), Err(Error::NotImplemented { .. })));
+            }
         }
     }
 

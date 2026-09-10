@@ -9,6 +9,10 @@ license = "MIT"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+pollster = "1"
+serde_json = "1"
+turso = { version = "0.7.2", default-features = false }
+ureq = { version = "3", features = ["json"] }
 
 [profile.release]
 # One self-contained binary is the whole point (see stories/17-go-rewrite).
