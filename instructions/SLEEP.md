@@ -1,10 +1,16 @@
 # Sleep — consolidation pass
 
 **This file is an instruction set for Claude Code.** When the user says "sleep",
-"go to sleep", or similar, run the procedure below in order. Sleep is
-**user-triggered only** — never scheduled or run automatically. Work from the
+"go to sleep", or similar, run the procedure below in order. Work from the
 repository root; the scripts read `SUPERCHARGED_MEMORY_TURSO_PATH` same as
 always.
+
+Sleep is **never proactive** — do not decide on your own that the corpus looks
+untidy and start one. It has exactly two triggers: the user asking, and the
+optional schedule (`scripts/install-schedule.py`), which runs
+`scripts/scheduled-sleep.py --mode daily` headless. When you are that scheduled
+run, the prompt says so: do not stop to ask for confirmation, and remember nobody
+is watching — anything needing a decision stays untouched and goes in the report.
 
 Sleep does three things: condenses the raw episodic log into durable semantic
 facts, consolidates/retires semantic memory, and rebuilds the topic index that

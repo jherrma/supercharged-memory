@@ -1,8 +1,20 @@
 # Deep sleep — purge, compact, mine patterns
 
-**This file is an instruction set for Claude Code.** Reached one of two ways: the
-user said "deep sleep", or they answered yes to the offer at the end of
-`SLEEP.md`. **User-triggered only** — never scheduled, never proactive.
+**This file is an instruction set for Claude Code.** Reached one of three ways: the
+user said "deep sleep", they answered yes to the offer at the end of `SLEEP.md`, or
+the optional weekly preparation job ran. **Never proactive** — do not start one on
+your own judgement.
+
+--- the scheduled preparation run ---
+`scripts/scheduled-sleep.py --mode weekly` drives this file **propose-only**: D0, D1
+backup, D3 clustering and its proposal workers, D4 proposals, D6.2. It must never
+purge (D2), apply a merge, write a pattern row, or touch an eval case — every gate
+below still belongs to the user, and D2 is the one operation here that destroys a
+memory. Its output is a decision queue at
+`<state dir>/deep-sleep-review-<date>.md`. When you are the supervised session the
+user approves it in, read that file first: the analysis is already done, so do not
+redo the clustering. Treat its lists as leads — pairs that share vocabulary while
+stating different things are the common false positive.
 
 Deep sleep does what a normal sleep pass deliberately doesn't: it deletes what the
 user has agreed is dead weight, looks at *all* current semantic memory at once

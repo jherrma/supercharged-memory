@@ -402,6 +402,37 @@ New coworkers default to `supervised` trust until you appraise them. To use one 
 a session, the user tells the agent "load <Name>."
 
 
+## Step 9 — Offer to schedule the sleep passes (optional)
+
+Ask: *"Should the consolidation passes run on a schedule, or only when you ask?"*
+Do not install it unattended-by-default; it is a real background job on their
+machine.
+
+If yes:
+
+```bash
+python3 scripts/install-schedule.py --dry-run   # show them what it will register
+python3 scripts/install-schedule.py
+```
+
+One hourly trigger (Task Scheduler / launchd / systemd --user / cron) calls
+`scripts/scheduled-sleep.py`, which decides whether a pass is due: a normal sleep
+once a day from 12:00, and the deep-sleep PREPARATION once an ISO week from
+Monday 07:00, both catching up after downtime. Tell them the part that matters:
+the weekly pass only ever **proposes** — it writes a decision queue to
+`<state dir>/deep-sleep-review-<date>.md` and never purges or merges, because
+those gates are theirs.
+
+Verify without waiting for the hour:
+
+```bash
+python3 scripts/scheduled-sleep.py --dry-run
+python3 scripts/install-schedule.py --status
+```
+
+Requires the `claude` CLI on `PATH` (the passes run headless via `claude -p`) and
+Ollama reachable — a run aborts and retries on the next tick if it is not.
+
 ## Windows
 
 Verified on Windows 11 (26100), Git Bash from Git for Windows, PowerShell 5.1,
