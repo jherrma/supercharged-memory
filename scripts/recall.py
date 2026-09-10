@@ -135,7 +135,20 @@ def candidates():
 
 def baseline():
     M.require_db()
-    print("===== baseline (load every session, follow for the whole session) =====")
+    n = int(M.scalar("SELECT count(*) FROM semantic_memory "
+                     "WHERE category='baseline' AND superseded_by IS NULL "
+                     "AND retired_at IS NULL;") or 0)
+    print("===== baseline (load every session, follow for the whole session; "
+          f"{n} rule(s)) =====")
+    if n == 0:
+        # An empty result and a database that has not finished being written look
+        # identical, so never let this pass as "there are no rules". A session that
+        # silently starts without them drops every always-apply rule the user has.
+        print("WARNING: zero baseline rules loaded, which is NOT proof that none exist.")
+        print("A migration or restore still in progress, or the wrong DB path, looks the same.")
+        print("Say so to the user, then check `recall.py --status` and `recall.py --candidates`")
+        print("and re-run this before continuing without baseline rules.")
+        return
     print(M.exec_sql("SELECT topic, memory_text FROM semantic_memory "
                      "WHERE category='baseline' AND superseded_by IS NULL "
                      "AND retired_at IS NULL ORDER BY created_at;"))
