@@ -269,18 +269,23 @@ def linux_install(dry_run):
 CRON_MARK = "# supercharged-memory sleep"
 
 
-def _crontab_lines():
+def _crontab_lines(strict=True):
     # `crontab -l` exits non-zero for "no crontab for <user>" AND for a real
     # failure (cron not installed, spool directory unreadable, an SELinux
     # denial). Treating both as "empty" means the install path would then write
     # a crontab containing only our entry, silently replacing what was there.
+    # strict=False is for the read-only status path, which must report rather
+    # than exit - it is not about to rewrite anything.
     done = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     if done.returncode == 0:
         return done.stdout.splitlines()
     if "no crontab" in (done.stderr or "").lower():
         return []
-    sys.exit("cannot read the crontab, refusing to replace it: "
-             f"{(done.stderr or '').strip() or f'crontab -l exited {done.returncode}'}")
+    detail = (done.stderr or "").strip() or f"crontab -l exited {done.returncode}"
+    if not strict:
+        print(f"cannot read the crontab: {detail}")
+        return []
+    sys.exit(f"cannot read the crontab, refusing to replace it: {detail}")
 
 
 def _write_crontab(lines, dry_run):
@@ -333,7 +338,7 @@ def linux_status():
         registered = f"{UNIT}.timer" in done.stdout
         print(done.stdout.strip() if registered else "not registered")
         return 0 if registered else 1
-    hits = [ln for ln in _crontab_lines() if CRON_MARK in ln]
+    hits = [ln for ln in _crontab_lines(strict=False) if CRON_MARK in ln]
     print("\n".join(hits) if hits else "not registered (no cron entry)")
     return 0 if hits else 1
 
@@ -344,23 +349,43 @@ def linux_status():
 # so its own "Last Run Time" is always minutes ago and its "Last Result: 0" is
 # what a not-due tick returns - reading either as health is the mistake this
 # section exists to prevent.
-def _runner_state_dir():
-    """Resolve the state directory exactly as the runner does, side effects and all
-    (it adopts ~/.claude/settings.json env, which is how the DB path is usually set)."""
+def _runner():
+    """Load the runner itself rather than re-deriving its state directory and its
+    due rule here - two answers to either question is how they drift. Importing it
+    also adopts ~/.claude/settings.json env, which is usually where the DB path is
+    set, so this resolves the same paths a scheduled run would."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("scheduled_sleep", RUNNER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.STATE_DIR
+    return module
+
+
+def due_now():
+    """Which passes would run on the next tick. A fresh install has no markers, so
+    on any day but Monday this is the WEEKLY pass (its catch-up branch) - which
+    runs the normal sleep first. Up to three hours of `claude`, starting within
+    the hour, on a machine the user has just agreed to put a background job on.
+    Say it at install time rather than let them discover it."""
+    try:
+        runner = _runner()
+        return [mode for mode in ("weekly", "daily") if runner.is_due(mode)]
+    except (Exception, SystemExit):  # noqa: BLE001 - advisory only, never fatal
+        return None
 
 
 def pass_status():
     try:
-        state = _runner_state_dir()
-    except Exception as exc:  # noqa: BLE001 - a status command must not traceback
+        state = _runner().STATE_DIR
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - status must not abort
         print(f"pass state: unavailable ({type(exc).__name__}: {exc})")
         return
     print(f"state dir: {state}")
+    # The trigger's own exit code is printed above and needs a legend: a tick with
+    # nothing due and a completed pass both exit 0, a lock back-off exits 75, and
+    # only anything else is a real failure.
+    print("trigger exit codes: 0 nothing due or pass completed, "
+          "75 another pass held the lock, other = failure")
     for marker, label in (("last-daily-run", "last daily sleep"),
                           ("last-weekly-run", "last weekly preparation")):
         path = state / marker
@@ -412,6 +437,16 @@ def main():
         print("\nInstalled. It checks hourly and runs a pass when one is due:")
         print("  daily  normal sleep, not before 12:00")
         print("  weekly deep-sleep preparation, Mondays not before 07:00 (catches up later in the week)")
+        due = due_now()
+        if due and "weekly" in due:
+            # The weekly pass runs the daily one as its D0 prerequisite and stamps
+            # its marker, so listing both would overstate what happens.
+            print("\nDue right now: weekly, which runs the normal sleep first. "
+                  "Expect it to start within the hour.")
+        elif due:
+            print(f"\nDue right now: {' and '.join(due)}. Expect it to start within the hour.")
+        elif due is not None:
+            print("\nNothing is due right now; the next pass runs at its usual time.")
         print(f"Verify with: {python_exe()} {RUNNER} --dry-run")
     return code
 

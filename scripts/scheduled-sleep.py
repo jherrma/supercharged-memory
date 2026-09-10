@@ -170,16 +170,18 @@ class Lock:
     run calls the daily one. Whichever starts second backs off; its next hourly
     tick picks the work up. O_EXCL so two processes cannot both believe they won."""
 
-    def __init__(self, path):
+    def __init__(self, path, inherited=False):
         self.path = path
         self.held = False
-        self.inherited = False
+        self.inherited = inherited
 
     def __enter__(self):
-        # The weekly run already holds the lock when it calls the daily one.
-        if os.environ.get("SUPERCHARGED_MEMORY_SKIP_LOCK") == "1":
+        # The weekly run already holds the lock when it calls the daily one, and
+        # says so on the child's command line. Deliberately not an environment
+        # variable: the child spawns `claude`, which inherits its environment, so
+        # the agent and every tool it runs would carry a lock-bypass flag.
+        if self.inherited:
             self.held = True
-            self.inherited = True
             return self
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
@@ -286,6 +288,7 @@ def main():
                         help="ignore the period marker and the not-before window")
     parser.add_argument("--dry-run", action="store_true",
                         help="run the preflight and print what would happen")
+    parser.add_argument("--lock-held", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.mode == "auto":
@@ -333,7 +336,7 @@ def main():
             log(f"[{args.mode}] dry run: review file would be {review_file}")
         return 0
 
-    with Lock(LOCK_FILE) as lock:
+    with Lock(LOCK_FILE, inherited=args.lock_held) as lock:
         if not lock.held:
             log(f"[{args.mode}] skip: another sleep job holds the lock - next tick retries")
             return EXIT_BUSY
@@ -370,8 +373,7 @@ def main():
             else:
                 log("[weekly] running the normal sleep first (prerequisite)")
                 daily = subprocess.run([sys.executable, str(Path(__file__).resolve()),
-                                        "--mode", "daily", "--force"],
-                                       env={**os.environ, "SUPERCHARGED_MEMORY_SKIP_LOCK": "1"})
+                                        "--mode", "daily", "--force", "--lock-held"])
                 if daily.returncode != 0:
                     log(f"[weekly] abort: the normal sleep failed ({daily.returncode})")
                     return daily.returncode

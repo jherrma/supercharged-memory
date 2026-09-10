@@ -415,6 +415,12 @@ python3 scripts/install-schedule.py --dry-run   # show them what it will registe
 python3 scripts/install-schedule.py
 ```
 
+Tell them the first pass is not a week away: a fresh install has no period
+markers, so on any day but Monday the **weekly** preparation is already due —
+and it runs the normal sleep first. Expect up to three hours of `claude` to
+start within the hour of installing. The installer prints what is due before it
+finishes.
+
 One hourly trigger (Task Scheduler / launchd / systemd --user / cron) calls
 `scripts/scheduled-sleep.py`, which decides whether a pass is due: a normal sleep
 once a day from 12:00, and the deep-sleep PREPARATION once an ISO week from

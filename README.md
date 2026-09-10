@@ -484,7 +484,16 @@ approve the queue in a normal session.
 Other things worth knowing before you install it:
 
 - The marker is written **only on success**, so a failed run retries on the next
-  tick rather than being skipped for the period.
+  tick rather than being skipped for the period. "Success" means the pass left
+  evidence — the weekly its review file, the daily its summary — because an agent
+  that declines or is denied a tool still exits 0.
+- **The first pass starts within the hour of installing.** A fresh install has no
+  markers, so on any day but Monday the weekly preparation is already due, and it
+  runs the normal sleep first. `install-schedule.py` prints what is due before it
+  finishes.
+- Exit codes the trigger records: `0` nothing was due or a pass completed, `75`
+  another pass held the lock, anything else a real failure. `--status` prints the
+  same legend next to the markers.
 - `claude` runs with an explicit `--allowedTools` list and
   `--permission-prompts none`, so anything outside the list is denied instead of
   waiting for a human. The job can fail; it cannot hang. Widen `ALLOWED_TOOLS` in
