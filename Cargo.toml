@@ -1,0 +1,20 @@
+[package]
+name = "supercharged-memory"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Long-term memory for AI coding agents: a local vector database with recall, consolidation and backup"
+repository = "https://github.com/jherrma/supercharged-memory"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+# One self-contained binary is the whole point (see stories/17-go-rewrite).
+# Strip symbols and optimise for size; a memory CLI is not throughput-bound.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

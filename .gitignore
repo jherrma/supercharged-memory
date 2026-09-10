@@ -5,3 +5,4 @@ coworkers/*.md
 !coworkers/README.md
 **/.DS_Store
 stories/
+/target/
