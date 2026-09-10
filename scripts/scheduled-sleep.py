@@ -33,7 +33,10 @@ period - costs one file read and exits before touching the network.
 
 FAILURE POLICY: the marker is written only on success. A failed run therefore
 retries on the next tick instead of being silently skipped for the period. A run
-that cannot even start (Ollama down, DB missing) is a failure, not a no-op.
+that cannot even start (Ollama down, DB missing) is a failure, not a no-op. And
+"success" means the pass left evidence - the weekly its review file, the daily
+its summary on stdout - because an agent that declines or is denied a tool still
+exits 0, and stamping the marker for that consumes the period.
 
 PERMISSIONS: unattended, so `claude` is invoked with an explicit --allowedTools
 list plus --permission-prompts none. Anything outside the list is DENIED rather
@@ -86,6 +89,7 @@ LOG_FILE = STATE_DIR / "scheduled-sleep.log"
 LOCK_FILE = STATE_DIR / "sleep.lock"
 LOG_MAX_BYTES = 1_000_000
 LOCK_STALE_HOURS = 3
+EXIT_BUSY = 75  # EX_TEMPFAIL: another sleep job holds the lock. Not a failure.
 
 ALLOWED_TOOLS = [
     "Bash(python:*)", "Bash(python3:*)", "Bash(bash:*)", "Bash(tursodb:*)",
@@ -130,7 +134,8 @@ def period_tag(mode, now):
 
 
 def is_due(mode, force=False):
-    """Marker + window check only - no network, no lock. Used by --mode auto."""
+    """The single window rule: marker + not-before, no network and no lock. Both
+    --mode auto and preflight() call this, so there is one answer, not two."""
     now = dt.datetime.now()
     spec = MODES[mode]
     marker = STATE_DIR / spec["marker"]
@@ -141,6 +146,9 @@ def is_due(mode, force=False):
         return True
     hour, minute = (int(x) for x in spec["not_before"].split(":"))
     weekday = spec.get("weekday")
+    # Weekly: the hour only gates the target weekday. Later in the same ISO week is
+    # a catch-up for a machine that was off on Monday, and must not wait for 07:00
+    # all over again.
     on_target_day = weekday is None or now.weekday() == weekday
     return not (on_target_day and (now.hour, now.minute) < (hour, minute))
 
@@ -254,17 +262,16 @@ reviewer needs enough context in why_safe to catch that without re-reading the r
 """
 
 
-def preflight(spec, now, args):
-    """Whether this hourly tick is allowed to start the pass."""
-    if not args.force:
-        hour, minute = (int(x) for x in spec["not_before"].split(":"))
-        weekday = spec.get("weekday")
-        # Weekly: the hour only gates the target weekday. Later in the same ISO week
-        # is a catch-up for a machine that was off on Monday, and must not wait for
-        # 07:00 all over again.
-        on_target_day = weekday is None or now.weekday() == weekday
-        if on_target_day and (now.hour, now.minute) < (hour, minute):
-            return f"skip: before {spec['not_before']}"
+def preflight(mode, spec, args):
+    """Whether this hourly tick is allowed to start the pass. The window rule lives
+    in is_due() alone: --mode auto dispatches on it and the child re-checks here, so
+    two copies would let auto spawn a subprocess that exits 0 with nothing logged."""
+    if not is_due(mode, args.force):
+        marker = STATE_DIR / spec["marker"]
+        ran = (marker.is_file()
+               and marker.read_text(encoding="utf-8").strip()
+               == period_tag(mode, dt.datetime.now()))
+        return "skip: already ran this period" if ran else f"skip: before {spec['not_before']}"
     if not M.db_exists():
         return f"abort: no database at {M.DB} - not creating one; run recall.py --candidates"
     return None
@@ -283,7 +290,12 @@ def main():
 
     if args.mode == "auto":
         # One timer, one entry point. Weekly first: it runs the daily pass itself as
-        # its D0 prerequisite, so doing daily first would just do it twice.
+        # its D0 prerequisite, so doing daily first would just do it twice - and
+        # after a successful weekly the daily marker is stamped, so the second
+        # iteration finds nothing to do. Re-checking rather than returning after the
+        # first mode is what covers the weekly-skipped-on-the-lock case; otherwise
+        # that tick would drop the daily pass too.
+        code = 0
         for mode in ("weekly", "daily"):
             if not is_due(mode, args.force):
                 continue
@@ -292,20 +304,20 @@ def main():
                 argv.append("--force")
             if args.dry_run:
                 argv.append("--dry-run")
-            return subprocess.run(argv).returncode
-        return 0
+            result = subprocess.run(argv).returncode
+            if result == EXIT_BUSY:
+                continue  # the lock holder may be finishing; the other pass may fit
+            if result != 0:
+                code = result
+            elif mode == "weekly":
+                break  # weekly already ran the daily pass as its prerequisite
+        return code
 
     spec = MODES[args.mode]
     now = dt.datetime.now()
-    tag = period_tag(args.mode, now)
     marker = STATE_DIR / spec["marker"]
 
-    # Cheapest check first: on an hourly trigger this is the common path.
-    if not args.force and marker.is_file():
-        if marker.read_text(encoding="utf-8").strip() == tag:
-            return 0
-
-    reason = preflight(spec, now, args)
+    reason = preflight(args.mode, spec, args)
     if reason:
         if reason.startswith("abort"):
             log(f"[{args.mode}] {reason}")
@@ -314,7 +326,8 @@ def main():
 
     if args.dry_run:
         review_file = STATE_DIR / f"deep-sleep-review-{now:%Y-%m-%d}.md"
-        log(f"[{args.mode}] dry run: would run in {REPO} (db {M.DB}, marker {tag})")
+        log(f"[{args.mode}] dry run: would run in {REPO} "
+            f"(db {M.DB}, marker {period_tag(args.mode, now)})")
         log(f"[{args.mode}] dry run: claude={find_claude()} ollama_up={M.ollama_up()}")
         if args.mode == "weekly":
             log(f"[{args.mode}] dry run: review file would be {review_file}")
@@ -323,7 +336,7 @@ def main():
     with Lock(LOCK_FILE) as lock:
         if not lock.held:
             log(f"[{args.mode}] skip: another sleep job holds the lock - next tick retries")
-            return 0
+            return EXIT_BUSY
 
         claude = find_claude()
         if not claude:
@@ -342,16 +355,26 @@ def main():
         tools = ALLOWED_TOOLS + (WEEKLY_EXTRA_TOOLS if args.mode == "weekly" else [])
 
         # D0 wants the normal pass done before deep sleep, or compaction merges
-        # against a corpus missing the week's lessons. The daily run self-throttles,
-        # so this is a no-op when it already happened today.
+        # against a corpus missing the week's lessons. The child needs --force
+        # (a weekly tick at 08:00 is before the daily's 12:00 window, so it would
+        # otherwise decline), and --force also ignores the daily marker - so check
+        # that marker here, or a Monday weekly catch-up at 13:00 re-runs the sleep
+        # that already completed at 12:00.
         if args.mode == "weekly":
-            log("[weekly] running the normal sleep first (prerequisite)")
-            daily = subprocess.run([sys.executable, str(Path(__file__).resolve()),
-                                    "--mode", "daily", "--force"],
-                                   env={**os.environ, "SUPERCHARGED_MEMORY_SKIP_LOCK": "1"})
-            if daily.returncode != 0:
-                log(f"[weekly] abort: the normal sleep failed ({daily.returncode})")
-                return daily.returncode
+            daily_marker = STATE_DIR / MODES["daily"]["marker"]
+            done_today = (daily_marker.is_file()
+                          and daily_marker.read_text(encoding="utf-8").strip()
+                          == period_tag("daily", dt.datetime.now()))
+            if done_today:
+                log("[weekly] normal sleep already ran today (prerequisite satisfied)")
+            else:
+                log("[weekly] running the normal sleep first (prerequisite)")
+                daily = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                                        "--mode", "daily", "--force"],
+                                       env={**os.environ, "SUPERCHARGED_MEMORY_SKIP_LOCK": "1"})
+                if daily.returncode != 0:
+                    log(f"[weekly] abort: the normal sleep failed ({daily.returncode})")
+                    return daily.returncode
 
         log(f"[{args.mode}] starting ({M.DB})")
         try:
@@ -373,7 +396,18 @@ def main():
         if args.mode == "weekly" and not review_file.is_file():
             log(f"[{args.mode}] FAILED: no review file at {review_file} - next tick retries")
             return 1
+        # The weekly pass proves it ran by leaving the review file. The daily pass
+        # has no artefact, so without this an agent that declined, hit a denied
+        # tool, or answered in two lines exits 0, stamps the marker, and the day is
+        # consumed. The prompt demands a summary; no summary means no pass.
+        if args.mode == "daily" and not (done.stdout or "").strip():
+            log(f"[{args.mode}] FAILED: claude exited 0 with no output - next tick retries")
+            return 1
 
+        # Recomputed, not the tag from the start of the run: a pass may take an
+        # hour (two for weekly), and one that straddles midnight would otherwise
+        # stamp the period it began in and be re-run immediately.
+        tag = period_tag(args.mode, dt.datetime.now())
         marker.write_text(tag, encoding="utf-8")
         log(f"[{args.mode}] done (marker {tag})")
         if args.mode == "weekly":

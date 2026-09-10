@@ -28,11 +28,13 @@ Idempotent: re-running replaces what is there.
 import argparse
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 REPO = Path(__file__).resolve().parent.parent
 RUNNER = REPO / "scripts" / "scheduled-sleep.py"
@@ -45,6 +47,15 @@ def python_exe():
     # sys.executable is the interpreter that has memlib's dependencies; a bare
     # "python3" in a unit file can easily be a different one.
     return sys.executable or shutil.which("python3") or "python3"
+
+
+# Both the Task Scheduler task and the launchd agent are XML documents, and the
+# three values we interpolate are user paths. `&` is legal in a Windows path
+# (`C:\Users\R&D\...`) and in a macOS home directory, and it makes the document
+# malformed - schtasks then reports a parse error against the temp file rather
+# than against the path that caused it.
+def xml_text(value):
+    return escape(str(value))
 
 
 # ----------------------------------------------------------------- Windows ---
@@ -73,15 +84,19 @@ def windows_xml():
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <StartWhenAvailable>true</StartWhenAvailable>
-    <ExecutionTimeLimit>PT3H</ExecutionTimeLimit>
+    <!-- Must exceed the runner's own budget, which is 60min for the daily
+         prerequisite plus 120min for the weekly pass. At exactly PT3H the task
+         is killed at the boundary from outside, so the runner's TimeoutExpired
+         handler never runs and nothing reaches the log. -->
+    <ExecutionTimeLimit>PT4H</ExecutionTimeLimit>
     <Enabled>true</Enabled>
     <Hidden>true</Hidden>
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>{python_exe()}</Command>
-      <Arguments>"{RUNNER}"</Arguments>
-      <WorkingDirectory>{REPO}</WorkingDirectory>
+      <Command>{xml_text(python_exe())}</Command>
+      <Arguments>"{xml_text(RUNNER)}"</Arguments>
+      <WorkingDirectory>{xml_text(REPO)}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
@@ -144,10 +159,10 @@ def macos_plist():
   <key>Label</key><string>{LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{python_exe()}</string>
-    <string>{RUNNER}</string>
+    <string>{xml_text(python_exe())}</string>
+    <string>{xml_text(RUNNER)}</string>
   </array>
-  <key>WorkingDirectory</key><string>{REPO}</string>
+  <key>WorkingDirectory</key><string>{xml_text(REPO)}</string>
   <key>StartInterval</key><integer>3600</integer>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Background</string>
@@ -201,7 +216,10 @@ Description=supercharged-memory: run a sleep pass when one is due
 [Service]
 Type=oneshot
 WorkingDirectory={REPO}
-ExecStart={python_exe()} {RUNNER}
+# Quoted: systemd splits ExecStart on whitespace, so a repo or interpreter path
+# containing a space would arrive as two arguments. WorkingDirectory takes the
+# rest of the line and needs no quoting.
+ExecStart="{python_exe()}" "{RUNNER}"
 """
     timer = f"""[Unit]
 Description=supercharged-memory: hourly check for a due sleep pass
@@ -252,8 +270,17 @@ CRON_MARK = "# supercharged-memory sleep"
 
 
 def _crontab_lines():
+    # `crontab -l` exits non-zero for "no crontab for <user>" AND for a real
+    # failure (cron not installed, spool directory unreadable, an SELinux
+    # denial). Treating both as "empty" means the install path would then write
+    # a crontab containing only our entry, silently replacing what was there.
     done = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    return [] if done.returncode != 0 else done.stdout.splitlines()
+    if done.returncode == 0:
+        return done.stdout.splitlines()
+    if "no crontab" in (done.stderr or "").lower():
+        return []
+    sys.exit("cannot read the crontab, refusing to replace it: "
+             f"{(done.stderr or '').strip() or f'crontab -l exited {done.returncode}'}")
 
 
 def _write_crontab(lines, dry_run):
@@ -268,7 +295,13 @@ def _write_crontab(lines, dry_run):
 
 
 def cron_install(dry_run):
-    entry = f"0 * * * * cd {REPO} && {python_exe()} {RUNNER} >/dev/null 2>&1  {CRON_MARK}"
+    # Quoted, because any of the three paths may contain a space. `%` is not
+    # quotable here: cron turns an unescaped one into a newline and feeds the
+    # remainder to the job on stdin, so escape it rather than write an entry
+    # that silently cannot work.
+    command = (f"cd {shlex.quote(str(REPO))} && "
+               f"{shlex.quote(python_exe())} {shlex.quote(str(RUNNER))} >/dev/null 2>&1")
+    entry = f"0 * * * * {command.replace('%', chr(92) + '%')}  {CRON_MARK}"
     lines = [ln for ln in _crontab_lines() if CRON_MARK not in ln]
     lines.append(entry)
     print("no systemd --user available, falling back to cron")
@@ -294,11 +327,53 @@ def linux_status():
     if have_systemd():
         done = subprocess.run(["systemctl", "--user", "list-timers", f"{UNIT}.timer",
                                "--no-pager"], capture_output=True, text=True)
-        print(done.stdout.strip() or "not registered")
-        return done.returncode
+        # list-timers exits 0 and prints an empty table for a timer that does not
+        # exist, so its exit code says nothing. The other two platforms return 1
+        # when nothing is registered; match them or a scripted check is wrong here.
+        registered = f"{UNIT}.timer" in done.stdout
+        print(done.stdout.strip() if registered else "not registered")
+        return 0 if registered else 1
     hits = [ln for ln in _crontab_lines() if CRON_MARK in ln]
     print("\n".join(hits) if hits else "not registered (no cron entry)")
     return 0 if hits else 1
+
+
+# --------------------------------------------------------------- the passes ---
+# Whether the TRIGGER is registered is a per-platform question; when a PASS last
+# ran is not, and it is the one the user actually asks. The trigger fires hourly,
+# so its own "Last Run Time" is always minutes ago and its "Last Result: 0" is
+# what a not-due tick returns - reading either as health is the mistake this
+# section exists to prevent.
+def _runner_state_dir():
+    """Resolve the state directory exactly as the runner does, side effects and all
+    (it adopts ~/.claude/settings.json env, which is how the DB path is usually set)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("scheduled_sleep", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.STATE_DIR
+
+
+def pass_status():
+    try:
+        state = _runner_state_dir()
+    except Exception as exc:  # noqa: BLE001 - a status command must not traceback
+        print(f"pass state: unavailable ({type(exc).__name__}: {exc})")
+        return
+    print(f"state dir: {state}")
+    for marker, label in (("last-daily-run", "last daily sleep"),
+                          ("last-weekly-run", "last weekly preparation")):
+        path = state / marker
+        value = path.read_text(encoding="utf-8").strip() if path.is_file() else "never"
+        print(f"{label}: {value}")
+    log_file = state / "scheduled-sleep.log"
+    if not log_file.is_file():
+        print("log: none yet")
+        return
+    tail = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-5:]
+    print("log (last 5 lines):")
+    for line in tail:
+        print(f"  {line}")
 
 
 PLATFORMS = {
@@ -326,14 +401,17 @@ def main():
     install, uninstall, status = PLATFORMS[system]
 
     if args.status:
-        return status()
+        code = status()
+        print()
+        pass_status()
+        return code
     if args.uninstall:
         return uninstall(args.dry_run)
     code = install(args.dry_run)
     if code == 0 and not args.dry_run:
-        print(f"\nInstalled. It checks hourly and runs a pass when one is due:")
-        print(f"  daily  normal sleep, not before 12:00")
-        print(f"  weekly deep-sleep preparation, Mondays not before 07:00 (catches up later in the week)")
+        print("\nInstalled. It checks hourly and runs a pass when one is due:")
+        print("  daily  normal sleep, not before 12:00")
+        print("  weekly deep-sleep preparation, Mondays not before 07:00 (catches up later in the week)")
         print(f"Verify with: {python_exe()} {RUNNER} --dry-run")
     return code
 
