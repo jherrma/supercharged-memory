@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::embed;
 use crate::error::{Error, Result};
 use crate::render;
-use crate::store::{Scope, SearchQuery, Store, Table, candidates, turso::TursoStore};
+use crate::store::{self, Scope, SearchQuery, Store, Table, candidates};
 
 /// Above this, the topic index costs real context every single session.
 const TOPIC_WARN_AT: u64 = 50;
@@ -62,7 +62,7 @@ pub fn run(cfg: &Config, args: &Args) -> Result<()> {
     if args.candidates {
         return list_candidates(cfg);
     }
-    let store = open(cfg)?;
+    let store = store::open(cfg)?;
 
     if args.count {
         println!("{}", store.total_memories()?);
@@ -75,19 +75,6 @@ pub fn run(cfg: &Config, args: &Args) -> Result<()> {
         return topics(&store);
     }
     search(cfg, &store, args, args.query.as_deref().unwrap_or_default())
-}
-
-/// Open, or refuse with the report. Never create: a missing database almost
-/// always means a wrong path, and an empty new one strands the real one.
-fn open(cfg: &Config) -> Result<TursoStore> {
-    if !cfg.db_exists() {
-        let mut msg = String::from("memory DB missing — refusing to silently create an empty one.");
-        for line in candidates::missing_report(cfg) {
-            msg.push_str(&format!("\n  {line}"));
-        }
-        return Err(Error::refused(msg));
-    }
-    TursoStore::open(cfg)
 }
 
 fn baseline(store: &impl Store) -> Result<()> {

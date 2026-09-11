@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use turso::{Builder, Connection, Value};
 
-use super::{Cell, ResultSet, Scope, SearchQuery, Store, Table};
+use super::{Cell, NewMemory, ResultSet, Scope, SearchQuery, Store, Table};
 use crate::config::Config;
 use crate::error::{Error, Result};
 
@@ -313,6 +313,175 @@ impl Store for TursoStore {
         };
         self.query(&sql, params)
     }
+
+    fn rows_with_other_embed_model(&self, table: Table, embed_model: &str) -> Result<u64> {
+        let rs = self.query(
+            &format!(
+                "SELECT count(*) FROM {}_memory \
+                 WHERE embed_model IS NOT NULL AND embed_model <> ?;",
+                table.as_str()
+            ),
+            vec![Value::Text(embed_model.to_string())],
+        )?;
+        Ok(match rs.rows.first().and_then(|r| r.first()) {
+            Some(Cell::Int(n)) => (*n).max(0) as u64,
+            _ => 0,
+        })
+    }
+
+    fn current_semantic_ids(&self, ids: &[i64]) -> Result<Vec<i64>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let rs = self.query(
+            &format!(
+                "SELECT id FROM semantic_memory WHERE id IN ({placeholders}) \
+                 AND superseded_by IS NULL AND retired_at IS NULL;"
+            ),
+            ids.iter().map(|i| Value::Integer(*i)).collect(),
+        )?;
+        Ok(rs
+            .rows
+            .iter()
+            .filter_map(|r| match r.first() {
+                Some(Cell::Int(n)) => Some(*n),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn nearest_semantic(&self, coworkers: &[i64], vector: &[f32]) -> Result<Option<f64>> {
+        let lit = vector_literal(vector);
+        let mut sql = format!(
+            // `embedding IS NOT NULL` is not optional: vector_distance_cos raises
+            // "Invalid vector type" on a NULL embedding, so one such row would
+            // make every insert fail, not merely skew the comparison.
+            "SELECT round(vector_distance_cos(embedding,{lit}),4) FROM semantic_memory \
+             WHERE superseded_by IS NULL AND retired_at IS NULL AND embedding IS NOT NULL"
+        );
+        let mut params = Vec::new();
+        if !coworkers.is_empty() {
+            // Scope the guard to what this coworker can see: a memory they cannot
+            // reach is not a duplicate of one they can.
+            let placeholders = vec!["?"; coworkers.len()].join(",");
+            sql.push_str(&format!(
+                " AND (id NOT IN (SELECT memory_id FROM memory_coworkers WHERE memory_table='semantic') \
+                 OR id IN (SELECT memory_id FROM memory_coworkers WHERE memory_table='semantic' \
+                 AND coworker_id IN ({placeholders})))"
+            ));
+            params.extend(coworkers.iter().map(|c| Value::Integer(*c)));
+        }
+        sql.push_str(" ORDER BY 1 LIMIT 1;");
+        let rs = self.query(&sql, params)?;
+        Ok(match rs.rows.first().and_then(|r| r.first()) {
+            Some(Cell::Real(d)) => Some(*d),
+            Some(Cell::Int(n)) => Some(*n as f64),
+            _ => None,
+        })
+    }
+
+    fn insert_memory(&self, m: &NewMemory) -> Result<i64> {
+        let (insert_sql, insert_params) = insert_statement(m);
+        let table = m.table.as_str().to_string();
+
+        self.with_retry(|| {
+            pollster::block_on(async {
+                // Dropping the transaction without committing leaves it dangling,
+                // and the driver rolls it back on the connection's next use -- so
+                // an error anywhere below, including a retry, discards the row,
+                // the supersede and the tags together.
+                let tx = self.conn.unchecked_transaction().await?;
+                tx.execute(&insert_sql, insert_params.clone()).await?;
+
+                // Read the id ONCE, here, straight after the memory insert. Bug
+                // B1 in the issue #3 review came from asking for
+                // last_insert_rowid() again AFTER the memory_coworkers insert,
+                // which answers with the join row's id.
+                let id = self.conn.last_insert_rowid();
+
+                if !m.supersedes.is_empty() {
+                    // One UPDATE covers every superseded id, so an N->1 merge
+                    // cannot half-apply.
+                    let placeholders = vec!["?"; m.supersedes.len()].join(",");
+                    let mut params = vec![Value::Integer(id)];
+                    params.extend(m.supersedes.iter().map(|i| Value::Integer(*i)));
+                    tx.execute(
+                        &format!(
+                            "UPDATE semantic_memory SET superseded_by=?, \
+                             updated_at=datetime('now') WHERE id IN ({placeholders});"
+                        ),
+                        params,
+                    )
+                    .await?;
+                }
+
+                for cid in &m.coworkers {
+                    tx.execute(
+                        "INSERT INTO memory_coworkers (memory_table, memory_id, coworker_id) \
+                         VALUES (?, ?, ?);",
+                        vec![
+                            Value::Text(table.clone()),
+                            Value::Integer(id),
+                            Value::Integer(*cid),
+                        ],
+                    )
+                    .await?;
+                }
+
+                tx.commit().await?;
+                Ok(id)
+            })
+        })
+    }
+}
+
+/// The INSERT and its bound parameters.
+///
+/// Only the columns actually given are named, so the schema's defaults still
+/// apply -- omitting `created_at` is how a row asks for CURRENT_TIMESTAMP, and
+/// binding NULL instead would violate its NOT NULL.
+fn insert_statement(m: &NewMemory) -> (String, Vec<Value>) {
+    let mut cols: Vec<&str> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+    let mut push = |col: &'static str, v: &Option<String>| {
+        cols.push(col);
+        params.push(match v {
+            Some(s) => Value::Text(s.clone()),
+            None => Value::Null,
+        });
+    };
+    push("project", &m.project);
+    push("topic", &m.topic);
+    push("source", &m.source);
+    push("model", &m.model);
+    push("embed_model", &Some(m.embed_model.clone()));
+    push("memory_text", &Some(m.memory_text.clone()));
+    push("file_reference", &m.file_reference);
+    match m.table {
+        Table::Semantic => push("category", &m.category),
+        Table::Episodic => {
+            push("event_type", &m.event_type);
+            push("importance", &m.importance);
+        }
+    }
+    if m.created_at.is_some() {
+        push("created_at", &m.created_at);
+        // Semantic rows carry an updated_at too; an imported memory whose
+        // created_at is backdated but whose updated_at is today looks revised.
+        if m.table == Table::Semantic {
+            push("updated_at", &m.created_at);
+        }
+    }
+
+    let placeholders = vec!["?"; cols.len()].join(", ");
+    let sql = format!(
+        "INSERT INTO {}_memory ({}, embedding) VALUES ({placeholders}, {});",
+        m.table.as_str(),
+        cols.join(", "),
+        vector_literal(&m.embedding)
+    );
+    (sql, params)
 }
 
 /// Contention, as the driver reports it. `Busy` is the typed case; the string

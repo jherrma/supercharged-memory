@@ -10,6 +10,7 @@ mod config;
 mod embed;
 mod error;
 mod recall;
+mod remember;
 mod render;
 mod status;
 mod store;

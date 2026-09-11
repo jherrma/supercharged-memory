@@ -10,8 +10,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::{Config, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
-use crate::recall;
-use crate::{status, version};
+use crate::remember;
+use crate::store;
+use crate::{recall, status, version};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -38,6 +39,23 @@ pub enum TableArg {
     Both,
 }
 
+/// `--table` where exactly one table is meant (the write side), as opposed to
+/// `recall`'s three-way choice that also allows both at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OneTable {
+    Semantic,
+    Episodic,
+}
+
+impl From<OneTable> for store::Table {
+    fn from(t: OneTable) -> Self {
+        match t {
+            OneTable::Semantic => store::Table::Semantic,
+            OneTable::Episodic => store::Table::Episodic,
+        }
+    }
+}
+
 impl From<TableArg> for recall::TableArg {
     fn from(t: TableArg) -> Self {
         match t {
@@ -48,6 +66,10 @@ impl From<TableArg> for recall::TableArg {
     }
 }
 
+// One Command is built per process, and it is the process's entire argument
+// state -- there is no array of them and nothing is cloned per row, so the size
+// of the largest variant costs nothing worth boxing for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Report database health: MISSING | EMPTY | DEGRADED n | ERROR | READY n.
@@ -103,7 +125,75 @@ pub enum Command {
     /// Owns every mechanical guard that keeps the corpus clean: near-duplicate
     /// refusal, the 2000-char cap, one embedding model per database, the
     /// baseline confirmation, the --created-at format.
-    Remember,
+    Remember {
+        /// Timeless fact (semantic) or time-anchored event (episodic).
+        #[arg(long, value_enum)]
+        table: OneTable,
+
+        /// The memory itself. NEVER PII — anonymize; store pointers instead.
+        #[arg(long)]
+        text: String,
+
+        /// Short headline. Shown by recall and used to group a sleep pass.
+        #[arg(long)]
+        topic: Option<String>,
+
+        /// Tracking-tool work item id. Omit if the memory is not ticket-bound.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Appended INTO the text, so they are embedded and LIKE-searchable —
+        /// and so they count against the 2000-char cap.
+        #[arg(long)]
+        keywords: Option<String>,
+
+        /// Where the memory came from (user-stated, self-observed, migration…).
+        #[arg(long)]
+        source: Option<String>,
+
+        /// The agent model that wrote it.
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Path this memory was derived from; the audit trail for an import.
+        #[arg(long = "file-reference")]
+        file_reference: Option<String>,
+
+        /// 'YYYY-MM-DD HH:MM:SS', or a bare 'YYYY-MM-DD' (stored as that day at
+        /// 00:00:00). Anything else is refused; omit the flag to date the row now.
+        #[arg(long = "created-at")]
+        created_at: Option<String>,
+
+        /// Semantic only: baseline, user, feedback, project, reference, pattern.
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Episodic only: project_start, bug_fix, feature_complete, decision,
+        /// milestone, incident, note.
+        #[arg(long = "event-type")]
+        event_type: Option<String>,
+
+        /// Episodic only: routine, notable, major.
+        #[arg(long)]
+        importance: Option<String>,
+
+        /// Required to store a 'baseline' memory: those load every session.
+        #[arg(long = "confirm-baseline")]
+        confirm_baseline: bool,
+
+        /// Store even if a near-duplicate already exists.
+        #[arg(long)]
+        force: bool,
+
+        /// Comma-separated id(s) of the semantic row(s) this replaces: inserts the
+        /// new row and marks all of them superseded by it, in one transaction.
+        #[arg(long)]
+        supersedes: Option<String>,
+
+        /// Comma-separated coworker name(s) to scope this memory to.
+        #[arg(long)]
+        coworker: Option<String>,
+    },
 
     /// Add, appraise, retire or reactivate a coworker persona (writes only).
     ///
@@ -167,7 +257,7 @@ impl Command {
         match self {
             Command::Status => "status",
             Command::Recall { .. } => "recall",
-            Command::Remember => "remember",
+            Command::Remember { .. } => "remember",
             Command::Coworkers => "coworkers",
             Command::Sleep => "sleep",
             Command::Backfill => "backfill",
@@ -184,7 +274,7 @@ impl Command {
     pub fn story(&self) -> &'static str {
         match self {
             Command::Status | Command::Recall { .. } => "004",
-            Command::Remember => "005",
+            Command::Remember { .. } => "005",
             Command::Coworkers => "006",
             Command::Sleep => "007",
             Command::Backfill => "008",
@@ -222,6 +312,44 @@ impl Command {
                     topics: *topics,
                     candidates: *candidates,
                     count: *count,
+                },
+            ),
+            Command::Remember {
+                table,
+                text,
+                topic,
+                project,
+                keywords,
+                source,
+                model,
+                file_reference,
+                created_at,
+                category,
+                event_type,
+                importance,
+                confirm_baseline,
+                force,
+                supersedes,
+                coworker,
+            } => remember::run(
+                &config()?,
+                &remember::Args {
+                    table: Some((*table).into()),
+                    text: text.clone(),
+                    topic: topic.clone(),
+                    project: project.clone(),
+                    keywords: keywords.clone(),
+                    source: source.clone(),
+                    model: model.clone(),
+                    file_reference: file_reference.clone(),
+                    created_at: created_at.clone(),
+                    category: category.clone(),
+                    event_type: event_type.clone(),
+                    importance: importance.clone(),
+                    confirm_baseline: *confirm_baseline,
+                    force: *force,
+                    supersedes: supersedes.clone(),
+                    coworker: coworker.clone(),
                 },
             ),
             _ => Err(Error::NotImplemented {
@@ -322,7 +450,24 @@ mod tests {
                 candidates: false,
                 count: false,
             },
-            Command::Remember,
+            Command::Remember {
+                table: OneTable::Semantic,
+                text: String::new(),
+                topic: None,
+                project: None,
+                keywords: None,
+                source: None,
+                model: None,
+                file_reference: None,
+                created_at: None,
+                category: None,
+                event_type: None,
+                importance: None,
+                confirm_baseline: false,
+                force: false,
+                supersedes: None,
+                coworker: None,
+            },
             Command::Coworkers,
             Command::Sleep,
             Command::Backfill,
@@ -335,7 +480,10 @@ mod tests {
         ] {
             assert!(!cmd.name().is_empty());
             assert!(!cmd.story().is_empty());
-            if !matches!(cmd, Command::Status | Command::Recall { .. }) {
+            if !matches!(
+                cmd,
+                Command::Status | Command::Recall { .. } | Command::Remember { .. }
+            ) {
                 assert!(matches!(cmd.run(), Err(Error::NotImplemented { .. })));
             }
         }
@@ -361,9 +509,19 @@ mod tests {
     #[test]
     fn exit_codes() {
         assert_eq!(
-            code(&["sm", "remember"]),
+            code(&["sm", "coworkers"]),
             EXIT_ERROR,
             "a stub is an error, not a refusal"
+        );
+        assert_eq!(
+            code(&["sm", "remember"]),
+            EXIT_USAGE,
+            "remember without its required flags is a usage error"
+        );
+        assert_eq!(
+            code(&["sm", "remember", "--table", "semantic", "--text", "  "]),
+            EXIT_REFUSED,
+            "an empty --text is refused before the database is opened"
         );
         assert_eq!(
             code(&["sm", "recall"]),

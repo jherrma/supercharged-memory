@@ -15,7 +15,8 @@
 pub mod candidates;
 pub mod turso;
 
-use crate::error::Result;
+use crate::config::Config;
+use crate::error::{Error, Result};
 use crate::recall::rank::WeightedToken;
 
 /// Which memory table a search is scoped to.
@@ -65,6 +66,39 @@ pub enum Cell {
     Text(String),
 }
 
+/// A memory about to be written: already validated, already embedded.
+///
+/// Deliberately a value, not a builder over SQL -- a MongoDB backend gets the
+/// same struct. `supersedes` and `coworkers` ride along because they must land
+/// in the SAME transaction as the row itself: a merge of N memories into one
+/// that half-applies leaves some old rows current and some superseded, which no
+/// later pass can tell apart from a deliberate state.
+#[derive(Debug, Clone)]
+pub struct NewMemory {
+    pub table: Table,
+    pub project: Option<String>,
+    pub topic: Option<String>,
+    /// Semantic only.
+    pub category: Option<String>,
+    /// Episodic only.
+    pub event_type: Option<String>,
+    /// Episodic only.
+    pub importance: Option<String>,
+    pub source: Option<String>,
+    pub model: Option<String>,
+    pub embed_model: String,
+    /// The text as it will be stored, keywords already appended into it.
+    pub memory_text: String,
+    pub file_reference: Option<String>,
+    /// `None` lets the schema default to CURRENT_TIMESTAMP.
+    pub created_at: Option<String>,
+    pub embedding: Vec<f32>,
+    /// Current semantic ids this row replaces.
+    pub supersedes: Vec<i64>,
+    /// Coworker ids this memory is scoped to. Empty = global.
+    pub coworkers: Vec<i64>,
+}
+
 /// Rows plus their column names, which is what the output format needs. It is a
 /// result set, not a query -- a MongoDB backend produces the same shape.
 #[derive(Debug, Clone)]
@@ -98,4 +132,39 @@ pub trait Store {
 
     /// The ranked hits.
     fn search(&self, scope: &Scope, query: &SearchQuery) -> Result<ResultSet>;
+
+    /// How many rows in this table were embedded with a model other than this
+    /// one. Non-zero means the vector space is about to be mixed, and cosine
+    /// distance across two spaces is meaningless -- the writer refuses.
+    fn rows_with_other_embed_model(&self, table: Table, embed_model: &str) -> Result<u64>;
+
+    /// Which of these ids are CURRENT semantic rows (not superseded, not
+    /// retired). Asked before any write, so an N-into-1 merge naming one bad id
+    /// revises nothing at all rather than half of them.
+    fn current_semantic_ids(&self, ids: &[i64]) -> Result<Vec<i64>>;
+
+    /// Cosine distance to the nearest current semantic memory visible to these
+    /// coworkers (empty = the whole table), or `None` if there is nothing to
+    /// compare against. The near-duplicate guard.
+    fn nearest_semantic(&self, coworkers: &[i64], vector: &[f32]) -> Result<Option<f64>>;
+
+    /// Insert the row, mark everything it supersedes, and tag its coworkers --
+    /// all in ONE transaction. Returns the MEMORY's id.
+    fn insert_memory(&self, m: &NewMemory) -> Result<i64>;
+}
+
+/// Open the configured database, or refuse with the candidate report.
+///
+/// Never creates one. A missing file almost always means a wrong path, and an
+/// empty new database strands the real one -- which is why the refusal carries
+/// the report rather than just the path.
+pub fn open(cfg: &Config) -> Result<turso::TursoStore> {
+    if !cfg.db_exists() {
+        let mut msg = String::from("memory DB missing — refusing to silently create an empty one.");
+        for line in candidates::missing_report(cfg) {
+            msg.push_str(&format!("\n  {line}"));
+        }
+        return Err(Error::refused(msg));
+    }
+    turso::TursoStore::open(cfg)
 }
