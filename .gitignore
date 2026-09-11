@@ -6,3 +6,4 @@ coworkers/*.md
 **/.DS_Store
 stories/
 /target/
+/dist/

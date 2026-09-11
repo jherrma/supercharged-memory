@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# A `windres` standing in for GNU binutils', implemented with `zig rc`.
+#
+# WHY THIS EXISTS: turso_sdk_kit 0.7.2's build script compiles a Windows version
+# resource whenever CARGO_CFG_WINDOWS is set, and for a non-MSVC target it shells
+# out to a bare, unprefixed `windres`. Fedora's mingw packages only ship the
+# prefixed `x86_64-w64-mingw32-windres`, so BOTH Windows targets fail with
+#
+#   panicked at turso_sdk_kit-0.7.2/build.rs:73:6:
+#   compile Windows version resource: Os { code: 2, kind: NotFound }
+#
+# before a single line of our code is compiled. There is no feature flag to turn
+# it off.
+#
+# WHAT IT DOES AND WHERE THE RISK IS: `zig rc` is drop-in compatible with the
+# MICROSOFT resource compiler and emits a .res, whereas `windres -O coff` emits a
+# COFF object. Those are different formats, and the difference is NOT academic
+# here: turso_sdk_kit declares crate-type = ["lib", "cdylib", "staticlib"], so
+# cargo does build the cdylib and rustc therefore DOES apply the build script's
+#
+#   println!("cargo::rustc-link-arg-cdylib={}", res_path.display());
+#
+# VERIFIED 2026-09-11: LLD accepts a .res on the link line, and
+# x86_64-pc-windows-gnu links and produces a 9.5MB .exe with it. So this works
+# because of the linker, not because the file goes unused. If a Windows link ever
+# starts failing on this argument, this shim is the first place to look, and the
+# real fix is a genuine windres (Fedora: mingw64-binutils, symlinked unprefixed)
+# or an upstream change that honours a WINDRES/RC environment variable. Worth
+# reporting upstream either way: a bare `windres` is not on the PATH of any
+# distribution that ships only prefixed mingw binutils.
+
+set -euo pipefail
+
+input=""
+output=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output) output="$2"; shift 2 ;;
+    -O|--output-format) shift 2 ;;          # "coff" -- see the note above
+    -i|--input) input="$2"; shift 2 ;;
+    -I|--include-dir|-F|--target|-D|--define|-U|--undefine) shift 2 ;;
+    -*) shift ;;
+    *) if [ -z "$input" ]; then input="$1"; else output="$1"; fi; shift ;;
+  esac
+done
+
+[ -n "$input" ]  || { echo "windres(shim): no input file given" >&2; exit 1; }
+[ -n "$output" ] || { echo "windres(shim): no output file given" >&2; exit 1; }
+
+exec zig rc /nologo "/fo$output" -- "$input"
