@@ -216,7 +216,7 @@ fn literal(v: &Value) -> String {
     }
 }
 
-fn ident(name: &str) -> String {
+pub(super) fn ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
@@ -232,8 +232,6 @@ fn check_count(table: &str, written: u64, counted: u64) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use turso::Builder;
-
     use super::super::tests::{put, scratch};
     use super::super::vector_literal;
     use super::*;
@@ -248,22 +246,24 @@ pub(crate) mod tests {
         pollster::block_on(store.conn.execute_batch(sql)).unwrap();
     }
 
-    /// Restore a dump into a fresh file beside the configured database, the way
-    /// a driver can: the whole text in one batch, parsed by the engine rather
-    /// than split on lines. Returns a config pointing at the restored file.
+    /// Restore a dump into a fresh file beside the configured database through
+    /// the `restore` command's own path, which must call it complete. Returns
+    /// a config pointing at the restored file.
     pub(crate) fn restore(cfg: &Config, sql: &str, name: &str) -> Config {
         let mut restored = cfg.clone();
         restored.db_path = cfg.db_path.with_file_name(format!("{name}.db"));
-        let p = restored.db_path.to_string_lossy().to_string();
-        assert!(!restored.db_path.exists(), "restore needs a fresh file");
-        pollster::block_on(async {
-            let db = Builder::new_local(&p)
-                .experimental_multiprocess_wal(true)
-                .build()
-                .await
-                .unwrap();
-            db.connect().unwrap().execute_batch(sql).await.unwrap();
-        });
+        let dump = cfg.db_path.with_file_name(format!("{name}.sql"));
+        std::fs::write(&dump, sql).unwrap();
+        let report = crate::restore::restore(
+            cfg,
+            &crate::restore::Args {
+                dump: Some(dump),
+                out: restored.db_path.clone(),
+                force: false,
+            },
+        )
+        .unwrap();
+        assert!(report.complete(), "{report:#?}");
         restored
     }
 

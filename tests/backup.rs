@@ -84,14 +84,19 @@ impl Machine {
         })
     }
 
-    fn backup(&self) -> Command {
+    fn command(&self) -> Command {
         let mut cmd = Command::new(&self.exe);
         cmd.env_clear()
             .env("HOME", self.root.join("home"))
             .env("OLLAMA_URL", "http://127.0.0.1:9")
             .env("SUPERCHARGED_MEMORY_TURSO_PATH", self.db())
-            .env("BACKUP_DIR", self.backups())
-            .arg("backup");
+            .env("BACKUP_DIR", self.backups());
+        cmd
+    }
+
+    fn backup(&self) -> Command {
+        let mut cmd = self.command();
+        cmd.arg("backup");
         cmd
     }
 }
@@ -118,7 +123,7 @@ fn daily_dumps(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// `dump=$(supercharged-memory backup)`: the capture is the path, it exists,
-/// and it restores.
+/// and `restore --dump "$dump"` restores it.
 #[test]
 fn the_captured_stdout_is_the_dump_path_and_it_restores() {
     let m = Machine::new("capture");
@@ -138,8 +143,18 @@ fn the_captured_stdout_is_the_dump_path_and_it_restores() {
     flate2::read::GzDecoder::new(fs::File::open(&path).unwrap())
         .read_to_string(&mut sql)
         .unwrap();
+    assert!(sql.contains("ümlauts"), "the dump is gzipped SQL text");
     let restored = m.root.join("restored.db");
-    m.exec(&restored, &sql);
+    let out = m
+        .command()
+        .args(["restore", "--dump"])
+        .arg(&path)
+        .arg("--out")
+        .arg(&restored)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(stdout(&out).contains("RESTORE OK"), "{}", stdout(&out));
     assert_eq!(
         m.query(&restored, "SELECT memory_text FROM semantic_memory"),
         vec![turso::Value::Text(TEXT.into())]

@@ -16,6 +16,7 @@ mod json;
 mod recall;
 mod remember;
 mod render;
+mod restore;
 mod status;
 mod store;
 mod version;

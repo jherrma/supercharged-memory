@@ -13,7 +13,7 @@ use crate::config::{self, Config, ConfigError, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
-use crate::{backup, embed, find_existing, init, recall, status, version};
+use crate::{backup, embed, find_existing, init, recall, restore, status, version};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -270,8 +270,26 @@ pub enum Command {
 
     /// Restore a dump into a fresh database file, verifying row counts.
     ///
-    /// Never over a live database. A restore that is not counted is not a restore.
-    Restore,
+    /// Reads tursodb's `.dump` and this binary's own dumps, .sql or .sql.gz.
+    /// Every table the dump creates or writes is counted against the dump
+    /// before the file takes its name; any mismatch, rejected statement or
+    /// cut-off dump exits non-zero and leaves nothing at --out. Never over the
+    /// configured database, not even with --force. A restore that is not
+    /// counted is not a restore.
+    Restore {
+        /// The dump to restore. Default: the newest dump in BACKUP_DIR.
+        #[arg(long, value_name = "FILE")]
+        dump: Option<PathBuf>,
+
+        /// The database file to create. It must not exist yet.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+
+        /// Replace an existing file at --out, once the restore is verified.
+        /// This discards everything that file holds.
+        #[arg(long)]
+        force: bool,
+    },
 
     /// Write a verified, gzipped SQL dump to BACKUP_DIR; keep 3 daily, 4 weekly.
     ///
@@ -349,7 +367,7 @@ impl Command {
             Command::Sleep => "sleep",
             Command::Backfill => "backfill",
             Command::Seed => "seed",
-            Command::Restore => "restore",
+            Command::Restore { .. } => "restore",
             Command::Backup => "backup",
             Command::FindExistingMemory { .. } => "find-existing-memory",
             Command::Init { .. } => "init",
@@ -438,6 +456,14 @@ impl Command {
                 },
             ),
             Command::Backup => backup::run(cfg),
+            Command::Restore { dump, out, force } => restore::run(
+                cfg,
+                &restore::Args {
+                    dump: dump.clone(),
+                    out: out.clone(),
+                    force: *force,
+                },
+            ),
             Command::FindExistingMemory { quiet } => find_existing::run(cfg, *quiet),
             Command::Init {
                 db_path,
@@ -556,6 +582,7 @@ mod tests {
             "recall" => args.push("anything"),
             "remember" => args.extend(["--table", "semantic", "--text", "a memory"]),
             "embed" => args.push("--missing"),
+            "restore" => args.extend(["--out", "/nonexistent/restored.db"]),
             _ => {}
         }
         args
@@ -660,7 +687,11 @@ mod tests {
             Command::Sleep,
             Command::Backfill,
             Command::Seed,
-            Command::Restore,
+            Command::Restore {
+                dump: None,
+                out: PathBuf::from("/nonexistent/restored.db"),
+                force: false,
+            },
             Command::Backup,
             Command::FindExistingMemory { quiet: false },
             Command::Init {
@@ -680,6 +711,7 @@ mod tests {
                     | Command::Remember { .. }
                     | Command::Embed { .. }
                     | Command::Backup
+                    | Command::Restore { .. }
                     | Command::FindExistingMemory { .. }
                     | Command::Init { .. }
                     | Command::Config
@@ -759,6 +791,18 @@ mod tests {
             code(&["sm", "backup", "--out", "/tmp/x"]),
             EXIT_USAGE,
             "backup takes no arguments"
+        );
+        // Rejected by clap before anything runs. Never add a restore here that
+        // gets past clap: these run against the real environment.
+        assert_eq!(
+            code(&["sm", "restore"]),
+            EXIT_USAGE,
+            "restore names no target without --out"
+        );
+        assert_eq!(
+            code(&["sm", "restore", "--out", "/nonexistent/x.db", "--into", "y"]),
+            EXIT_USAGE,
+            "restore rejects unknown flags"
         );
         // Validated before anything is probed or read, so this touches nothing.
         assert_eq!(

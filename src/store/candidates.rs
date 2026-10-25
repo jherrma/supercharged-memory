@@ -78,7 +78,7 @@ pub fn find(cfg: &Config) -> Candidates {
 /// Dumps are matched on the project name, which couples the filename to the
 /// project: a past rename made every existing dump invisible here, because the
 /// glob stopped matching. Keep the two in step.
-fn find_backups(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn find_backups(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };

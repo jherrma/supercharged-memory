@@ -2001,6 +2001,7 @@ dependencies = [
  "pollster",
  "serde_json",
  "turso",
+ "turso_parser",
  "ureq",
 ]
 
