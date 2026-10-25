@@ -1408,10 +1408,33 @@ mod tests {
                     EXIT_OK
                 }
             }
-            Ok(cli) => match execute(&cli.command, Env::system()) {
-                Ok(()) => EXIT_OK,
-                Err(err) => err.exit_code(),
-            },
+            Ok(cli) => {
+                let root = sandbox_root();
+                let code = match execute(&cli.command, Ok(sandbox_env(&root))) {
+                    Ok(()) => EXIT_OK,
+                    Err(err) => err.exit_code(),
+                };
+                let _ = std::fs::remove_dir_all(&root);
+                code
+            }
+        }
+    }
+
+    /// A directory of its own for one command: a home with nothing in it, so a
+    /// command that writes lands there and never in the real environment.
+    fn sandbox_root() -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("sm-cli-{}-{n}", std::process::id()))
+    }
+
+    fn sandbox_env(root: &std::path::Path) -> Env {
+        Env {
+            vars: std::collections::HashMap::new(),
+            home: root.join("home"),
+            windows: cfg!(windows),
+            dotenv: crate::config::dotenv::DotEnv::absent(root.join("bin").join("sm")),
         }
     }
 
