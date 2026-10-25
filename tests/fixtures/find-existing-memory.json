@@ -1,0 +1,208 @@
+{
+ "config_dir": "{ROOT}",
+ "nothing_to_do": false,
+ "n_memory_files": 12,
+ "n_index_files": 2,
+ "n_claude_files": 1,
+ "n_empty_files": 1,
+ "n_global": 10,
+ "n_project": 2,
+ "projects": [
+  "-home-u-proj"
+ ],
+ "total_chars": 4199,
+ "over_max_text": [
+  {
+   "path": "{ROOT}/memory/budget.md",
+   "chars": 1900,
+   "reason": "1900 chars, over the 1800-char effective budget (2000 cap minus 200 chars reserved for the 'Keywords:' line remember appends into the same field). It fits the cap on its own and is refused once keywords are added, so treat it like an over-cap file: split or condense"
+  },
+  {
+   "path": "{ROOT}/memory/cap.md",
+   "chars": 2100,
+   "reason": "2100 chars, over the 2000-char hard cap (schema CHECK): split it or condense it, never truncate"
+  }
+ ],
+ "empty": [
+  "{ROOT}/memory/empty.md"
+ ],
+ "unreadable": [
+  {
+   "path": "{ROOT}/memory/a/back",
+   "reason": "symlink loop or repeated directory -- walked once, not again"
+  },
+  {
+   "path": "{ROOT}/memory/noaccess",
+   "reason": "directory could not be listed: Permission denied"
+  },
+  {
+   "path": "{ROOT}/projects/-home-u-third/memory/global",
+   "reason": "symlink loop or repeated directory -- walked once, not again"
+  },
+  {
+   "path": "{ROOT}/memory/broken.md",
+   "reason": "not a regular file (broken symlink, or a directory named *.md)"
+  },
+  {
+   "path": "{ROOT}/memory/locked.md",
+   "reason": "Permission denied"
+  },
+  {
+   "path": "{ROOT}/memory/selfloop.md",
+   "reason": "not a regular file (broken symlink, or a directory named *.md)"
+  }
+ ],
+ "excluded_dirs": [
+  {
+   "path": "{ROOT}/memory/.git",
+   "n_md": 1,
+   "reason": "protected subdirectory of a memory root, not memory"
+  },
+  {
+   "path": "{ROOT}/memory/agents",
+   "n_md": 2,
+   "reason": "protected subdirectory of a memory root, not memory"
+  },
+  {
+   "path": "{ROOT}/memory/loop",
+   "n_md": null,
+   "reason": "symlink to {ROOT}, an ancestor of the memory root -- not walked"
+  }
+ ],
+ "sources": [
+  "CLAUDE.md (outside the managed block)",
+  "10 global memory files under {ROOT}/memory",
+  "2 project memory files under {ROOT}/projects"
+ ],
+ "files": [
+  {
+   "path": "{ROOT}/CLAUDE.md",
+   "kind": "claude",
+   "chars": 51,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/MEMORY.md",
+   "kind": "index",
+   "chars": 17,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/budget.md",
+   "kind": "memory",
+   "chars": 1900,
+   "over_max_text": true,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/cap.md",
+   "kind": "memory",
+   "chars": 2100,
+   "over_max_text": true,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/crlf.md",
+   "kind": "memory",
+   "chars": 32,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/empty.md",
+   "kind": "empty",
+   "chars": 0,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/fact.md",
+   "kind": "memory",
+   "chars": 30,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/german.md",
+   "kind": "memory",
+   "chars": 31,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/linkdir/real.md",
+   "kind": "memory",
+   "chars": 12,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/notes.MD",
+   "kind": "memory",
+   "chars": 18,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/other.Md",
+   "kind": "memory",
+   "chars": 18,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/team/nested/deep.md",
+   "kind": "memory",
+   "chars": 4,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/memory/topic/agents/kept.md",
+   "kind": "memory",
+   "chars": 23,
+   "over_max_text": false,
+   "scope": "global",
+   "project_dir": null
+  },
+  {
+   "path": "{ROOT}/projects/-home-u-proj/memory/MEMORY.md",
+   "kind": "index",
+   "chars": 19,
+   "over_max_text": false,
+   "scope": "project",
+   "project_dir": "-home-u-proj"
+  },
+  {
+   "path": "{ROOT}/projects/-home-u-proj/memory/pfact.md",
+   "kind": "memory",
+   "chars": 12,
+   "over_max_text": false,
+   "scope": "project",
+   "project_dir": "-home-u-proj"
+  },
+  {
+   "path": "{ROOT}/projects/-home-u-proj/memory/team/pdeep.md",
+   "kind": "memory",
+   "chars": 19,
+   "over_max_text": false,
+   "scope": "project",
+   "project_dir": "-home-u-proj"
+  }
+ ],
+ "note": "counts and totals of memory to import cover `kind: memory` only. An index file is a pointer list and a `claude` entry is instructions -- read both for context, import neither as a fact. A memory file is flagged in `over_max_text` above 1800 chars, not 2000: remember appends --keywords into the same field the 2000-char CHECK counts, so 200 chars are reserved for them and each entry's `reason` says which limit it hit. Split or condense such a file, never truncate it. Nothing is skipped silently: report `unreadable` (unreadable file or directory, broken symlink, symlink loop), `excluded_dirs` (protected subdirectory of a memory root) and `empty` (nothing to import -- the writer refuses an empty --text) as gaps. `nothing_to_do` is true only when there is nothing to import AND nothing was skipped; do not derive that verdict from `n_memory_files` alone."
+}

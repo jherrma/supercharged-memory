@@ -8,6 +8,8 @@ mod cli;
 mod config;
 mod embed;
 mod error;
+mod find_existing;
+mod json;
 mod recall;
 mod remember;
 mod render;

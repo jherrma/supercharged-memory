@@ -111,6 +111,9 @@ pub struct Config {
     /// the configured path turns up empty — to tell "you pointed me somewhere
     /// wrong" apart from "your memory is genuinely gone".
     pub search_dirs: Vec<PathBuf>,
+    /// Claude Code's config dir: `CLAUDE_CONFIG_DIR` from the real environment,
+    /// else `~/.claude`. Where its CLAUDE.md and file-based memory live.
+    pub claude_dir: PathBuf,
     /// The binary and its `.env`, for the reports that explain a path.
     pub exe: PathBuf,
     pub dotenv_path: PathBuf,
@@ -409,6 +412,18 @@ impl Config {
             db_path.parent().unwrap_or(Path::new(".")).join("eval")
         })?;
 
+        // Claude Code's own variable, not a `.env` key: the binary must look where
+        // Claude Code itself looks, and only the real environment tells it that.
+        // Re-collected from its components so it prints the way the reference's
+        // `pathlib.Path` printed it -- no trailing or doubled separator.
+        let claude_dir = env
+            .get("CLAUDE_CONFIG_DIR")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env.home.join(".claude"))
+            .components()
+            .collect();
+
         let mut settings = r.settings;
         settings.sort_by_key(|s| KEYS.iter().position(|k| *k == s.key));
 
@@ -440,6 +455,7 @@ impl Config {
             turso_bin,
             eval_dir,
             vfs,
+            claude_dir,
             exe: env.dotenv.exe.clone(),
             dotenv_path: env.dotenv.path.clone(),
             dotenv_present: env.dotenv.present(),
@@ -833,6 +849,36 @@ pub(crate) mod tests {
         assert_eq!(c.eval_dir, PathBuf::from("/dot/eval"));
         // A sibling of the configured database is still searched first.
         assert_eq!(c.search_dirs[0], PathBuf::from("/my data"));
+    }
+
+    #[test]
+    fn the_claude_config_dir_defaults_under_home_and_follows_its_env_var() {
+        let c = Config::from_env(&env(&[])).unwrap();
+        assert_eq!(c.claude_dir, PathBuf::from("/home/tester/.claude"));
+        let c = Config::from_env(&env(&[("CLAUDE_CONFIG_DIR", "/cfg/claude")])).unwrap();
+        assert_eq!(c.claude_dir, PathBuf::from("/cfg/claude"));
+        // Empty is unset, as everywhere else.
+        let c = Config::from_env(&env(&[("CLAUDE_CONFIG_DIR", "")])).unwrap();
+        assert_eq!(c.claude_dir, PathBuf::from("/home/tester/.claude"));
+        // Spelled the way the reference spells a path: no trailing or doubled slash.
+        let c = Config::from_env(&env(&[("CLAUDE_CONFIG_DIR", "/cfg//claude/")])).unwrap();
+        assert_eq!(c.claude_dir.to_str(), Some("/cfg/claude"));
+    }
+
+    /// Claude Code reads its config dir from its own environment, so the binary
+    /// must look in the same place: a `.env` value would point the probe at a
+    /// directory Claude Code never loads.
+    #[test]
+    fn the_claude_config_dir_is_not_read_from_the_dotenv() {
+        let c =
+            Config::from_env(&env_with(&[], dotenv("CLAUDE_CONFIG_DIR=/dot/claude\n"))).unwrap();
+        assert_eq!(c.claude_dir, PathBuf::from("/home/tester/.claude"));
+        assert_eq!(c.warnings.len(), 1, "{:?}", c.warnings);
+        assert!(
+            c.warnings[0].contains("CLAUDE_CONFIG_DIR"),
+            "{:?}",
+            c.warnings
+        );
     }
 
     #[test]

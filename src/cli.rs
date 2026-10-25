@@ -12,7 +12,7 @@ use crate::config::{self, Config, ConfigError, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
-use crate::{embed, recall, status, version};
+use crate::{embed, find_existing, recall, status, version};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -280,9 +280,16 @@ pub enum Command {
 
     /// Probe for file-based Claude memory to migrate (read-only, no DB, no Ollama).
     ///
-    /// SETUP.md Step 7 gates on this, so it must need nothing. Every skipped
-    /// path lands in a reported field.
-    FindExistingMemory,
+    /// Scans CLAUDE_CONFIG_DIR (default ~/.claude): CLAUDE.md outside the managed
+    /// block, memory/ and projects/*/memory/, recursively, `.md` files of any case.
+    /// Prints JSON. Every skipped path lands in a reported field, and
+    /// `nothing_to_do` is the one field to gate a migration offer on.
+    FindExistingMemory {
+        /// Print only `found` or `nothing` -- `nothing` exactly when the JSON
+        /// would say `nothing_to_do: true`. Exits 0 either way.
+        #[arg(long)]
+        quiet: bool,
+    },
 
     /// Render CLAUDE.md.template into ~/.claude/CLAUDE.md between the managed markers.
     ///
@@ -320,7 +327,7 @@ impl Command {
             Command::Seed => "seed",
             Command::Restore => "restore",
             Command::Backup => "backup",
-            Command::FindExistingMemory => "find-existing-memory",
+            Command::FindExistingMemory { .. } => "find-existing-memory",
             Command::Install => "install",
             Command::Eval => "eval",
             Command::Config => "config",
@@ -406,6 +413,7 @@ impl Command {
                     batch: *batch,
                 },
             ),
+            Command::FindExistingMemory { quiet } => find_existing::run(cfg, *quiet),
             _ => Err(Error::NotImplemented {
                 command: self.name(),
             }),
@@ -612,7 +620,7 @@ mod tests {
             Command::Seed,
             Command::Restore,
             Command::Backup,
-            Command::FindExistingMemory,
+            Command::FindExistingMemory { quiet: false },
             Command::Install,
             Command::Eval,
             Command::Config,
@@ -624,6 +632,7 @@ mod tests {
                     | Command::Recall { .. }
                     | Command::Remember { .. }
                     | Command::Embed { .. }
+                    | Command::FindExistingMemory { .. }
                     | Command::Config
             ) {
                 assert!(matches!(cmd.run(&cfg), Err(Error::NotImplemented { .. })));
@@ -685,6 +694,11 @@ mod tests {
             args.extend(bad);
             assert_eq!(code(&args), EXIT_USAGE, "{bad:?} asks for no work");
         }
+        assert_eq!(
+            code(&["sm", "find-existing-memory", "--quiet", "--json"]),
+            EXIT_USAGE,
+            "the probe rejects unknown flags too"
+        );
         assert_eq!(code(&["sm", "frobnicate"]), EXIT_USAGE, "unknown command");
         assert_eq!(code(&["sm"]), EXIT_USAGE, "no arguments prints usage");
         assert_eq!(code(&["sm", "--help"]), EXIT_OK, "--help is not a failure");
