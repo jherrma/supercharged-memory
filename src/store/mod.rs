@@ -35,14 +35,27 @@ impl Table {
     }
 }
 
+/// Which rows a scope covers by whether they carry an embedding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Embedded {
+    /// Every row: keyword-only search, and the counts behind `READY n`.
+    Any,
+    /// Rows with a vector: the only ones a vector search can rank.
+    With,
+    /// Rows stored without one, which recall lists in a section of their own.
+    Without,
+}
+
 /// Which rows a search may see: one table, optionally narrowed to a work item,
 /// optionally filtered to what a coworker persona can see (rows tagged to nobody
-/// are global, rows tagged to this coworker are theirs, everything else is not).
+/// are global, rows tagged to this coworker are theirs, everything else is not),
+/// and narrowed by whether the row has an embedding.
 #[derive(Debug, Clone)]
 pub struct Scope {
     pub table: Table,
     pub project: Option<String>,
     pub coworker: Option<i64>,
+    pub embedded: Embedded,
 }
 
 /// One ranked search, already reduced to numbers by `crate::recall::rank`.
@@ -66,7 +79,8 @@ pub enum Cell {
     Text(String),
 }
 
-/// A memory about to be written: already validated, already embedded.
+/// A memory about to be written: already validated, and embedded when an
+/// embedding was available.
 ///
 /// Deliberately a value, not a builder over SQL -- a MongoDB backend gets the
 /// same struct. `supersedes` and `coworkers` ride along because they must land
@@ -86,13 +100,16 @@ pub struct NewMemory {
     pub importance: Option<String>,
     pub source: Option<String>,
     pub model: Option<String>,
-    pub embed_model: String,
+    /// `None` together with `embedding`: a row stored without a vector records
+    /// no model, so it does not count towards the one-model-per-database check.
+    pub embed_model: Option<String>,
     /// The text as it will be stored, keywords already appended into it.
     pub memory_text: String,
     pub file_reference: Option<String>,
     /// `None` lets the schema default to CURRENT_TIMESTAMP.
     pub created_at: Option<String>,
-    pub embedding: Vec<f32>,
+    /// `None` when no embedding was available; stored as NULL.
+    pub embedding: Option<Vec<f32>>,
     /// Current semantic ids this row replaces.
     pub supersedes: Vec<i64>,
     /// Coworker ids this memory is scoped to. Empty = global.
@@ -130,7 +147,8 @@ pub trait Store {
     /// the IDF means something for this query.
     fn document_frequencies(&self, scope: &Scope, patterns: &[String]) -> Result<(Vec<u64>, u64)>;
 
-    /// The ranked hits.
+    /// The ranked hits. With no query vector, a keyword-only ranking of the rows
+    /// that hold at least one query token.
     fn search(&self, scope: &Scope, query: &SearchQuery) -> Result<ResultSet>;
 
     /// How many rows in this table were embedded with a model other than this
@@ -148,9 +166,35 @@ pub trait Store {
     /// compare against. The near-duplicate guard.
     fn nearest_semantic(&self, coworkers: &[i64], vector: &[f32]) -> Result<Option<f64>>;
 
+    /// Id and text of every current semantic memory visible to these coworkers
+    /// (empty = the whole table): the near-duplicate guard for rows that have no
+    /// vector to compare.
+    fn current_semantic_texts(&self, coworkers: &[i64]) -> Result<Vec<(i64, String)>>;
+
     /// Insert the row, mark everything it supersedes, and tag its coworkers --
     /// all in ONE transaction. Returns the MEMORY's id.
     fn insert_memory(&self, m: &NewMemory) -> Result<i64>;
+
+    /// Id and text of the active rows of this table that have no embedding
+    /// (current semantic rows, every episodic row), by ascending id, after
+    /// `after`, at most `limit`. The cursor, not the NULL alone, is what moves a
+    /// run past a row that failed to embed.
+    fn unembedded_rows(&self, table: Table, after: i64, limit: u32) -> Result<Vec<(i64, String)>>;
+
+    /// Store each vector with `embed_model`, in ONE transaction, on rows that
+    /// are still active and still have no embedding; returns the ids written. A
+    /// row another process embedded in the meantime is skipped, never
+    /// overwritten.
+    fn fill_embeddings(
+        &self,
+        table: Table,
+        embed_model: &str,
+        rows: &[(i64, Vec<f32>)],
+    ) -> Result<Vec<i64>>;
+
+    /// Current semantic rows other than `id` whose embedding lies within cosine
+    /// distance `below` of `vector`, nearest first: the near-duplicate report.
+    fn semantic_within(&self, id: i64, vector: &[f32], below: f64) -> Result<Vec<(i64, f64)>>;
 }
 
 /// Open the configured database, or refuse with the candidate report.

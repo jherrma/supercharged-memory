@@ -8,11 +8,11 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::config::{Config, Env};
+use crate::config::{self, Config, ConfigError, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
-use crate::{recall, status, version};
+use crate::{embed, recall, status, version};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -52,6 +52,24 @@ impl From<OneTable> for store::Table {
         match t {
             OneTable::Semantic => store::Table::Semantic,
             OneTable::Episodic => store::Table::Episodic,
+        }
+    }
+}
+
+/// `embed --table`: one table that stores an embedding, or all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EmbedTable {
+    Semantic,
+    Episodic,
+    All,
+}
+
+impl EmbedTable {
+    fn tables(self) -> Vec<store::Table> {
+        match self {
+            EmbedTable::Semantic => vec![store::Table::Semantic],
+            EmbedTable::Episodic => vec![store::Table::Episodic],
+            EmbedTable::All => vec![store::Table::Semantic, store::Table::Episodic],
         }
     }
 }
@@ -195,6 +213,36 @@ pub enum Command {
         coworker: Option<String>,
     },
 
+    /// Fill in the embeddings of rows stored without one.
+    ///
+    /// Active rows only, embedded from their stored text. Refuses without Ollama
+    /// and the model, or when the database holds another model. Each batch
+    /// commits on its own, so an interrupted run resumes where it stopped; a
+    /// run that leaves no active row unembedded switches EMBEDDINGS=off in the
+    /// .env back on.
+    Embed {
+        /// Embed the active rows that have no embedding. Required: it is the
+        /// only mode.
+        #[arg(long, required = true)]
+        missing: bool,
+
+        /// Which table to fill.
+        #[arg(long, value_enum, default_value_t = EmbedTable::All)]
+        table: EmbedTable,
+
+        /// Stop after this many rows, across tables.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        limit: Option<u32>,
+
+        /// Rows per transaction.
+        #[arg(
+            long,
+            default_value_t = embed::missing::DEFAULT_BATCH,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        batch: u32,
+    },
+
     /// Add, appraise, retire or reactivate a coworker persona (writes only).
     ///
     /// Loading and listing stay ad-hoc SQL via the turso MCP server. --retire
@@ -248,6 +296,13 @@ pub enum Command {
     /// Deep sleep D6 runs this, and it is how the ranking is proven
     /// unchanged. eval_cases are AUTHORED and cannot be regenerated.
     Eval,
+
+    /// Print every setting, its value and where it came from: env, .env or default.
+    ///
+    /// Read-only. Precedence is real environment > the .env beside the binary >
+    /// built-in default; a real variable that overrides a differing .env value
+    /// says so.
+    Config,
 }
 
 impl Command {
@@ -258,6 +313,7 @@ impl Command {
             Command::Status => "status",
             Command::Recall { .. } => "recall",
             Command::Remember { .. } => "remember",
+            Command::Embed { .. } => "embed",
             Command::Coworkers => "coworkers",
             Command::Sleep => "sleep",
             Command::Backfill => "backfill",
@@ -267,12 +323,14 @@ impl Command {
             Command::FindExistingMemory => "find-existing-memory",
             Command::Install => "install",
             Command::Eval => "eval",
+            Command::Config => "config",
         }
     }
 
-    fn run(&self) -> Result<()> {
+    fn run(&self, cfg: &Config) -> Result<()> {
         match self {
-            Command::Status => status::run(&config()?),
+            Command::Status => status::run(cfg),
+            Command::Config => config::run(cfg),
             Command::Recall {
                 query,
                 table,
@@ -284,7 +342,7 @@ impl Command {
                 candidates,
                 count,
             } => recall::run(
-                &config()?,
+                cfg,
                 &recall::Args {
                     query: query.clone(),
                     table: (*table).into(),
@@ -315,7 +373,7 @@ impl Command {
                 supersedes,
                 coworker,
             } => remember::run(
-                &config()?,
+                cfg,
                 &remember::Args {
                     table: Some((*table).into()),
                     text: text.clone(),
@@ -335,6 +393,19 @@ impl Command {
                     coworker: coworker.clone(),
                 },
             ),
+            Command::Embed {
+                missing: _,
+                table,
+                limit,
+                batch,
+            } => embed::missing::run(
+                cfg,
+                &embed::missing::Args {
+                    tables: table.tables(),
+                    limit: *limit,
+                    batch: *batch,
+                },
+            ),
             _ => Err(Error::NotImplemented {
                 command: self.name(),
             }),
@@ -342,9 +413,18 @@ impl Command {
     }
 }
 
-/// Resolve configuration from the real environment, once per invocation.
-fn config() -> Result<Config> {
-    Config::from_env(&Env::system()).map_err(|e| Error::failed(e.to_string()))
+/// Resolve configuration, then run the command with it.
+///
+/// Every command goes through here, stubs included, so a `.env` that cannot be
+/// trusted stops the run before anything happens -- running on the built-in
+/// defaults instead is how a skipped database-path line would silently open the
+/// wrong database.
+fn execute(command: &Command, env: std::result::Result<Env, ConfigError>) -> Result<()> {
+    let cfg = Config::from_env(&env?)?;
+    for warning in &cfg.warnings {
+        eprintln!("warning: {warning}");
+    }
+    command.run(&cfg)
 }
 
 /// Parse and dispatch one invocation, returning the process exit code.
@@ -367,7 +447,7 @@ where
         }
     };
 
-    match cli.command.run() {
+    match execute(&cli.command, Env::system()) {
         Ok(()) => ExitCode::from(EXIT_OK),
         Err(err) => {
             eprintln!("{err}");
@@ -400,6 +480,7 @@ mod tests {
             "status",
             "recall",
             "remember",
+            "embed",
             "coworkers",
             "sleep",
             "backfill",
@@ -409,6 +490,7 @@ mod tests {
             "find-existing-memory",
             "install",
             "eval",
+            "config",
         ] {
             assert!(
                 registered.contains(&want.to_string()),
@@ -417,8 +499,76 @@ mod tests {
         }
     }
 
+    /// Minimal valid arguments per subcommand, so each one gets past clap.
+    fn invocation(name: &str) -> Vec<&str> {
+        let mut args = vec!["sm", name];
+        match name {
+            "recall" => args.push("anything"),
+            "remember" => args.extend(["--table", "semantic", "--text", "a memory"]),
+            "embed" => args.push("--missing"),
+            _ => {}
+        }
+        args
+    }
+
+    /// A malformed `.env` must stop EVERY command, stubs included, before it does
+    /// anything -- running on defaults is the silent wrong-database failure.
+    #[test]
+    fn a_malformed_dotenv_makes_every_command_refuse() {
+        let dir = crate::config::dotenv::tests::tmpdir("cli-malformed");
+        let exe = dir.join("supercharged-memory");
+        std::fs::write(&exe, b"").unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "SUPERCHARGED_MEMORY_TURSO_PATH=/x.db\nexport A=1\n",
+        )
+        .unwrap();
+
+        let names: Vec<String> = Cli::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .filter(|n| n != "help")
+            .collect();
+        assert!(names.contains(&"config".to_string()));
+        for name in &names {
+            let cli =
+                Cli::try_parse_from(invocation(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let env = crate::config::DotEnv::beside(&exe).map(|dotenv| Env {
+                vars: Default::default(),
+                home: dir.clone(),
+                windows: false,
+                dotenv,
+            });
+            let err = execute(&cli.command, env).expect_err(name);
+            assert_eq!(err.exit_code(), EXIT_REFUSED, "{name}: {err}");
+            let msg = err.to_string();
+            assert!(msg.starts_with("refused: "), "{name}: {msg}");
+            assert!(msg.contains("line 2"), "{name}: {msg}");
+        }
+    }
+
+    #[test]
+    fn config_reads_only() {
+        let cfg = Config::from_env(&Env {
+            vars: Default::default(),
+            home: std::path::PathBuf::from("/home/tester"),
+            windows: false,
+            dotenv: crate::config::DotEnv::absent(crate::config::tests::EXE.into()),
+        })
+        .unwrap();
+        assert!(Command::Config.run(&cfg).is_ok());
+        assert_eq!(Command::Config.name(), "config");
+    }
+
     #[test]
     fn every_subcommand_reports_a_name() {
+        let cfg = Config::from_env(&Env {
+            vars: Default::default(),
+            home: std::path::PathBuf::from("/home/tester"),
+            windows: false,
+            dotenv: crate::config::DotEnv::absent(crate::config::tests::EXE.into()),
+        })
+        .unwrap();
         for cmd in [
             Command::Status,
             Command::Recall {
@@ -450,6 +600,12 @@ mod tests {
                 supersedes: None,
                 coworker: None,
             },
+            Command::Embed {
+                missing: true,
+                table: EmbedTable::All,
+                limit: None,
+                batch: 1,
+            },
             Command::Coworkers,
             Command::Sleep,
             Command::Backfill,
@@ -459,13 +615,18 @@ mod tests {
             Command::FindExistingMemory,
             Command::Install,
             Command::Eval,
+            Command::Config,
         ] {
             assert!(!cmd.name().is_empty());
             if !matches!(
                 cmd,
-                Command::Status | Command::Recall { .. } | Command::Remember { .. }
+                Command::Status
+                    | Command::Recall { .. }
+                    | Command::Remember { .. }
+                    | Command::Embed { .. }
+                    | Command::Config
             ) {
-                assert!(matches!(cmd.run(), Err(Error::NotImplemented { .. })));
+                assert!(matches!(cmd.run(&cfg), Err(Error::NotImplemented { .. })));
             }
         }
     }
@@ -480,7 +641,7 @@ mod tests {
                     EXIT_OK
                 }
             }
-            Ok(cli) => match cli.command.run() {
+            Ok(cli) => match execute(&cli.command, Env::system()) {
                 Ok(()) => EXIT_OK,
                 Err(err) => err.exit_code(),
             },
@@ -514,6 +675,16 @@ mod tests {
             EXIT_USAGE,
             "unknown flags are rejected"
         );
+        assert_eq!(
+            code(&["sm", "embed"]),
+            EXIT_USAGE,
+            "embed without --missing names no mode"
+        );
+        for bad in [["--batch", "0"], ["--limit", "0"]] {
+            let mut args = vec!["sm", "embed", "--missing"];
+            args.extend(bad);
+            assert_eq!(code(&args), EXIT_USAGE, "{bad:?} asks for no work");
+        }
         assert_eq!(code(&["sm", "frobnicate"]), EXIT_USAGE, "unknown command");
         assert_eq!(code(&["sm"]), EXIT_USAGE, "no arguments prints usage");
         assert_eq!(code(&["sm", "--help"]), EXIT_OK, "--help is not a failure");

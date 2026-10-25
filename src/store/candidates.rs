@@ -163,8 +163,33 @@ mod tests {
             .collect(),
             home: dir.to_path_buf(),
             windows: false,
+            dotenv: crate::config::DotEnv::absent(PathBuf::from(crate::config::tests::EXE)),
         };
         Config::from_env(&env).unwrap()
+    }
+
+    /// No `.env`, no env var, no database: the report must resolve the XDG
+    /// default and say that no `.env` sits beside the binary -- the one clue
+    /// that tells "binary moved away from its config" apart from lost data.
+    #[test]
+    fn the_missing_report_names_the_absent_dotenv_and_the_xdg_default() {
+        let dir = tmpdir("no-dotenv");
+        let env = crate::config::Env {
+            vars: Default::default(),
+            home: dir.clone(),
+            windows: false,
+            dotenv: crate::config::DotEnv::absent(PathBuf::from(crate::config::tests::EXE)),
+        };
+        let cfg = Config::from_env(&env).unwrap();
+        assert!(!cfg.db_exists());
+        let lines = missing_report(&cfg).join("\n");
+        let xdg = dir.join(".local/share/turso/supercharged-memory.db");
+        assert!(lines.contains(&xdg.display().to_string()), "{lines}");
+        assert!(
+            lines.contains(&format!("no .env next to {}", crate::config::tests::EXE)),
+            "{lines}"
+        );
+        assert!(lines.contains("DO NOT create or overwrite"), "{lines}");
     }
 
     #[test]

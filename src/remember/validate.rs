@@ -33,6 +33,9 @@ pub const EVENT_TYPES: [&str; 7] = [
 /// `episodic_memory.importance`.
 pub const IMPORTANCES: [&str; 3] = ["routine", "notable", "major"];
 
+/// What `--keywords` is appended to the text with.
+const KEYWORDS_LINE: &str = "\n\nKeywords: ";
+
 /// The cap the schema enforces on every metadata column.
 pub const MAX_META: usize = 128;
 
@@ -102,7 +105,7 @@ pub fn assemble_text(text: &str, keywords: Option<&str>) -> Result<String> {
     // texts the database would have accepted.
     let body_len = body.chars().count();
     let stored = match keywords.map(str::trim).filter(|k| !k.is_empty()) {
-        Some(k) => format!("{body}\n\nKeywords: {k}"),
+        Some(k) => format!("{body}{KEYWORDS_LINE}{k}"),
         None => body.to_string(),
     };
     let total = stored.chars().count();
@@ -221,6 +224,19 @@ fn days_in_month(year: u32, month: u32) -> u32 {
         2 => 28,
         _ => 0,
     }
+}
+
+/// The form two memories are compared in when there is no vector to compare:
+/// the text without its appended `Keywords:` line, lowercased, whitespace
+/// collapsed.
+pub fn dedup_key(memory_text: &str) -> String {
+    let body = memory_text
+        .rsplit_once(KEYWORDS_LINE)
+        .map_or(memory_text, |(body, _)| body);
+    body.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `--supersedes` as a list of ids, or a refusal.
@@ -412,6 +428,24 @@ mod tests {
         assert_eq!(blank_to_none(Some("  ")), None);
         assert_eq!(blank_to_none(None), None);
         assert_eq!(blank_to_none(Some(" x ")), Some("x".to_string()));
+    }
+
+    /// The comparison form for the text-only near-duplicate guard: the same
+    /// memory stored with other keywords, other case or other line breaks is the
+    /// same memory.
+    #[test]
+    fn the_dedup_key_drops_keywords_case_and_whitespace_differences() {
+        let stored = assemble_text("Turso  needs\nthe WAL flag.", Some("turso, wal")).unwrap();
+        assert_eq!(dedup_key(&stored), "turso needs the wal flag.");
+        assert_eq!(
+            dedup_key(&assemble_text("turso needs the wal flag.", Some("other")).unwrap()),
+            dedup_key(&stored)
+        );
+        assert_eq!(dedup_key("  Größe\t ÄNDERN \n"), "größe ändern");
+        assert_ne!(
+            dedup_key("turso needs the wal flag."),
+            dedup_key("turso needs the vfs flag.")
+        );
     }
 
     #[test]
