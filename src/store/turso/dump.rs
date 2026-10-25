@@ -338,11 +338,11 @@ pub(crate) mod tests {
         "'",
     ];
 
-    /// Every shape a dump has to carry: the memory tables with and without
-    /// embeddings, a table the dump has never heard of (shaped like the coming
-    /// `instructions` table) with an index of its own, an AUTOINCREMENT table
-    /// whose sequence is ahead of its rows, values whose type a careless literal
-    /// would change, a view and a trigger.
+    /// Every shape a dump has to carry: the memory tables and the instructions
+    /// with and without embeddings, multi-line and quoted text among them, a
+    /// table the dump has never heard of with an index of its own, an
+    /// AUTOINCREMENT table whose sequence is ahead of its rows, values whose
+    /// type a careless literal would change, a view and a trigger.
     pub(crate) fn fixture(name: &str) -> Config {
         let cfg = scratch(name);
         for text in TRICKY {
@@ -365,14 +365,14 @@ pub(crate) mod tests {
                      VALUES ('x01', 'exact-id', 'semantic', 'what''s up', '1,2', 'a,b');
                  INSERT INTO eval_runs (alpha, embed_model, n_cases, r1, r5, mrr) \
                      VALUES (0.15, 'bge-m3', 32, 0.1, 1.0, 0.3333333333333333);
-                 CREATE TABLE instructions (id INTEGER PRIMARY KEY, \
+                 INSERT INTO instructions (topic, memory_text, embed_model, embedding) \
+                     VALUES ('release-notes', 'always\nrun the tests; then ''lint''', 'bge-m3', {v});
+                 INSERT INTO instructions (topic, memory_text) VALUES ('deploy', 'no vector here');
+                 CREATE TABLE later_table (id INTEGER PRIMARY KEY, \
                      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
-                     memory_text TEXT NOT NULL, embed_model TEXT, \
-                     embedding F32_BLOB(1024), retired_at TEXT);
-                 CREATE INDEX idx_instructions_live ON instructions (retired_at);
-                 INSERT INTO instructions (memory_text, embed_model, embedding) \
-                     VALUES ('always\nrun the tests; then ''lint''', 'bge-m3', {v});
-                 INSERT INTO instructions (memory_text) VALUES ('no vector here');
+                     memory_text TEXT NOT NULL, retired_at TEXT);
+                 CREATE INDEX idx_later_table_live ON later_table (retired_at);
+                 INSERT INTO later_table (memory_text) VALUES ('a table this binary never heard of');
                  CREATE TABLE odd_values (id INTEGER PRIMARY KEY AUTOINCREMENT, anything, r REAL, b BLOB);
                  INSERT INTO odd_values (anything, r, b) VALUES (9223372036854775807, 1.0, X'');
                  INSERT INTO odd_values (anything, r, b) VALUES (-9223372036854775807 - 1, 1e-50, X'00ff10');
@@ -455,8 +455,11 @@ pub(crate) mod tests {
         let text = dump_text(&cfg);
         for want in [
             "CREATE TABLE instructions",
-            "CREATE INDEX idx_instructions_live",
+            "CREATE INDEX IF NOT EXISTS idx_instr_retired",
             "INSERT INTO \"instructions\" VALUES(",
+            "CREATE TABLE later_table",
+            "CREATE INDEX idx_later_table_live",
+            "INSERT INTO \"later_table\" VALUES(",
             "CREATE VIEW current_semantic",
             "CREATE TRIGGER odd_values_touch",
             "INSERT INTO \"odd_values\" VALUES(",
@@ -520,6 +523,7 @@ pub(crate) mod tests {
         assert_eq!(get("semantic_memory"), TRICKY.len() as u64 + 1);
         assert_eq!(get("episodic_memory"), 2);
         assert_eq!(get("instructions"), 2);
+        assert_eq!(get("later_table"), 1);
         assert_eq!(get("odd_values"), 5);
         assert_eq!(get("eval_cases"), 1);
         assert_eq!(get("sqlite_sequence"), 1);

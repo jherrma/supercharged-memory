@@ -47,7 +47,8 @@ pub fn staleness(store: &impl Store, table: Table) -> Result<Json> {
         .map(|r| r.created_at.as_str())
         .min()
         .unwrap_or("");
-    let unembedded = status::unembedded(store)?;
+    // The memory tables only: the instructions are outside sleep.
+    let unembedded = status::unembedded_in(store, &[Table::Semantic, Table::Episodic])?;
     Ok(Json::object([
         ("table", Json::from(table.as_str())),
         ("n_current", Json::from(rows.len())),
@@ -385,6 +386,25 @@ mod tests {
                  \\u2014 an old row about a stable fact is fine. Read this next to D7's stale \
                  count, not alone.\"\n}}"
             )
+        );
+    }
+
+    /// The unembedded count stays per memory table: an instruction without a
+    /// vector is `status`'s and `embed --missing`'s business, not sleep's.
+    #[test]
+    fn staleness_never_counts_the_instructions() {
+        let cfg = scratch("staleness-instructions");
+        put(&cfg, Table::Semantic, "blind fact", false);
+        put(&cfg, Table::Instructions, "blind directive", false);
+        let v = json(&run(
+            &cfg,
+            Mode::Staleness {
+                table: Table::Semantic,
+            },
+        ));
+        assert_eq!(
+            v["n_without_embedding"],
+            serde_json::json!({"semantic": 1, "episodic": 0})
         );
     }
 

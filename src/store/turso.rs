@@ -16,7 +16,8 @@ use std::time::Duration;
 use turso::{Builder, Connection, Value};
 
 use super::{
-    ActiveRow, Cell, Embedded, NewMemory, Purged, ResultSet, Scope, SearchQuery, Store, Table,
+    ActiveRow, Cell, Embedded, InstructionKey, InstructionState, NewMemory, Purged, ResultSet,
+    Scope, SearchQuery, Store, Table,
 };
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -151,16 +152,23 @@ impl TursoStore {
     }
 }
 
-/// The predicate selecting the rows a scope may see, plus its bound parameters.
+/// The active rows of a table: the ones search, embedding and the
+/// near-duplicate guards look at.
 ///
 /// Semantic memory is revisable, so "current truth" is the rows that have not
 /// been superseded and not been retired. Episodic memory is append-only: every
-/// row is current.
+/// row is current. An instruction is current until it is retired.
+fn active(table: Table) -> &'static str {
+    match table {
+        Table::Semantic => "superseded_by IS NULL AND retired_at IS NULL",
+        Table::Episodic => "1=1",
+        Table::Instructions => "retired_at IS NULL",
+    }
+}
+
+/// The predicate selecting the rows a scope may see, plus its bound parameters.
 fn base_predicate(scope: &Scope) -> (String, Vec<Value>) {
-    let mut sql = match scope.table {
-        Table::Semantic => "superseded_by IS NULL AND retired_at IS NULL".to_string(),
-        Table::Episodic => "1=1".to_string(),
-    };
+    let mut sql = active(scope.table).to_string();
     let mut params = Vec::new();
     if let Some(project) = &scope.project {
         sql.push_str(" AND project = ?");
@@ -185,21 +193,27 @@ fn base_predicate(scope: &Scope) -> (String, Vec<Value>) {
     (sql, params)
 }
 
-/// Current semantic rows visible to any of these coworkers (empty = every row),
-/// as SQL plus its parameters: what the near-duplicate guards compare against.
-/// A memory a coworker cannot reach is not a duplicate of one they can.
-fn current_semantic_visible_to(coworkers: &[i64]) -> (String, Vec<Value>) {
-    let mut sql = "superseded_by IS NULL AND retired_at IS NULL".to_string();
+/// Active rows of a table visible to any of these coworkers (empty = every
+/// row), as SQL plus its parameters: what the near-duplicate guards compare
+/// against. A memory a coworker cannot reach is not a duplicate of one they
+/// can.
+fn active_visible_to(table: Table, coworkers: &[i64]) -> (String, Vec<Value>) {
+    let mut sql = active(table).to_string();
     if coworkers.is_empty() {
         return (sql, Vec::new());
     }
-    let placeholders = vec!["?"; coworkers.len()].join(",");
     sql.push_str(&format!(
-        " AND (id NOT IN (SELECT memory_id FROM memory_coworkers WHERE memory_table='semantic') \
-         OR id IN (SELECT memory_id FROM memory_coworkers WHERE memory_table='semantic' \
-         AND coworker_id IN ({placeholders})))"
+        " AND (id NOT IN (SELECT memory_id FROM memory_coworkers WHERE memory_table=?) \
+         OR id IN (SELECT memory_id FROM memory_coworkers WHERE memory_table=? \
+         AND coworker_id IN ({})))",
+        placeholders(coworkers)
     ));
-    (sql, coworkers.iter().map(|c| Value::Integer(*c)).collect())
+    let mut params = vec![
+        Value::Text(table.as_str().to_string()),
+        Value::Text(table.as_str().to_string()),
+    ];
+    params.extend(int_params(coworkers));
+    (sql, params)
 }
 
 /// The IDF-weighted keyword share, as SQL plus its parameters.
@@ -291,8 +305,8 @@ impl Store for TursoStore {
         let (base, base_params) = base_predicate(scope);
         if patterns.is_empty() {
             let n = self.scalar_i64(&format!(
-                "SELECT COUNT(*) FROM {}_memory WHERE {base};",
-                scope.table.as_str()
+                "SELECT COUNT(*) FROM {} WHERE {base};",
+                scope.table.name()
             ))?;
             return Ok((Vec::new(), n.max(0) as u64));
         }
@@ -304,9 +318,9 @@ impl Store for TursoStore {
         params.extend(base_params);
         let rs = self.query(
             &format!(
-                "SELECT {}, COUNT(*) FROM {}_memory WHERE {base};",
+                "SELECT {}, COUNT(*) FROM {} WHERE {base};",
                 sums.join(", "),
-                scope.table.as_str()
+                scope.table.name()
             ),
             params,
         )?;
@@ -326,9 +340,15 @@ impl Store for TursoStore {
     fn search(&self, scope: &Scope, query: &SearchQuery) -> Result<ResultSet> {
         let (base, base_params) = base_predicate(scope);
         let (kw, kw_params) = kw_expression(query);
-        let meta = match scope.table {
-            Table::Semantic => "category",
-            Table::Episodic => "event_type || '/' || importance",
+        // What each hit shows after its scores. The memory tables keep the
+        // columns recall has always printed; an instruction shows its id, the
+        // handle `instruct --replaces` and `--retire` take.
+        let shown = match scope.table {
+            Table::Semantic => "created_at, category AS meta, project, topic, memory_text",
+            Table::Episodic => {
+                "created_at, event_type || '/' || importance AS meta, project, topic, memory_text"
+            }
+            Table::Instructions => "id, created_at, project, topic, memory_text",
         };
 
         let (sql, params) = match query.vector {
@@ -341,10 +361,10 @@ impl Store for TursoStore {
                     "SELECT round(vector_distance_cos(embedding,{vec_lit}),4) AS dist, \
                      round({kw},3) AS kw, \
                      round(vector_distance_cos(embedding,{vec_lit}) - ?*({kw}),4) AS score, \
-                     created_at, {meta} AS meta, project, topic, memory_text \
-                     FROM {}_memory WHERE {base} AND embedding IS NOT NULL \
+                     {shown} \
+                     FROM {} WHERE {base} AND embedding IS NOT NULL \
                      ORDER BY score ASC LIMIT ?;",
-                    scope.table.as_str()
+                    scope.table.name()
                 );
                 let mut params = kw_params.clone();
                 params.push(Value::Real(query.alpha));
@@ -355,10 +375,10 @@ impl Store for TursoStore {
             }
             None => {
                 let sql = format!(
-                    "SELECT round({kw},3) AS kw, created_at, {meta} AS meta, project, topic, memory_text \
-                     FROM {}_memory WHERE {base} AND ({kw}) > 0 \
+                    "SELECT round({kw},3) AS kw, {shown} \
+                     FROM {} WHERE {base} AND ({kw}) > 0 \
                      ORDER BY kw DESC, created_at DESC LIMIT ?;",
-                    scope.table.as_str()
+                    scope.table.name()
                 );
                 let mut params = kw_params.clone();
                 params.extend(base_params);
@@ -373,9 +393,9 @@ impl Store for TursoStore {
     fn rows_with_other_embed_model(&self, table: Table, embed_model: &str) -> Result<u64> {
         let rs = self.query(
             &format!(
-                "SELECT count(*) FROM {}_memory \
+                "SELECT count(*) FROM {} \
                  WHERE embed_model IS NOT NULL AND embed_model <> ?;",
-                table.as_str()
+                table.name()
             ),
             vec![Value::Text(embed_model.to_string())],
         )?;
@@ -407,30 +427,44 @@ impl Store for TursoStore {
             .collect())
     }
 
-    fn nearest_semantic(&self, coworkers: &[i64], vector: &[f32]) -> Result<Option<f64>> {
+    fn nearest(
+        &self,
+        table: Table,
+        coworkers: &[i64],
+        except: Option<i64>,
+        vector: &[f32],
+    ) -> Result<Option<(i64, f64)>> {
         let lit = vector_literal(vector);
-        let (visible, params) = current_semantic_visible_to(coworkers);
+        let (mut visible, mut params) = active_visible_to(table, coworkers);
+        if let Some(id) = except {
+            visible.push_str(" AND id <> ?");
+            params.push(Value::Integer(id));
+        }
         // `embedding IS NOT NULL` is not optional: vector_distance_cos raises
         // "Invalid vector type" on a NULL embedding, so one such row would make
         // every insert fail, not merely skew the comparison.
         let rs = self.query(
             &format!(
-                "SELECT round(vector_distance_cos(embedding,{lit}),4) FROM semantic_memory \
-                 WHERE {visible} AND embedding IS NOT NULL ORDER BY 1 LIMIT 1;"
+                "SELECT id, round(vector_distance_cos(embedding,{lit}),4) AS dist FROM {} \
+                 WHERE {visible} AND embedding IS NOT NULL ORDER BY dist, id LIMIT 1;",
+                table.name()
             ),
             params,
         )?;
-        Ok(match rs.rows.first().and_then(|r| r.first()) {
-            Some(Cell::Real(d)) => Some(*d),
-            Some(Cell::Int(n)) => Some(*n as f64),
+        Ok(match rs.rows.first().map(Vec::as_slice) {
+            Some([Cell::Int(id), Cell::Real(d)]) => Some((*id, *d)),
+            Some([Cell::Int(id), Cell::Int(d)]) => Some((*id, *d as f64)),
             _ => None,
         })
     }
 
-    fn current_semantic_texts(&self, coworkers: &[i64]) -> Result<Vec<(i64, String)>> {
-        let (visible, params) = current_semantic_visible_to(coworkers);
+    fn current_texts(&self, table: Table, coworkers: &[i64]) -> Result<Vec<(i64, String)>> {
+        let (visible, params) = active_visible_to(table, coworkers);
         let rs = self.query(
-            &format!("SELECT id, memory_text FROM semantic_memory WHERE {visible} ORDER BY id;"),
+            &format!(
+                "SELECT id, memory_text FROM {} WHERE {visible} ORDER BY id;",
+                table.name()
+            ),
             params,
         )?;
         Ok(rs
@@ -446,8 +480,16 @@ impl Store for TursoStore {
     fn insert_memory(&self, m: &NewMemory) -> Result<i64> {
         let (insert_sql, insert_params) = insert_statement(m);
         let table = m.table.as_str().to_string();
+        // The guard is in the UPDATE itself: a row no longer current since the
+        // caller looked changes nothing, and that undoes the insert.
+        let retire_sql = format!(
+            "UPDATE {} SET retired_at = datetime('now'), updated_at = datetime('now') \
+             WHERE id = ? AND {};",
+            m.table.name(),
+            active(m.table)
+        );
 
-        self.with_retry(|| {
+        let inserted = self.with_retry(|| {
             pollster::block_on(async {
                 // Dropping the transaction without committing leaves it dangling,
                 // and the driver rolls it back on the connection's next use -- so
@@ -478,6 +520,13 @@ impl Store for TursoStore {
                     .await?;
                 }
 
+                if let Some(old) = m.retires
+                    && tx.execute(&retire_sql, vec![Value::Integer(old)]).await? != 1
+                {
+                    tx.rollback().await?;
+                    return Ok(None);
+                }
+
                 for cid in &m.coworkers {
                     tx.execute(
                         "INSERT INTO memory_coworkers (memory_table, memory_id, coworker_id) \
@@ -492,9 +541,77 @@ impl Store for TursoStore {
                 }
 
                 tx.commit().await?;
-                Ok(id)
+                Ok(Some(id))
             })
+        })?;
+        inserted.ok_or_else(|| {
+            Error::refused(format!(
+                "{} row {} is no longer current (retired or gone since it was checked), so \
+                 it was not replaced — nothing was stored.",
+                m.table.name(),
+                m.retires.unwrap_or_default()
+            ))
         })
+    }
+
+    fn has_table(&self, table: Table) -> Result<bool> {
+        let rs = self.query(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?;",
+            vec![Value::Text(table.name().to_string())],
+        )?;
+        Ok(matches!(rs.rows.first().and_then(|r| r.first()), Some(Cell::Int(n)) if *n > 0))
+    }
+
+    fn instruction_state(&self, id: i64) -> Result<Option<InstructionState>> {
+        let rs = self.query(
+            "SELECT topic, retired_at IS NOT NULL FROM instructions WHERE id = ?;",
+            vec![Value::Integer(id)],
+        )?;
+        Ok(match rs.rows.first().map(Vec::as_slice) {
+            Some([Cell::Text(topic), Cell::Int(retired)]) => Some(InstructionState {
+                topic: topic.clone(),
+                retired: *retired != 0,
+            }),
+            _ => None,
+        })
+    }
+
+    fn retire_instruction(&self, id: i64) -> Result<bool> {
+        // The guard is in the UPDATE itself, so a row retired by another
+        // process since the caller looked is left alone.
+        let changed = self.with_retry(|| {
+            pollster::block_on(self.conn.execute(
+                "UPDATE instructions SET retired_at = datetime('now'), \
+                 updated_at = datetime('now') WHERE id = ? AND retired_at IS NULL;",
+                vec![Value::Integer(id)],
+            ))
+        })?;
+        Ok(changed == 1)
+    }
+
+    fn get_instructions(&self, key: InstructionKey) -> Result<ResultSet> {
+        let (filter, param) = match key {
+            InstructionKey::Id(id) => ("id = ?", Value::Integer(id)),
+            // lower() folds ASCII only, in turso as in SQLite.
+            InstructionKey::Topic(topic) => {
+                ("lower(topic) = lower(?)", Value::Text(topic.to_string()))
+            }
+        };
+        self.query(
+            &format!(
+                "SELECT id, created_at, project, topic, memory_text FROM instructions \
+                 WHERE retired_at IS NULL AND {filter} ORDER BY created_at DESC, id DESC;"
+            ),
+            vec![param],
+        )
+    }
+
+    fn list_instructions(&self) -> Result<ResultSet> {
+        self.query(
+            "SELECT id, topic, created_at FROM instructions WHERE retired_at IS NULL \
+             ORDER BY lower(topic), topic, created_at DESC, id DESC;",
+            Vec::new(),
+        )
     }
 
     fn unembedded_rows(&self, table: Table, after: i64, limit: u32) -> Result<Vec<(i64, String)>> {
@@ -503,9 +620,9 @@ impl Store for TursoStore {
         params.push(Value::Integer(i64::from(limit)));
         let rs = self.query(
             &format!(
-                "SELECT id, memory_text FROM {}_memory WHERE {active} AND id > ? \
+                "SELECT id, memory_text FROM {} WHERE {active} AND id > ? \
                  ORDER BY id LIMIT ?;",
-                table.as_str()
+                table.name()
             ),
             params,
         )?;
@@ -535,9 +652,9 @@ impl Store for TursoStore {
                 (
                     *id,
                     format!(
-                        "UPDATE {}_memory SET embedding = {}, embed_model = ? \
+                        "UPDATE {} SET embedding = {}, embed_model = ? \
                          WHERE id = ? AND {eligible};",
-                        table.as_str(),
+                        table.name(),
                         vector_literal(v)
                     ),
                 )
@@ -565,18 +682,17 @@ impl Store for TursoStore {
         })
     }
 
-    fn semantic_within(&self, id: i64, vector: &[f32], below: f64) -> Result<Vec<(i64, f64)>> {
+    fn within(&self, table: Table, id: i64, vector: &[f32], below: f64) -> Result<Vec<(i64, f64)>> {
         let lit = vector_literal(vector);
-        let (current, mut params) = current_semantic_visible_to(&[]);
-        params.push(Value::Integer(id));
-        params.push(Value::Real(below));
         let rs = self.query(
             &format!(
                 "SELECT id, round(vector_distance_cos(embedding,{lit}),4) AS dist \
-                 FROM semantic_memory WHERE {current} AND id <> ? AND embedding IS NOT NULL \
-                 AND vector_distance_cos(embedding,{lit}) < ? ORDER BY dist, id;"
+                 FROM {} WHERE {} AND id <> ? AND embedding IS NOT NULL \
+                 AND vector_distance_cos(embedding,{lit}) < ? ORDER BY dist, id;",
+                table.name(),
+                active(table)
             ),
-            params,
+            vec![Value::Integer(id), Value::Real(below)],
         )?;
         Ok(rs
             .rows
@@ -596,9 +712,9 @@ impl Store for TursoStore {
         let rs = self.query(
             &format!(
                 "SELECT id, created_at, julianday('now') - julianday(created_at), topic, \
-                 memory_text, embedding IS NOT NULL FROM {}_memory WHERE {active} \
+                 memory_text, embedding IS NOT NULL FROM {} WHERE {active} \
                  ORDER BY created_at, id;",
-                table.as_str()
+                table.name()
             ),
             params,
         )?;
@@ -628,8 +744,8 @@ impl Store for TursoStore {
                     embedded: *embedded != 0,
                 }),
                 other => Err(Error::failed(format!(
-                    "unexpected row shape in {}_memory: {other:?}",
-                    table.as_str()
+                    "unexpected row shape in {}: {other:?}",
+                    table.name()
                 ))),
             })
             .collect()
@@ -644,15 +760,18 @@ impl Store for TursoStore {
                  AND {alias}.retired_at IS NULL"
             ),
             Table::Episodic => format!("{alias}.embedding IS NOT NULL"),
+            Table::Instructions => {
+                format!("{alias}.embedding IS NOT NULL AND {alias}.retired_at IS NULL")
+            }
         };
         let rs = self.query(
             &format!(
-                "SELECT a.id, b.id FROM {t}_memory a JOIN {t}_memory b ON a.id < b.id \
+                "SELECT a.id, b.id FROM {t} a JOIN {t} b ON a.id < b.id \
                  WHERE {} AND {} AND vector_distance_cos(a.embedding, b.embedding) < ? \
                  ORDER BY a.id, b.id;",
                 active("a"),
                 active("b"),
-                t = table.as_str()
+                t = table.name()
             ),
             vec![Value::Real(below)],
         )?;
@@ -672,8 +791,8 @@ impl Store for TursoStore {
         }
         let rs = self.query(
             &format!(
-                "SELECT id FROM {}_memory WHERE id IN ({}) ORDER BY id;",
-                table.as_str(),
+                "SELECT id FROM {} WHERE id IN ({}) ORDER BY id;",
+                table.name(),
                 placeholders(ids)
             ),
             int_params(ids),
@@ -869,6 +988,7 @@ fn insert_statement(m: &NewMemory) -> (String, Vec<Value>) {
             push("event_type", &m.event_type);
             push("importance", &m.importance);
         }
+        Table::Instructions => {}
     }
     if m.created_at.is_some() {
         push("created_at", &m.created_at);
@@ -887,8 +1007,8 @@ fn insert_statement(m: &NewMemory) -> (String, Vec<Value>) {
     };
     let placeholders = vec!["?"; cols.len()].join(", ");
     let sql = format!(
-        "INSERT INTO {}_memory ({}, embedding) VALUES ({placeholders}, {embedding});",
-        m.table.as_str(),
+        "INSERT INTO {} ({}, embedding) VALUES ({placeholders}, {embedding});",
+        m.table.name(),
         cols.join(", "),
     );
     (sql, params)
@@ -963,6 +1083,7 @@ pub(crate) mod tests {
         let (cols, vals) = match table {
             Table::Semantic => ("category", "'reference'"),
             Table::Episodic => ("event_type, importance", "'note', 'routine'"),
+            Table::Instructions => ("topic", "'a topic'"),
         };
         let (model, embedding) = if embedded {
             (
@@ -975,17 +1096,13 @@ pub(crate) mod tests {
         rows(
             cfg,
             &format!(
-                "INSERT INTO {t}_memory ({cols}, created_at, memory_text, embed_model, embedding) \
+                "INSERT INTO {t} ({cols}, created_at, memory_text, embed_model, embedding) \
                  VALUES ({vals}, '2026-01-01 00:00:00', '{text}', {model}, {embedding});",
-                t = table.as_str(),
+                t = table.name(),
                 text = text.replace('\'', "''"),
             ),
         );
-        match rows(
-            cfg,
-            &format!("SELECT max(id) FROM {}_memory;", table.as_str()),
-        )[0][0]
-        {
+        match rows(cfg, &format!("SELECT max(id) FROM {};", table.name()))[0][0] {
             Cell::Int(id) => id,
             ref other => panic!("{other:?}"),
         }
@@ -996,9 +1113,9 @@ pub(crate) mod tests {
         match rows(
             cfg,
             &format!(
-                "SELECT vector_distance_cos(embedding, {}) FROM {}_memory WHERE id = {id};",
+                "SELECT vector_distance_cos(embedding, {}) FROM {} WHERE id = {id};",
                 vector_literal(v),
-                table.as_str()
+                table.name()
             ),
         )[0][0]
         {
@@ -1013,8 +1130,8 @@ pub(crate) mod tests {
         rows(
             cfg,
             &format!(
-                "UPDATE {}_memory SET embed_model = '{model}', embedding = {} WHERE id = {id};",
-                table.as_str(),
+                "UPDATE {} SET embed_model = '{model}', embedding = {} WHERE id = {id};",
+                table.name(),
                 vector_literal(v)
             ),
         );
@@ -1556,10 +1673,341 @@ pub(crate) mod tests {
 
         let store = TursoStore::open(&cfg).unwrap();
         let near = store
-            .semantic_within(me, &Fake::vector("twin"), 0.10)
+            .within(Table::Semantic, me, &Fake::vector("twin"), 0.10)
             .unwrap();
         assert_eq!(near.len(), 1, "{near:?}");
         assert_eq!(near[0].0, twin);
         assert!(near[0].1 < 1e-4, "{near:?}");
+    }
+
+    // ---- instructions --------------------------------------------------------
+
+    /// One instruction with this topic and date, with a vector from its text or
+    /// none.
+    pub(crate) fn put_instruction(
+        cfg: &Config,
+        topic: &str,
+        text: &str,
+        created_at: &str,
+        embedded: bool,
+    ) -> i64 {
+        let id = put(cfg, Table::Instructions, text, embedded);
+        rows(
+            cfg,
+            &format!(
+                "UPDATE instructions SET topic = '{}', created_at = '{created_at}', \
+                 updated_at = '{created_at}' WHERE id = {id};",
+                topic.replace('\'', "''")
+            ),
+        );
+        id
+    }
+
+    /// Soft-delete a row directly, as another process would.
+    pub(crate) fn retire_row(cfg: &Config, table: Table, id: i64) {
+        rows(
+            cfg,
+            &format!(
+                "UPDATE {} SET retired_at = '2026-01-02 00:00:00' WHERE id = {id};",
+                table.name()
+            ),
+        );
+    }
+
+    /// An instruction about to be written, replacing `retires` if given.
+    fn instruction(text: &str, retires: Option<i64>) -> NewMemory {
+        NewMemory {
+            table: Table::Instructions,
+            project: None,
+            topic: Some("release-notes".into()),
+            category: None,
+            event_type: None,
+            importance: None,
+            source: None,
+            model: None,
+            embed_model: None,
+            memory_text: text.into(),
+            file_reference: None,
+            created_at: None,
+            embedding: None,
+            supersedes: Vec::new(),
+            retires,
+            coworkers: Vec::new(),
+        }
+    }
+
+    fn first_column(rs: &ResultSet) -> Vec<i64> {
+        ints(rs)
+    }
+
+    #[test]
+    fn has_table_tells_a_database_from_before_the_instructions_table() {
+        let cfg = scratch("has-table");
+        let store = TursoStore::open(&cfg).unwrap();
+        for table in Table::EMBEDDED {
+            assert!(store.has_table(table).unwrap(), "{table:?}");
+        }
+        dump::tests::batch(
+            &cfg,
+            "DROP INDEX IF EXISTS idx_instr_retired; DROP TABLE IF EXISTS instructions;",
+        );
+        assert!(!store.has_table(Table::Instructions).unwrap());
+        assert!(store.has_table(Table::Semantic).unwrap());
+    }
+
+    /// An instruction is active until it is retired: only active ones are
+    /// counted, selected for embedding and filled.
+    #[test]
+    fn the_active_instructions_are_the_ones_not_retired() {
+        let cfg = scratch("instr-active");
+        let a = put(&cfg, Table::Instructions, "blind current", false);
+        let gone = put(&cfg, Table::Instructions, "blind retired", false);
+        put(&cfg, Table::Instructions, "embedded current", true);
+        retire_row(&cfg, Table::Instructions, gone);
+        let store = TursoStore::open(&cfg).unwrap();
+
+        assert_eq!(
+            ids(&store.unembedded_rows(Table::Instructions, 0, 10).unwrap()),
+            vec![a]
+        );
+        let every = Scope {
+            embedded: Embedded::Any,
+            ..every_row(Table::Instructions)
+        };
+        assert_eq!(store.document_frequencies(&every, &[]).unwrap().1, 2);
+        let written = store
+            .fill_embeddings(
+                Table::Instructions,
+                "bge-m3",
+                &[
+                    (a, Fake::vector("blind current")),
+                    (gone, Fake::vector("blind retired")),
+                ],
+            )
+            .unwrap();
+        assert_eq!(written, vec![a]);
+        assert_eq!(
+            rows(
+                &cfg,
+                &format!("SELECT embedding IS NULL FROM instructions WHERE id = {gone};")
+            ),
+            vec![vec![Cell::Int(1)]]
+        );
+    }
+
+    /// A revision: the new row and the old one's retirement land together.
+    #[test]
+    fn an_insert_that_retires_a_row_does_both_in_one_transaction() {
+        let cfg = scratch("instr-replace");
+        let old = put(&cfg, Table::Instructions, "old wording", false);
+        rows(
+            &cfg,
+            "UPDATE instructions SET updated_at = '2026-01-01 00:00:00';",
+        );
+        let store = TursoStore::open(&cfg).unwrap();
+        let new = store
+            .insert_memory(&instruction("new wording", Some(old)))
+            .unwrap();
+        assert!(new > old);
+        assert_eq!(
+            rows(
+                &cfg,
+                "SELECT id, retired_at IS NOT NULL, updated_at > '2026-01-01 00:00:00', \
+                 memory_text FROM instructions ORDER BY id;"
+            ),
+            vec![
+                vec![
+                    Cell::Int(old),
+                    Cell::Int(1),
+                    Cell::Int(1),
+                    Cell::Text("old wording".into())
+                ],
+                vec![
+                    Cell::Int(new),
+                    Cell::Int(0),
+                    Cell::Int(1),
+                    Cell::Text("new wording".into())
+                ],
+            ]
+        );
+    }
+
+    /// A failure forced after the insert: the row to retire is no longer
+    /// current when the transaction reaches it, so the insert goes with it --
+    /// neither the new row nor any retirement remains.
+    #[test]
+    fn an_insert_whose_row_to_retire_is_not_current_stores_nothing() {
+        let cfg = scratch("instr-replace-gone");
+        let gone = put(&cfg, Table::Instructions, "already retired", false);
+        retire_row(&cfg, Table::Instructions, gone);
+        let all = "SELECT id, retired_at, updated_at, memory_text FROM instructions ORDER BY id;";
+        let before = rows(&cfg, all);
+        let store = TursoStore::open(&cfg).unwrap();
+        for target in [gone, 99] {
+            let err = store
+                .insert_memory(&instruction("new wording", Some(target)))
+                .unwrap_err();
+            assert_eq!(err.exit_code(), crate::error::EXIT_REFUSED, "{err}");
+            let msg = err.to_string();
+            assert!(msg.contains(&target.to_string()), "{msg}");
+            assert!(msg.contains("nothing was stored"), "{msg}");
+            assert_eq!(rows(&cfg, all), before, "{target}");
+        }
+        // No transaction was left open: the connection still writes.
+        store
+            .insert_memory(&instruction("new wording", None))
+            .unwrap();
+        assert_eq!(rows(&cfg, all).len(), 2);
+    }
+
+    /// The near-duplicate guards' reads, for instructions: active rows of that
+    /// table only, and never the row being replaced.
+    #[test]
+    fn nearest_texts_and_within_cover_the_active_rows_of_their_own_table() {
+        let cfg = scratch("instr-nearest");
+        let a = put_vector(&cfg, Table::Instructions, "a", &angle(0, 0.0));
+        let b = put_vector(&cfg, Table::Instructions, "b", &angle(0, 20.0));
+        let gone = put_vector(&cfg, Table::Instructions, "retired twin", &angle(0, 0.0));
+        retire_row(&cfg, Table::Instructions, gone);
+        let blind = put(&cfg, Table::Instructions, "no vector", false);
+        let s = put_vector(&cfg, Table::Semantic, "semantic twin", &angle(0, 0.0));
+        let store = TursoStore::open(&cfg).unwrap();
+
+        let (id, dist) = store
+            .nearest(Table::Instructions, &[], None, &angle(0, 1.0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(id, a);
+        assert!(dist < 0.001, "{dist}");
+        let (id, dist) = store
+            .nearest(Table::Instructions, &[], Some(a), &angle(0, 1.0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            id, b,
+            "the excepted row is skipped, the retired one never seen"
+        );
+        assert!((dist - 0.0545).abs() < 0.001, "{dist}");
+        assert_eq!(
+            store
+                .nearest(Table::Semantic, &[], None, &angle(0, 1.0))
+                .unwrap()
+                .map(|(id, _)| id),
+            Some(s)
+        );
+        assert_eq!(
+            store
+                .nearest(Table::Semantic, &[], Some(s), &angle(0, 1.0))
+                .unwrap(),
+            None
+        );
+
+        let texts: Vec<i64> = store
+            .current_texts(Table::Instructions, &[])
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(texts, vec![a, b, blind]);
+
+        let near: Vec<i64> = store
+            .within(Table::Instructions, a, &angle(0, 0.0), 0.10)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(near, vec![b]);
+    }
+
+    #[test]
+    fn instructions_are_read_by_id_topic_and_list_and_retired_in_place() {
+        let cfg = scratch("instr-reads");
+        let old = put_instruction(
+            &cfg,
+            "release-notes",
+            "bullets",
+            "2026-01-01 00:00:00",
+            false,
+        );
+        let new = put_instruction(
+            &cfg,
+            "release-notes",
+            "bullets, newest",
+            "2026-02-01 00:00:00",
+            true,
+        );
+        let gone = put_instruction(
+            &cfg,
+            "release-notes",
+            "retired wording",
+            "2026-03-01 00:00:00",
+            false,
+        );
+        let other = put_instruction(&cfg, "deploy", "checklist", "2026-01-15 00:00:00", false);
+        retire_row(&cfg, Table::Instructions, gone);
+        let store = TursoStore::open(&cfg).unwrap();
+
+        assert_eq!(
+            store.instruction_state(old).unwrap(),
+            Some(InstructionState {
+                topic: "release-notes".into(),
+                retired: false
+            })
+        );
+        assert_eq!(
+            store.instruction_state(gone).unwrap(),
+            Some(InstructionState {
+                topic: "release-notes".into(),
+                retired: true
+            })
+        );
+        assert_eq!(store.instruction_state(99).unwrap(), None);
+
+        // By topic: every current row, newest first, ignoring ASCII case.
+        let rs = store
+            .get_instructions(InstructionKey::Topic("Release-Notes"))
+            .unwrap();
+        assert_eq!(
+            rs.columns,
+            ["id", "created_at", "project", "topic", "memory_text"]
+        );
+        assert_eq!(first_column(&rs), vec![new, old]);
+        assert_eq!(rs.rows[0][4], Cell::Text("bullets, newest".into()));
+        // By id; a retired one is not current.
+        assert_eq!(
+            first_column(&store.get_instructions(InstructionKey::Id(other)).unwrap()),
+            vec![other]
+        );
+        assert!(
+            store
+                .get_instructions(InstructionKey::Id(gone))
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+
+        // The list: no text, current rows only, by topic and newest first.
+        let rs = store.list_instructions().unwrap();
+        assert_eq!(rs.columns, ["id", "topic", "created_at"]);
+        assert_eq!(first_column(&rs), vec![other, new, old]);
+
+        assert!(store.retire_instruction(other).unwrap());
+        assert!(!store.retire_instruction(other).unwrap(), "already retired");
+        assert!(!store.retire_instruction(99).unwrap(), "unknown");
+        assert_eq!(
+            rows(
+                &cfg,
+                &format!(
+                    "SELECT retired_at >= datetime('now', '-1 minute'), \
+                     updated_at >= datetime('now', '-1 minute') FROM instructions WHERE id = {other};"
+                )
+            ),
+            vec![vec![Cell::Int(1), Cell::Int(1)]]
+        );
+        assert_eq!(
+            rows(&cfg, "SELECT count(*) FROM instructions;"),
+            vec![vec![Cell::Int(4)]],
+            "nothing is ever deleted"
+        );
     }
 }

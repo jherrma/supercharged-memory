@@ -44,6 +44,7 @@ pub fn default_threshold(table: Table) -> f64 {
     match table {
         Table::Semantic => SEMANTIC_THRESHOLD,
         Table::Episodic => EPISODIC_THRESHOLD,
+        Table::Instructions => unreachable!("sleep refuses the instructions table up front"),
     }
 }
 
@@ -137,6 +138,7 @@ fn grouped(store: &impl Store, table: Table, threshold: f64) -> Result<Grouped> 
         let scope = match table {
             Table::Semantic => "current semantic",
             Table::Episodic => "episodic",
+            Table::Instructions => unreachable!("sleep refuses the instructions table up front"),
         };
         return Err(Error::refused(format!(
             "none of the {} {scope} row(s) has an embedding, so there is nothing to compare — \

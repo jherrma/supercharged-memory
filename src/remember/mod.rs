@@ -116,6 +116,11 @@ fn validate(args: &Args) -> Result<Validated> {
                 Some(validate::one_of("--importance", &i, &IMPORTANCES)?),
             )
         }
+        Table::Instructions => {
+            return Err(Error::refused(
+                "an instruction is not a memory: store it with `instruct`.",
+            ));
+        }
     };
 
     // Checked before the length cap, so an over-long baseline rule is reported as
@@ -229,66 +234,36 @@ pub fn write(cfg: &Config, args: &Args, embedder: &dyn Embedder) -> Result<Store
         }
     }
 
-    // No embedding is not a refusal: the row is stored without one and the
-    // output says so, because a memory lost to an Ollama outage is worse than
-    // one that keyword recall alone can find until `embed --missing` runs.
-    let (vector, missing) = match embed::availability(cfg, embedder) {
-        Ok(()) => {
-            // One embedding model per database. Mixing vector spaces makes cosine
-            // distance meaningless, which corrupts recall for the whole corpus
-            // rather than just the new row -- so this is refused, never warned
-            // about. A row without a vector cannot mix anything, so only a
-            // write that carries one is held to it.
-            if store.rows_with_other_embed_model(v.table, &cfg.embed_model)? > 0 {
-                return Err(Error::refused(format!(
-                    "{}_memory has rows embedded with a different model than '{}'. Mixing \
-                     vector spaces makes cosine meaningless — re-embed the DB (rebuild) before \
-                     switching models.",
-                    v.table.as_str(),
-                    cfg.embed_model
-                )));
-            }
-            match embedder.embed(&v.memory_text) {
-                Ok(vector) => (Some(vector), None),
-                // Ollama failed between the probe and the embed: degrade the
-                // same way. A refusal (a wrong-dimension model) still stops.
-                Err(Error::Failed(why)) => (None, Some(why)),
-                Err(e) => return Err(e),
-            }
-        }
-        Err(why) => (None, Some(why.to_string())),
-    };
+    let (vector, missing) = embedding(cfg, &store, embedder, &v.memory_text, &[v.table])?;
 
     // Dedup is semantic-only: episodic memory is append-only because events
     // legitimately recur. --supersedes already says "this replaces that", so the
     // near-duplicate it is replacing is the point.
     if v.table == Table::Semantic && !v.force && v.supersedes.is_empty() {
-        if let Some(vector) = &vector {
-            let near = store.nearest_semantic(&coworker_ids, vector)?;
-            if near.is_some_and(|d| d < DUP_DIST) {
+        match duplicate(
+            &store,
+            Table::Semantic,
+            &coworker_ids,
+            None,
+            vector.as_deref(),
+            &v.memory_text,
+        )? {
+            Some(Duplicate::Near { dist, .. }) => {
                 return Err(Error::refused(format!(
                     "a near-duplicate already exists (cosine {} < {}). Use --supersedes <id> \
                      to replace it, or --force to add anyway.",
-                    render::format_real(near.unwrap_or_default()),
+                    render::format_real(dist),
                     render::format_real(DUP_DIST)
                 )));
             }
-        }
-        // The guard for rows without a vector, on either side: exact match on
-        // the normalised text. Weaker than the cosine guard by design; the
-        // near-duplicate report of `embed --missing` and the next sleep pass
-        // catch what it lets through.
-        let key = validate::dedup_key(&v.memory_text);
-        if let Some((id, _)) = store
-            .current_semantic_texts(&coworker_ids)?
-            .iter()
-            .find(|(_, text)| validate::dedup_key(text) == key)
-        {
-            return Err(Error::refused(format!(
-                "an identical memory already exists (id {id}; same text, ignoring case, \
-                 whitespace and keywords). Use --supersedes {id} to replace it, or --force to \
-                 add anyway."
-            )));
+            Some(Duplicate::Identical { id }) => {
+                return Err(Error::refused(format!(
+                    "an identical memory already exists (id {id}; same text, ignoring case, \
+                     whitespace and keywords). Use --supersedes {id} to replace it, or --force \
+                     to add anyway."
+                )));
+            }
+            None => {}
         }
     }
 
@@ -307,24 +282,108 @@ pub fn write(cfg: &Config, args: &Args, embedder: &dyn Embedder) -> Result<Store
         created_at: v.created_at,
         embedding: vector,
         supersedes: v.supersedes,
+        retires: None,
         coworkers: coworker_ids,
     })?;
 
-    let stored = format!(
+    let line = format!(
         "stored {} memory ({})",
         v.table.as_str(),
         v.topic.as_deref().unwrap_or("-")
     );
-    Ok(match missing {
+    Ok(stored(cfg, id, line, missing))
+}
+
+/// The vector a new row is stored with, or `None` and the reason it has none.
+///
+/// No embedding is not a refusal: the row is stored without one and the output
+/// says so, because a row lost to an Ollama outage is worse than one that
+/// keyword search alone can find until `embed --missing` runs.
+///
+/// One embedding model per database, checked in `tables`: mixing vector spaces
+/// makes cosine distance meaningless, which corrupts search for every row
+/// rather than just the new one -- so this is refused, never warned about. A
+/// row without a vector cannot mix anything, so only a write that carries one
+/// is held to it, and the check runs before the embed is paid for.
+pub(crate) fn embedding(
+    cfg: &Config,
+    store: &impl Store,
+    embedder: &dyn Embedder,
+    text: &str,
+    tables: &[Table],
+) -> Result<(Option<Vec<f32>>, Option<String>)> {
+    if let Err(why) = embed::availability(cfg, embedder) {
+        return Ok((None, Some(why.to_string())));
+    }
+    for &table in tables {
+        if store.rows_with_other_embed_model(table, &cfg.embed_model)? > 0 {
+            return Err(Error::refused(format!(
+                "{} has rows embedded with a different model than '{}'. Mixing vector spaces \
+                 makes cosine meaningless — re-embed the DB (rebuild) before switching models.",
+                table.name(),
+                cfg.embed_model
+            )));
+        }
+    }
+    match embedder.embed(text) {
+        Ok(vector) => Ok((Some(vector), None)),
+        // Ollama failed between the probe and the embed: degrade the same
+        // way. A refusal (a wrong-dimension model) still stops.
+        Err(Error::Failed(why)) => Ok((None, Some(why))),
+        Err(e) => Err(e),
+    }
+}
+
+/// An active row a new one would duplicate.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Duplicate {
+    /// Within `DUP_DIST` in cosine distance.
+    Near { id: i64, dist: f64 },
+    /// The same normalised text.
+    Identical { id: i64 },
+}
+
+/// The near-duplicate guards, in order: the cosine one when the new row has a
+/// vector, then exact match on the normalised text -- the guard for rows
+/// without a vector, on either side. The text guard is weaker by design; the
+/// near-duplicate report of `embed --missing` catches what it lets through, and
+/// for memories the next sleep pass too. `except` is the row the new one
+/// replaces, which it may duplicate.
+pub(crate) fn duplicate(
+    store: &impl Store,
+    table: Table,
+    coworkers: &[i64],
+    except: Option<i64>,
+    vector: Option<&[f32]>,
+    text: &str,
+) -> Result<Option<Duplicate>> {
+    if let Some(vector) = vector
+        && let Some((id, dist)) = store.nearest(table, coworkers, except, vector)?
+        && dist < DUP_DIST
+    {
+        return Ok(Some(Duplicate::Near { id, dist }));
+    }
+    let key = validate::dedup_key(text);
+    Ok(store
+        .current_texts(table, coworkers)?
+        .into_iter()
+        .find(|(id, other)| Some(*id) != except && validate::dedup_key(other) == key)
+        .map(|(id, _)| Duplicate::Identical { id }))
+}
+
+/// What a write reports: its line, said plainly when the row went in without
+/// an embedding.
+pub(crate) fn stored(cfg: &Config, id: i64, line: String, missing: Option<String>) -> Stored {
+    match missing {
         None => Stored {
             id,
-            line: stored,
+            line,
             warning: None,
         },
         Some(why) => Stored {
             id,
             line: format!(
-                "{stored} WITHOUT embedding — {why}; run embed --missing once Ollama is available"
+                "{line} WITHOUT embedding — {why}; run embed --missing once Ollama is available"
             ),
             // With EMBEDDINGS=off a row without a vector is the configured
             // state; with it on, the setup is broken and should be fixed.
@@ -335,7 +394,7 @@ pub fn write(cfg: &Config, args: &Args, embedder: &dyn Embedder) -> Result<Store
                 )
             }),
         },
-    })
+    }
 }
 
 #[cfg(test)]
@@ -494,6 +553,14 @@ mod tests {
         let mut a = semantic("a fact");
         a.topic = Some("t".repeat(129));
         assert!(refusal(&a).contains("hard cap 128"));
+    }
+
+    /// Directives have a writer of their own, with its own revision rule.
+    #[test]
+    fn the_instructions_table_is_not_a_memory_table() {
+        let mut a = semantic("a directive");
+        a.table = Some(Table::Instructions);
+        assert!(refusal(&a).contains("instruct"));
     }
 
     #[test]

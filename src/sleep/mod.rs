@@ -54,6 +54,21 @@ pub enum Mode {
     VerifyCandidates { table: Table, limit: u32 },
 }
 
+impl Mode {
+    /// The table a report covers; `None` for the writes, whose table is fixed.
+    fn table(&self) -> Option<Table> {
+        match self {
+            Mode::Cluster { table, .. }
+            | Mode::ContradictionCandidates { table, .. }
+            | Mode::Staleness { table }
+            | Mode::VerifyCandidates { table, .. } => Some(*table),
+            Mode::MarkProcessed(_) | Mode::Retire(_) | Mode::RebuildTopics | Mode::Purge { .. } => {
+                None
+            }
+        }
+    }
+}
+
 pub fn run(cfg: &Config, mode: &Mode) -> Result<()> {
     let out = execute(cfg, mode, &mut std::io::stdin().lock())?;
     println!("{out}");
@@ -63,6 +78,12 @@ pub fn run(cfg: &Config, mode: &Mode) -> Result<()> {
 /// Run one mode and return what it prints on stdout. Only `RebuildTopics`
 /// reads `stdin`.
 pub fn execute(cfg: &Config, mode: &Mode, stdin: &mut dyn Read) -> Result<String> {
+    if mode.table() == Some(Table::Instructions) {
+        return Err(Error::refused(
+            "the instructions table is outside sleep: no report reads it, and only \
+             `instruct --retire` retires an instruction.",
+        ));
+    }
     match mode {
         Mode::MarkProcessed(csv) => mark_processed(cfg, csv),
         Mode::Retire(id) => retire(cfg, *id),
@@ -516,5 +537,30 @@ mod tests {
             topics(&cfg),
             vec![vec![Cell::Text("alpha".into()), Cell::Text("a".into())]]
         );
+    }
+
+    /// Instructions are outside sleep: no report reads the table, whoever
+    /// builds the mode.
+    #[test]
+    fn every_report_refuses_the_instructions_table() {
+        let cfg = scratch("sleep-instructions");
+        put(&cfg, Table::Instructions, "a directive", true);
+        let t = Table::Instructions;
+        for mode in [
+            Mode::Cluster {
+                table: t,
+                threshold: None,
+            },
+            Mode::ContradictionCandidates {
+                table: t,
+                threshold: Some(0.2),
+            },
+            Mode::VerifyCandidates { table: t, limit: 0 },
+            Mode::Staleness { table: t },
+        ] {
+            let msg = refusal(run_mode(&cfg, mode.clone()));
+            assert!(msg.contains("instructions"), "{mode:?}: {msg}");
+            assert!(msg.contains("outside sleep"), "{mode:?}: {msg}");
+        }
     }
 }

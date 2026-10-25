@@ -19,18 +19,37 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::recall::rank::WeightedToken;
 
-/// Which memory table a search is scoped to.
+/// A table that stores rows with text and an embedding: the two memory tables,
+/// and the instructions -- directives, not memories, but searched, embedded and
+/// guarded the same way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Table {
     Semantic,
     Episodic,
+    Instructions,
 }
 
 impl Table {
+    /// Every table that stores an embedding. One model per database covers
+    /// them all: another model in any one of them already mixes the vector
+    /// space.
+    pub const EMBEDDED: [Table; 3] = [Table::Semantic, Table::Episodic, Table::Instructions];
+
+    /// The short name the output uses.
     pub fn as_str(&self) -> &'static str {
         match self {
             Table::Semantic => "semantic",
             Table::Episodic => "episodic",
+            Table::Instructions => "instructions",
+        }
+    }
+
+    /// The SQL table.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Table::Semantic => "semantic_memory",
+            Table::Episodic => "episodic_memory",
+            Table::Instructions => "instructions",
         }
     }
 }
@@ -112,8 +131,26 @@ pub struct NewMemory {
     pub embedding: Option<Vec<f32>>,
     /// Current semantic ids this row replaces.
     pub supersedes: Vec<i64>,
+    /// A current row of the same table this one replaces: retired in the same
+    /// transaction, or nothing is stored. How an instruction is revised.
+    pub retires: Option<i64>,
     /// Coworker ids this memory is scoped to. Empty = global.
     pub coworkers: Vec<i64>,
+}
+
+/// How `instructions --get` names what it wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionKey<'a> {
+    Id(i64),
+    /// Matched whole, ignoring ASCII case.
+    Topic(&'a str),
+}
+
+/// Whether an instruction id names a row, and whether that row is current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstructionState {
+    pub topic: String,
+    pub retired: bool,
 }
 
 /// An active row as the sleep reports read it: everything but its vector.
@@ -182,22 +219,49 @@ pub trait Store {
     /// revises nothing at all rather than half of them.
     fn current_semantic_ids(&self, ids: &[i64]) -> Result<Vec<i64>>;
 
-    /// Cosine distance to the nearest current semantic memory visible to these
-    /// coworkers (empty = the whole table), or `None` if there is nothing to
-    /// compare against. The near-duplicate guard.
-    fn nearest_semantic(&self, coworkers: &[i64], vector: &[f32]) -> Result<Option<f64>>;
+    /// Id and cosine distance of the nearest active row of this table visible
+    /// to these coworkers (empty = the whole table), other than `except`, or
+    /// `None` if there is nothing to compare against. The near-duplicate guard.
+    fn nearest(
+        &self,
+        table: Table,
+        coworkers: &[i64],
+        except: Option<i64>,
+        vector: &[f32],
+    ) -> Result<Option<(i64, f64)>>;
 
-    /// Id and text of every current semantic memory visible to these coworkers
-    /// (empty = the whole table): the near-duplicate guard for rows that have no
-    /// vector to compare.
-    fn current_semantic_texts(&self, coworkers: &[i64]) -> Result<Vec<(i64, String)>>;
+    /// Id and text of every active row of this table visible to these
+    /// coworkers (empty = the whole table): the near-duplicate guard for rows
+    /// that have no vector to compare.
+    fn current_texts(&self, table: Table, coworkers: &[i64]) -> Result<Vec<(i64, String)>>;
 
-    /// Insert the row, mark everything it supersedes, and tag its coworkers --
-    /// all in ONE transaction. Returns the MEMORY's id.
+    /// Insert the row, mark everything it supersedes, retire the row it
+    /// replaces, and tag its coworkers -- all in ONE transaction. Returns the
+    /// MEMORY's id.
     fn insert_memory(&self, m: &NewMemory) -> Result<i64>;
 
+    /// Whether the database holds this table at all. A database from before
+    /// the instructions table lacks it until `update` creates it.
+    fn has_table(&self, table: Table) -> Result<bool>;
+
+    /// The topic of an instruction and whether it is retired, or `None` when
+    /// no row has that id.
+    fn instruction_state(&self, id: i64) -> Result<Option<InstructionState>>;
+
+    /// Retire one current instruction: `retired_at` is set, nothing is
+    /// deleted. `false` when no current row has that id, and nothing changed.
+    fn retire_instruction(&self, id: i64) -> Result<bool>;
+
+    /// The current instructions with this id or topic, full text, newest
+    /// first.
+    fn get_instructions(&self, key: InstructionKey) -> Result<ResultSet>;
+
+    /// Id, topic and date of every current instruction -- never the text.
+    fn list_instructions(&self) -> Result<ResultSet>;
+
     /// Id and text of the active rows of this table that have no embedding
-    /// (current semantic rows, every episodic row), by ascending id, after
+    /// (current semantic rows, every episodic row, current instructions), by
+    /// ascending id, after
     /// `after`, at most `limit`. The cursor, not the NULL alone, is what moves a
     /// run past a row that failed to embed.
     fn unembedded_rows(&self, table: Table, after: i64, limit: u32) -> Result<Vec<(i64, String)>>;
@@ -213,9 +277,10 @@ pub trait Store {
         rows: &[(i64, Vec<f32>)],
     ) -> Result<Vec<i64>>;
 
-    /// Current semantic rows other than `id` whose embedding lies within cosine
-    /// distance `below` of `vector`, nearest first: the near-duplicate report.
-    fn semantic_within(&self, id: i64, vector: &[f32], below: f64) -> Result<Vec<(i64, f64)>>;
+    /// Active rows of this table other than `id` whose embedding lies within
+    /// cosine distance `below` of `vector`, nearest first: the near-duplicate
+    /// report.
+    fn within(&self, table: Table, id: i64, vector: &[f32], below: f64) -> Result<Vec<(i64, f64)>>;
 
     /// Every active row of a table (current semantic rows, every episodic
     /// row), oldest first and by id within a tie.

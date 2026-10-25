@@ -23,7 +23,8 @@ pub const DB_ENV: &str = "SUPERCHARGED_MEMORY_TURSO_PATH";
 pub const VERSION_KEY: &str = "SUPERCHARGED_MEMORY_VERSION";
 /// bge-m3's output width. Asserted on every embedding; see `crate::embed`.
 pub const DIM: usize = 1024;
-/// `memory_text`'s CHECK cap, keywords included. Enforced by `remember`.
+/// `memory_text`'s CHECK cap, keywords included. Enforced by `remember` and
+/// `instruct`.
 #[allow(dead_code)]
 pub const MAX_TEXT: usize = 2000;
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";

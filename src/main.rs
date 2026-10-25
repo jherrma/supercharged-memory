@@ -12,6 +12,7 @@ mod embed;
 mod error;
 mod find_existing;
 mod init;
+mod instructions;
 mod json;
 mod recall;
 mod remember;

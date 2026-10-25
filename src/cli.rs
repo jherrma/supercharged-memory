@@ -13,7 +13,10 @@ use crate::config::{self, Config, ConfigError, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
-use crate::{backup, embed, find_existing, init, recall, restore, sleep, status, update, version};
+use crate::{
+    backup, embed, find_existing, init, instructions, recall, restore, sleep, status, update,
+    version,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -62,6 +65,7 @@ impl From<OneTable> for store::Table {
 pub enum EmbedTable {
     Semantic,
     Episodic,
+    Instructions,
     All,
 }
 
@@ -70,7 +74,8 @@ impl EmbedTable {
         match self {
             EmbedTable::Semantic => vec![store::Table::Semantic],
             EmbedTable::Episodic => vec![store::Table::Episodic],
-            EmbedTable::All => vec![store::Table::Semantic, store::Table::Episodic],
+            EmbedTable::Instructions => vec![store::Table::Instructions],
+            EmbedTable::All => store::Table::EMBEDDED.to_vec(),
         }
     }
 }
@@ -212,6 +217,100 @@ pub enum Command {
         /// Comma-separated coworker name(s) to scope this memory to.
         #[arg(long)]
         coworker: Option<String>,
+    },
+
+    /// Store an instruction the user wants followed on demand; revise or retire one.
+    ///
+    /// Directives, not memories: never loaded at session start, never read by
+    /// sleep. Shares remember's guards -- empty text, the 2000-char cap with
+    /// the keywords in it, metadata caps, one embedding model across every
+    /// table, the near-duplicate check -- and stores without an embedding when
+    /// none is available. --replaces retires the old row in the same
+    /// transaction; --retire soft-deletes one. Nothing is ever deleted.
+    #[command(group(ArgGroup::new("retiring").args(["retire"])))]
+    Instruct {
+        /// The name the user says ("use instruction <topic>"). Several current
+        /// instructions may share one.
+        #[arg(long, required_unless_present = "retiring")]
+        topic: Option<String>,
+
+        /// The directive itself. NEVER PII.
+        #[arg(long, required_unless_present = "retiring")]
+        text: Option<String>,
+
+        /// Appended INTO the text, so they are embedded and LIKE-searchable —
+        /// and so they count against the 2000-char cap.
+        #[arg(long)]
+        keywords: Option<String>,
+
+        /// Where it came from (user-stated, …).
+        #[arg(long)]
+        source: Option<String>,
+
+        /// The agent model that wrote it.
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Tracking-tool work item id. Omit for a global instruction.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Path this instruction was derived from.
+        #[arg(long = "file-reference")]
+        file_reference: Option<String>,
+
+        /// Store even if a near-duplicate already exists.
+        #[arg(long)]
+        force: bool,
+
+        /// Id of the current instruction this one replaces: it is retired in
+        /// the same transaction as the insert.
+        #[arg(long, value_name = "ID")]
+        replaces: Option<i64>,
+
+        /// Soft-delete one current instruction, with no replacement: sets
+        /// retired_at, never deletes.
+        #[arg(
+            long,
+            value_name = "ID",
+            conflicts_with_all = [
+                "topic", "text", "keywords", "source", "model", "project",
+                "file_reference", "force", "replaces",
+            ]
+        )]
+        retire: Option<i64>,
+    },
+
+    /// Look up instructions: a search, one by --get <id|topic>, or --list.
+    ///
+    /// A PURE READER, never loaded at session start. The search ranks like
+    /// recall's, over current instructions only; --get prints the full text,
+    /// newest first; --list prints id, topic and date, never the text.
+    #[command(
+        group(ArgGroup::new("lookup").required(true).args(["query", "get", "list"])),
+        group(ArgGroup::new("searching").args(["query"]))
+    )]
+    Instructions {
+        /// What to search for.
+        query: Option<String>,
+
+        /// The current instructions with this id or topic, full text, newest
+        /// first. A number is an id first, then a topic; a topic is matched
+        /// whole, ignoring ASCII case.
+        #[arg(long, value_name = "ID|TOPIC")]
+        get: Option<String>,
+
+        /// Id, topic and date of every current instruction.
+        #[arg(long)]
+        list: bool,
+
+        /// How many hits (default 5).
+        #[arg(long, requires = "searching", value_parser = clap::value_parser!(u32).range(1..))]
+        k: Option<u32>,
+
+        /// Narrow the search to one tracking-tool work item id.
+        #[arg(long, requires = "searching")]
+        project: Option<String>,
     },
 
     /// Fill in the embeddings of rows stored without one.
@@ -477,6 +576,8 @@ impl Command {
             Command::Status => "status",
             Command::Recall { .. } => "recall",
             Command::Remember { .. } => "remember",
+            Command::Instruct { .. } => "instruct",
+            Command::Instructions { .. } => "instructions",
             Command::Embed { .. } => "embed",
             Command::Coworkers => "coworkers",
             Command::Sleep { .. } => "sleep",
@@ -558,6 +659,8 @@ impl Command {
                     coworker: coworker.clone(),
                 },
             ),
+            Command::Instruct { .. } => instructions::write::run(cfg, &self.instruct_mode()),
+            Command::Instructions { .. } => instructions::run(cfg, &self.lookup()),
             Command::Embed {
                 missing: _,
                 table,
@@ -616,6 +719,65 @@ impl Command {
 }
 
 impl Command {
+    /// What an `instruct` invocation asks for: a store, or a retirement.
+    fn instruct_mode(&self) -> instructions::write::Mode {
+        let Command::Instruct {
+            topic,
+            text,
+            keywords,
+            source,
+            model,
+            project,
+            file_reference,
+            force,
+            replaces,
+            retire,
+        } = self
+        else {
+            unreachable!("instruct_mode is only called for instruct")
+        };
+        match retire {
+            Some(id) => instructions::write::Mode::Retire(*id),
+            None => instructions::write::Mode::Store(instructions::write::Args {
+                topic: topic.clone(),
+                text: text.clone().unwrap_or_default(),
+                keywords: keywords.clone(),
+                source: source.clone(),
+                model: model.clone(),
+                project: project.clone(),
+                file_reference: file_reference.clone(),
+                force: *force,
+                replaces: *replaces,
+            }),
+        }
+    }
+
+    /// The one lookup an `instructions` invocation names. clap's `lookup`
+    /// group admits exactly one.
+    fn lookup(&self) -> instructions::Lookup {
+        let Command::Instructions {
+            query,
+            get,
+            list: _,
+            k,
+            project,
+        } = self
+        else {
+            unreachable!("lookup is only called for instructions")
+        };
+        if let Some(query) = query {
+            instructions::Lookup::Search {
+                query: query.clone(),
+                k: k.unwrap_or(instructions::DEFAULT_K),
+                project: project.clone(),
+            }
+        } else if let Some(key) = get {
+            instructions::Lookup::Get(key.clone())
+        } else {
+            instructions::Lookup::List
+        }
+    }
+
     /// The one mode a `sleep` invocation names. clap's `mode` group admits
     /// exactly one, so the order here decides nothing.
     fn sleep_mode(&self) -> sleep::Mode {
@@ -731,6 +893,8 @@ mod tests {
             "status",
             "recall",
             "remember",
+            "instruct",
+            "instructions",
             "embed",
             "coworkers",
             "sleep",
@@ -760,6 +924,8 @@ mod tests {
         match name {
             "recall" => args.push("anything"),
             "remember" => args.extend(["--table", "semantic", "--text", "a memory"]),
+            "instruct" => args.extend(["--topic", "deploy", "--text", "run the checklist"]),
+            "instructions" => args.push("--list"),
             "embed" => args.push("--missing"),
             "restore" => args.extend(["--out", "/nonexistent/restored.db"]),
             "sleep" => args.push("--staleness"),
@@ -857,6 +1023,25 @@ mod tests {
                 supersedes: None,
                 coworker: None,
             },
+            Command::Instruct {
+                topic: None,
+                text: None,
+                keywords: None,
+                source: None,
+                model: None,
+                project: None,
+                file_reference: None,
+                force: false,
+                replaces: None,
+                retire: None,
+            },
+            Command::Instructions {
+                query: None,
+                get: None,
+                list: true,
+                k: None,
+                project: None,
+            },
             Command::Embed {
                 missing: true,
                 table: EmbedTable::All,
@@ -907,6 +1092,8 @@ mod tests {
                 Command::Status
                     | Command::Recall { .. }
                     | Command::Remember { .. }
+                    | Command::Instruct { .. }
+                    | Command::Instructions { .. }
                     | Command::Embed { .. }
                     | Command::Sleep { .. }
                     | Command::Backup
@@ -1045,6 +1232,170 @@ mod tests {
                 Ok(cli) => panic!("{why}: {full:?} parsed as {:?}", cli.command),
             }
         }
+    }
+
+    fn parsed(args: &[&str]) -> Command {
+        Cli::try_parse_from(args)
+            .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+            .command
+    }
+
+    #[test]
+    fn instruct_and_instructions_parse_into_what_they_ask_for() {
+        use instructions::write::{Args, Mode};
+        let store = |extra: &[&str]| {
+            let mut args = vec!["sm", "instruct", "--topic", "deploy", "--text", "run it"];
+            args.extend(extra);
+            parsed(&args).instruct_mode()
+        };
+        let plain = Args {
+            topic: Some("deploy".into()),
+            text: "run it".into(),
+            ..Args::default()
+        };
+        assert_eq!(store(&[]), Mode::Store(plain.clone()));
+        assert_eq!(
+            store(&[
+                "--keywords",
+                "k",
+                "--source",
+                "s",
+                "--model",
+                "m",
+                "--project",
+                "p",
+                "--file-reference",
+                "f",
+                "--force",
+                "--replaces",
+                "4",
+            ]),
+            Mode::Store(Args {
+                keywords: Some("k".into()),
+                source: Some("s".into()),
+                model: Some("m".into()),
+                project: Some("p".into()),
+                file_reference: Some("f".into()),
+                force: true,
+                replaces: Some(4),
+                ..plain
+            })
+        );
+        assert_eq!(
+            parsed(&["sm", "instruct", "--retire", "3"]).instruct_mode(),
+            Mode::Retire(3)
+        );
+
+        use instructions::Lookup;
+        let lookup = |args: &[&str]| {
+            let mut full = vec!["sm", "instructions"];
+            full.extend(args);
+            parsed(&full).lookup()
+        };
+        assert_eq!(
+            lookup(&["release notes"]),
+            Lookup::Search {
+                query: "release notes".into(),
+                k: instructions::DEFAULT_K,
+                project: None
+            }
+        );
+        assert_eq!(
+            lookup(&["release notes", "--k", "3", "--project", "p1"]),
+            Lookup::Search {
+                query: "release notes".into(),
+                k: 3,
+                project: Some("p1".into())
+            }
+        );
+        assert_eq!(lookup(&["--get", "deploy"]), Lookup::Get("deploy".into()));
+        assert_eq!(lookup(&["--list"]), Lookup::List);
+    }
+
+    /// Every malformed `instruct` or `instructions` is a usage error. Parsed
+    /// only, never run: a case that got past clap must not reach the real
+    /// environment's database.
+    #[test]
+    fn malformed_instruct_and_instructions_invocations_are_usage_errors() {
+        for (args, why) in [
+            (vec!["instruct"], "nothing to do"),
+            (vec!["instruct", "--topic", "t"], "no text"),
+            (vec!["instruct", "--text", "x"], "no topic"),
+            (
+                vec!["instruct", "--retire", "3", "--topic", "t"],
+                "a retirement stores nothing",
+            ),
+            (
+                vec!["instruct", "--retire", "3", "--text", "x"],
+                "a retirement stores nothing",
+            ),
+            (
+                vec!["instruct", "--retire", "3", "--replaces", "4"],
+                "one or the other",
+            ),
+            (
+                vec!["instruct", "--retire", "3", "--force"],
+                "nothing to force",
+            ),
+            (
+                vec!["instruct", "--retire", "3", "--keywords", "k"],
+                "nothing to tag",
+            ),
+            (vec!["instruct", "--retire", "x"], "not an id"),
+            (
+                vec!["instruct", "--topic", "t", "--text", "x", "--replaces", "x"],
+                "not an id",
+            ),
+            (
+                vec![
+                    "instruct", "--topic", "t", "--text", "x", "--table", "semantic",
+                ],
+                "unknown flag",
+            ),
+            (vec!["instructions"], "no lookup"),
+            (vec!["instructions", "q", "--list"], "two lookups"),
+            (vec!["instructions", "--get", "x", "--list"], "two lookups"),
+            (vec!["instructions", "q", "--get", "x"], "two lookups"),
+            (
+                vec!["instructions", "--list", "--k", "3"],
+                "--k belongs to a search",
+            ),
+            (
+                vec!["instructions", "--get", "x", "--project", "p"],
+                "--project belongs to a search",
+            ),
+            (
+                vec!["instructions", "q", "--k", "0"],
+                "zero hits asks for nothing",
+            ),
+            (
+                vec!["instructions", "--list", "--frobnicate"],
+                "unknown flag",
+            ),
+        ] {
+            let mut full = vec!["sm"];
+            full.extend(args);
+            match Cli::try_parse_from(&full) {
+                Err(e) => assert!(e.use_stderr(), "{why}: {full:?}"),
+                Ok(cli) => panic!("{why}: {full:?} parsed as {:?}", cli.command),
+            }
+        }
+    }
+
+    /// `embed --table all` covers every table that stores an embedding.
+    #[test]
+    fn embed_all_covers_every_table_with_an_embedding() {
+        assert_eq!(EmbedTable::All.tables(), store::Table::EMBEDDED.to_vec());
+        assert_eq!(
+            EmbedTable::Instructions.tables(),
+            vec![store::Table::Instructions]
+        );
+        let Command::Embed { table, .. } =
+            parsed(&["sm", "embed", "--missing", "--table", "instructions"])
+        else {
+            panic!("not embed")
+        };
+        assert_eq!(table, EmbedTable::Instructions);
     }
 
     fn code(args: &[&str]) -> u8 {

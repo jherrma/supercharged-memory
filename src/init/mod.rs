@@ -1190,14 +1190,17 @@ mod tests {
             db_path: f.default_db(),
             ..cfg.clone()
         };
-        // The embedded schema predates the instructions table, so the first
-        // migration is still pending on a fresh database and status says so.
+        // The embedded schema carries every migration, the instructions table
+        // included, so nothing is pending on a fresh database.
         assert_eq!(
             crate::status::report(&db_cfg, &Fake::up()),
-            vec![
-                "EMPTY".to_string(),
-                "schema: 1 migration(s) pending (instructions) — run update".to_string(),
-            ]
+            vec!["EMPTY".to_string()]
+        );
+        assert!(
+            TursoStore::open(&db_cfg)
+                .unwrap()
+                .has_table(crate::store::Table::Instructions)
+                .unwrap()
         );
 
         // The .env: the four keys.

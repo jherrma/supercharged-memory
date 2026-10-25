@@ -69,10 +69,12 @@ pub fn run(cfg: &Config, args: &Args) -> Result<()> {
         return Ok(());
     }
     if args.baseline {
-        return baseline(&store);
+        print!("{}", baseline(&store)?);
+        return Ok(());
     }
     if args.topics {
-        return topics(&store);
+        print!("{}", topics(&store)?);
+        return Ok(());
     }
     let out = search(
         cfg,
@@ -85,41 +87,50 @@ pub fn run(cfg: &Config, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn baseline(store: &impl Store) -> Result<()> {
+/// `--baseline`, as printed.
+pub(crate) fn baseline(store: &impl Store) -> Result<String> {
     let rs = store.baseline()?;
     let n = rs.rows.len();
-    println!(
-        "===== baseline (load every session, follow for the whole session; {n} rule(s)) ====="
+    let mut out = format!(
+        "===== baseline (load every session, follow for the whole session; {n} rule(s)) =====\n"
     );
     if n == 0 {
         // An empty result and a database still being written look identical, so
         // never let this pass as "there are no rules". A session that silently
         // starts without them drops every always-apply rule the user has.
-        println!("WARNING: zero baseline rules loaded, which is NOT proof that none exist.");
-        println!("A migration or restore still in progress, or the wrong DB path, looks the same.");
-        println!("Say so to the user, then check `supercharged-memory status` and `--candidates`");
-        println!("and re-run this before continuing without baseline rules.");
-        return Ok(());
+        out.push_str("WARNING: zero baseline rules loaded, which is NOT proof that none exist.\n");
+        out.push_str(
+            "A migration or restore still in progress, or the wrong DB path, looks the same.\n",
+        );
+        out.push_str(
+            "Say so to the user, then check `supercharged-memory status` and `--candidates`\n",
+        );
+        out.push_str("and re-run this before continuing without baseline rules.\n");
+        return Ok(out);
     }
-    // println!, not print!: the Python implementation printed the rendered
-    // block with print(), which appends a newline of its own. Runbooks quote
-    // the result, so the trailing blank line is part of the format.
-    println!("{}", render::line(&rs));
-    Ok(())
+    // A newline after the rendered block: the Python implementation printed it
+    // with print(), which appends one of its own. Runbooks quote the result, so
+    // the trailing blank line is part of the format.
+    out.push_str(&render::line(&rs));
+    out.push('\n');
+    Ok(out)
 }
 
-fn topics(store: &impl Store) -> Result<()> {
+/// `--topics`, as printed.
+pub(crate) fn topics(store: &impl Store) -> Result<String> {
     let rs = store.topics()?;
     let n = rs.rows.len() as u64;
-    println!("===== topic index (load every session; {n} topic(s); rebuilt by sleep) =====");
-    println!("{}", render::line(&rs));
+    let mut out =
+        format!("===== topic index (load every session; {n} topic(s); rebuilt by sleep) =====\n");
+    out.push_str(&render::line(&rs));
+    out.push('\n');
     if n > TOPIC_WARN_AT {
-        println!(
+        out.push_str(&format!(
             "NOTE: {n} topics is a lot to hold in context every session — \
-             consider consolidating harder next sleep (merge overlapping topics)."
-        );
+             consider consolidating harder next sleep (merge overlapping topics).\n"
+        ));
     }
-    Ok(())
+    Ok(out)
 }
 
 fn list_candidates(cfg: &Config) -> Result<()> {
@@ -166,7 +177,40 @@ pub(crate) fn search(
         },
         None => None,
     };
+    let within = Within {
+        project: args.project.clone(),
+        coworker,
+        k: args.k,
+    };
+    Ok(search_in(cfg, store, embedder, &args.table.tables(), &within, query)?.text)
+}
 
+/// What a search is narrowed to, whichever tables it covers.
+#[derive(Debug, Clone)]
+pub(crate) struct Within {
+    pub project: Option<String>,
+    pub coworker: Option<i64>,
+    /// Hits per table.
+    pub k: u32,
+}
+
+/// A search as printed, and how many rows it listed.
+pub(crate) struct Searched {
+    pub text: String,
+    pub hits: usize,
+}
+
+/// The ranked search over each of `tables`, as printed: one section per table,
+/// plus one for its rows without an embedding. `instructions` ranks through
+/// this same code, so the two searches cannot drift apart.
+pub(crate) fn search_in(
+    cfg: &Config,
+    store: &impl Store,
+    embedder: &dyn Embedder,
+    tables: &[Table],
+    within: &Within,
+    query: &str,
+) -> Result<Searched> {
     let cands = rank::candidate_tokens(query);
     let patterns: Vec<String> = cands.iter().map(|t| rank::like_pattern(t)).collect();
 
@@ -186,18 +230,24 @@ pub(crate) fn search(
             tokens: &tokens,
             total: rank::kw_total(&tokens),
             alpha: cfg.recall_alpha,
-            limit: args.k,
+            limit: within.k,
             vector,
         };
         store.search(rows, &q)
     };
 
     let mut out = String::new();
-    for table in args.table.tables() {
+    let mut hits = 0;
+    let mut section = |out: &mut String, rs: ResultSet| {
+        hits += rs.rows.len();
+        out.push_str(&render::line(&rs));
+        out.push('\n');
+    };
+    for &table in tables {
         let scope = |embedded| Scope {
             table,
-            project: args.project.clone(),
-            coworker,
+            project: within.project.clone(),
+            coworker: within.coworker,
             embedded,
         };
         let (all, with, without) = (
@@ -211,13 +261,12 @@ pub(crate) fn search(
                     "===== {} (top {}; score = dist - {}*kw, lower is better; \
                      kw = IDF-weighted keyword share 0..1) =====\n",
                     table.as_str(),
-                    args.k,
+                    within.k,
                     cfg.recall_alpha
                 ));
                 // The embedded rows alone, IDF included, so rows without a
                 // vector leave this ranking exactly as it would be without them.
-                out.push_str(&render::line(&ranked(&with, &with, Some(vector))?));
-                out.push('\n');
+                section(&mut out, ranked(&with, &with, Some(vector))?);
 
                 // Rows a vector search cannot see get a keyword-only section of
                 // their own, so a write made without Ollama is not lost to
@@ -231,8 +280,7 @@ pub(crate) fn search(
                     // Weighted as keyword-only mode weighs them, over every row
                     // in scope: over the unembedded rows alone, a word they all
                     // share would weigh ln(1) = 0 and hide a lone row.
-                    out.push_str(&render::line(&ranked(&all, &without, None)?));
-                    out.push('\n');
+                    section(&mut out, ranked(&all, &without, None)?);
                 }
             }
             Err(why) => {
@@ -240,14 +288,13 @@ pub(crate) fn search(
                     "===== {} ({} — keyword-only, top {}) =====\n",
                     table.as_str(),
                     why.label(),
-                    args.k
+                    within.k
                 ));
-                out.push_str(&render::line(&ranked(&all, &all, None)?));
-                out.push('\n');
+                section(&mut out, ranked(&all, &all, None)?);
             }
         }
     }
-    Ok(out)
+    Ok(Searched { text: out, hits })
 }
 
 #[cfg(test)]

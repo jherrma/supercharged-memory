@@ -22,11 +22,6 @@ use crate::{render, status};
 /// Rows per transaction when `--batch` is not given.
 pub const DEFAULT_BATCH: u32 = 50;
 
-/// Every table that stores an embedding. The one-model check covers all of
-/// them whatever `--table` says: another model in any one of them already
-/// mixes the database's vector space.
-const EMBEDDED_TABLES: [Table; 2] = [Table::Semantic, Table::Episodic];
-
 #[derive(Debug, Clone)]
 pub struct Args {
     /// The tables to fill, in this order.
@@ -76,6 +71,9 @@ pub enum Switch {
 #[derive(Debug)]
 pub struct Report {
     pub tables: Vec<Counts>,
+    /// Asked-for tables this database does not have yet: the instructions
+    /// table, before `update` creates it.
+    pub missing: Vec<Table>,
     pub near: Vec<NearDuplicate>,
     pub switch: Switch,
     /// Why the command exits non-zero after printing the report: a row that
@@ -103,6 +101,12 @@ impl Report {
                 )
             })
             .collect();
+        for t in &self.missing {
+            out.push(format!(
+                "{}: not in this database yet — run update to create it",
+                t.as_str()
+            ));
+        }
         let below = render::format_real(DUP_DIST);
         if self.near.is_empty() {
             out.push(format!(
@@ -113,8 +117,14 @@ impl Report {
                 "near-duplicate candidates (cosine < {below}; listed only, the next sleep pass decides):"
             ));
             for n in &self.near {
+                // Instructions may legitimately repeat, and no sleep pass
+                // reads them: for them the pair is information only.
+                let aside = match n.table {
+                    Table::Instructions => "; informational — sleep never reads instructions",
+                    Table::Semantic | Table::Episodic => "",
+                };
                 out.push(format!(
-                    "  {} {} ~ {} (cosine {})",
+                    "  {} {} ~ {} (cosine {}{aside})",
                     n.table.as_str(),
                     n.id,
                     n.other,
@@ -168,13 +178,34 @@ pub fn fill(cfg: &Config, args: &Args, embedder: &dyn Embedder) -> Result<Report
             cfg.ollama_url, cfg.embed_model
         )));
     }
-    for table in EMBEDDED_TABLES {
+    // A database from before the instructions table lacks it until `update`
+    // creates it: the tables it has are filled, and the report says which
+    // are not there.
+    let mut present = Vec::new();
+    for table in Table::EMBEDDED {
+        if store.has_table(table)? {
+            present.push(table);
+        }
+    }
+    let (wanted, missing): (Vec<Table>, Vec<Table>) =
+        args.tables.iter().partition(|t| present.contains(t));
+    if wanted.is_empty() && !missing.is_empty() {
+        let names: Vec<&str> = missing.iter().map(Table::name).collect();
+        return Err(Error::refused(format!(
+            "this database has no {} table yet — run update to create it; nothing was changed",
+            names.join(", ")
+        )));
+    }
+    // The one-model check covers every table that stores an embedding,
+    // whatever `--table` says: another model in any one of them already mixes
+    // the database's vector space.
+    for &table in &present {
         if store.rows_with_other_embed_model(table, &cfg.embed_model)? > 0 {
             return Err(Error::refused(format!(
-                "{}_memory has rows embedded with a different model than '{}' — nothing was \
+                "{} has rows embedded with a different model than '{}' — nothing was \
                  changed. Filling in the rest with it would mix vector spaces, and cosine \
                  across two is meaningless: re-embed the DB (rebuild) before switching models.",
-                table.as_str(),
+                table.name(),
                 cfg.embed_model
             )));
         }
@@ -184,7 +215,7 @@ pub fn fill(cfg: &Config, args: &Args, embedder: &dyn Embedder) -> Result<Report
     let mut tables = Vec::new();
     let mut near: Vec<NearDuplicate> = Vec::new();
     let mut stopped = None;
-    for &table in &args.tables {
+    for &table in &wanted {
         let mut counts = Counts {
             table,
             embedded: 0,
@@ -242,10 +273,10 @@ pub fn fill(cfg: &Config, args: &Args, embedder: &dyn Embedder) -> Result<Report
                 counts.failed.len() - failed_before
             );
 
-            // Semantic rows only: episodic events recur legitimately.
-            if table == Table::Semantic {
+            // Not episodic rows: events recur legitimately.
+            if table != Table::Episodic {
                 for (id, v) in vectors.iter().filter(|(id, _)| written.contains(id)) {
-                    for (other, dist) in store.semantic_within(*id, v, DUP_DIST)? {
+                    for (other, dist) in store.within(table, *id, v, DUP_DIST)? {
                         // A pair this run filled in both halves of is listed
                         // once, under the later id, whatever the batching.
                         if other > *id && filled.contains(&other) {
@@ -325,6 +356,7 @@ pub fn fill(cfg: &Config, args: &Args, embedder: &dyn Embedder) -> Result<Report
 
     Ok(Report {
         tables,
+        missing,
         near,
         switch,
         failure,
@@ -374,8 +406,8 @@ mod tests {
         rows(
             cfg,
             &format!(
-                "SELECT id FROM {}_memory WHERE embedding IS NULL ORDER BY id;",
-                table.as_str()
+                "SELECT id FROM {} WHERE embedding IS NULL ORDER BY id;",
+                table.name()
             ),
         )
         .into_iter()
@@ -925,7 +957,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             report.switch,
-            Switch::StaysOff(env.clone(), vec![("semantic", 1), ("episodic", 0)])
+            Switch::StaysOff(
+                env.clone(),
+                vec![("semantic", 1), ("episodic", 0), ("instructions", 0)]
+            )
         );
         assert_eq!(fs::read_to_string(&env).unwrap(), "EMBEDDINGS=off\n");
     }
@@ -940,7 +975,10 @@ mod tests {
         let report = fill(&cfg, &args(&[Table::Semantic], None, 10), &Fake::up()).unwrap();
         assert_eq!(
             report.switch,
-            Switch::StaysOff(env.clone(), vec![("semantic", 0), ("episodic", 1)])
+            Switch::StaysOff(
+                env.clone(),
+                vec![("semantic", 0), ("episodic", 1), ("instructions", 0)]
+            )
         );
         assert_eq!(fs::read_to_string(&env).unwrap(), "EMBEDDINGS=off\n");
     }
@@ -1003,11 +1041,145 @@ mod tests {
         assert!(warning.contains("environment"), "{warning}");
     }
 
+    // ---- instructions --------------------------------------------------------
+
+    /// `--table instructions`: the active instructions, and nothing else.
+    #[test]
+    fn table_instructions_fills_the_active_instructions_only() {
+        let cfg = scratch("embed-instructions");
+        let s = put(&cfg, Table::Semantic, "blind fact", false);
+        let i = put(&cfg, Table::Instructions, "blind directive", false);
+        let gone = put(&cfg, Table::Instructions, "retired directive", false);
+        rows(
+            &cfg,
+            &format!("UPDATE instructions SET retired_at = '2026-01-02' WHERE id = {gone};"),
+        );
+        let report = fill(&cfg, &args(&[Table::Instructions], None, 10), &Fake::up()).unwrap();
+        assert_eq!(
+            report.tables,
+            vec![counts(Table::Instructions, 1, vec![], 0, 0)]
+        );
+        assert_eq!(null_ids(&cfg, Table::Instructions), vec![gone]);
+        assert_eq!(null_ids(&cfg, Table::Semantic), vec![s]);
+        assert!(
+            distance(
+                &cfg,
+                Table::Instructions,
+                i,
+                &Fake::vector("blind directive")
+            ) < 1e-6
+        );
+    }
+
+    /// Another model in the instructions mixes the database's vector space as
+    /// much as one in a memory table.
+    #[test]
+    fn another_model_in_the_instructions_refuses_the_run() {
+        let cfg = scratch("embed-instructions-model");
+        put(&cfg, Table::Semantic, "blind", false);
+        let i = put(&cfg, Table::Instructions, "embedded directive", true);
+        set_vector(
+            &cfg,
+            Table::Instructions,
+            i,
+            &Fake::vector("x"),
+            "nomic-embed-text",
+        );
+        let before = dump(&cfg);
+        let msg = refused(fill(&cfg, &args(&[Table::Semantic], None, 10), &Fake::up()));
+        assert!(msg.contains("instructions has rows embedded"), "{msg}");
+        assert_eq!(dump(&cfg), before);
+    }
+
+    /// Instructions may legitimately repeat and sleep never reads them, so a
+    /// close pair is listed for information only.
+    #[test]
+    fn a_near_duplicate_instruction_is_listed_as_informational() {
+        let cfg = scratch("embed-instructions-near");
+        let old = put(&cfg, Table::Instructions, "bullet points", true);
+        let twin = put(&cfg, Table::Instructions, "bullet points", false);
+        put(&cfg, Table::Semantic, "bullet points", true);
+        let report = fill(&cfg, &args(&[Table::Instructions], None, 10), &Fake::up()).unwrap();
+        let pairs: Vec<(Table, i64, i64)> = report
+            .near
+            .iter()
+            .map(|n| (n.table, n.id, n.other))
+            .collect();
+        assert_eq!(pairs, vec![(Table::Instructions, twin, old)]);
+        let lines = report.lines();
+        assert!(
+            lines.contains(&format!(
+                "  instructions {twin} ~ {old} (cosine 0.0; informational — sleep never reads \
+                 instructions)"
+            )),
+            "{lines:?}"
+        );
+    }
+
+    /// A database from before the instructions table: `all` fills the memory
+    /// tables and says the instructions table is not there yet; asking for the
+    /// instructions alone is refused.
+    #[test]
+    fn a_database_from_before_the_instructions_table_skips_it_and_says_so() {
+        let cfg = scratch("embed-no-instructions");
+        crate::store::turso::dump::tests::batch(
+            &cfg,
+            "DROP INDEX IF EXISTS idx_instr_retired; DROP TABLE IF EXISTS instructions;",
+        );
+        put(&cfg, Table::Semantic, "blind", false);
+        let before = dump(&cfg);
+        let msg = refused(fill(
+            &cfg,
+            &args(&[Table::Instructions], None, 10),
+            &Fake::up(),
+        ));
+        assert!(msg.contains("run update"), "{msg}");
+        assert_eq!(dump(&cfg), before);
+
+        let report = fill(&cfg, &args(&Table::EMBEDDED, None, 10), &Fake::up()).unwrap();
+        assert_eq!(report.missing, vec![Table::Instructions]);
+        assert_eq!(
+            report.tables,
+            vec![
+                counts(Table::Semantic, 1, vec![], 0, 0),
+                counts(Table::Episodic, 0, vec![], 0, 0),
+            ]
+        );
+        assert!(
+            report.lines().contains(
+                &"instructions: not in this database yet — run update to create it".to_string()
+            ),
+            "{:?}",
+            report.lines()
+        );
+    }
+
+    /// EMBEDDINGS goes back on only when no active row of ANY table lacks a
+    /// vector, the instructions included.
+    #[test]
+    fn an_unembedded_instruction_keeps_embeddings_off() {
+        let mut cfg = scratch("embed-switch-instructions");
+        let env = with_dotenv(&mut cfg, "EMBEDDINGS=off\n");
+        put(&cfg, Table::Semantic, "blind fact", false);
+        put(&cfg, Table::Instructions, "blind directive", false);
+        let report = fill(&cfg, &all(10), &Fake::up()).unwrap();
+        assert_eq!(
+            report.switch,
+            Switch::StaysOff(
+                env.clone(),
+                vec![("semantic", 0), ("episodic", 0), ("instructions", 1)]
+            )
+        );
+        let report = fill(&cfg, &args(&[Table::Instructions], None, 10), &Fake::up()).unwrap();
+        assert_eq!(report.switch, Switch::On(env));
+    }
+
     // ---- the summary ---------------------------------------------------------
 
     #[test]
     fn the_summary_names_every_count_the_near_duplicates_and_the_switch() {
         let report = Report {
+            missing: Vec::new(),
             tables: vec![
                 counts(Table::Semantic, 3, vec![7], 1, 1),
                 counts(Table::Episodic, 2, vec![], 0, 0),
@@ -1038,6 +1210,7 @@ mod tests {
     #[test]
     fn the_summary_says_none_and_why_embeddings_stays_off() {
         let report = Report {
+            missing: Vec::new(),
             tables: vec![counts(Table::Semantic, 1, vec![], 0, 1)],
             near: vec![],
             switch: Switch::StaysOff(

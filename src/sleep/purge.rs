@@ -261,6 +261,30 @@ mod tests {
         assert!(!cfg.db_path.exists());
     }
 
+    /// Purge's scope is semantic rows: a retired instruction's id is as
+    /// unknown to it as any other, and the instruction is left in place.
+    #[test]
+    fn an_instruction_id_is_unknown_to_purge() {
+        let cfg = scratch("purge-instruction");
+        corpus(&cfg);
+        let ids: Vec<i64> = (0..6)
+            .map(|i| put(&cfg, Table::Instructions, &format!("directive {i}"), false))
+            .collect();
+        let gone = ids[5];
+        rows(
+            &cfg,
+            &format!("UPDATE instructions SET retired_at = '2026-02-02' WHERE id = {gone};"),
+        );
+        backup(&cfg);
+        let msg = refusal(run(&cfg, &gone.to_string(), true));
+        assert_eq!(msg, format!("refused: no semantic row with id {gone}."));
+        assert_eq!(
+            rows(&cfg, "SELECT count(*) FROM instructions;"),
+            vec![vec![Cell::Int(6)]]
+        );
+        assert_eq!(semantic_ids(&cfg).len(), 4);
+    }
+
     #[test]
     fn without_a_backup_it_is_refused() {
         let cfg = scratch("purge-no-backup");

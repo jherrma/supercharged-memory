@@ -94,12 +94,29 @@ pub fn lines(
     out
 }
 
-/// Active rows without an embedding, per table: current semantic rows and every
-/// episodic row -- the rows recall can return, and so the ones worth embedding.
+/// Active rows without an embedding, per table that stores one: current
+/// semantic rows, every episodic row and current instructions -- the rows
+/// search can return, and so the ones worth embedding. A database from before
+/// the instructions table is counted on the tables it has; the schema line
+/// says what is missing.
 pub(crate) fn unembedded(store: &impl Store) -> Result<Vec<(&'static str, u64)>> {
-    [Table::Semantic, Table::Episodic]
-        .into_iter()
-        .map(|table| {
+    let mut tables = Vec::new();
+    for table in Table::EMBEDDED {
+        if store.has_table(table)? {
+            tables.push(table);
+        }
+    }
+    unembedded_in(store, &tables)
+}
+
+/// Active rows without an embedding in each of `tables`.
+pub(crate) fn unembedded_in(
+    store: &impl Store,
+    tables: &[Table],
+) -> Result<Vec<(&'static str, u64)>> {
+    tables
+        .iter()
+        .map(|&table| {
             let scope = Scope {
                 table,
                 project: None,
@@ -164,7 +181,7 @@ mod tests {
     use super::*;
     use crate::embed::fake::Fake;
     use crate::store::turso::dump::tests::batch;
-    use crate::store::turso::tests::{put, rows, scratch};
+    use crate::store::turso::tests::{put, retire_row, rows, scratch};
 
     const UP: std::result::Result<(), Unavailable> = Ok(());
 
@@ -289,11 +306,12 @@ mod tests {
     }
 
     /// Counted against the real tables: only ACTIVE rows lacking a vector count,
-    /// because a superseded row is never recalled and need not be embedded.
+    /// because a superseded or retired row is never recalled and need not be
+    /// embedded. Instructions are counted with the memories -- search needs
+    /// their vectors too -- but `READY n` counts memories alone.
     #[test]
     fn status_counts_active_unembedded_rows_per_table() {
         let cfg = scratch("status-unembedded");
-        batch(&cfg, include_str!("../migrations/0.1.0/instructions.sql"));
         put(&cfg, Table::Semantic, "embedded", true);
         let old = put(&cfg, Table::Semantic, "blind and superseded", false);
         put(&cfg, Table::Semantic, "blind one", false);
@@ -303,39 +321,52 @@ mod tests {
             &cfg,
             &format!("UPDATE semantic_memory SET superseded_by = 1 WHERE id = {old};"),
         );
+        put(&cfg, Table::Instructions, "blind instruction", false);
+        put(&cfg, Table::Instructions, "embedded instruction", true);
+        let gone = put(&cfg, Table::Instructions, "blind and retired", false);
+        retire_row(&cfg, Table::Instructions, gone);
 
         let out = report(&cfg, &Fake::up());
         assert_eq!(
             out,
             vec![
                 "READY 5".to_string(),
-                "unembedded: semantic 2, episodic 1 — run embed --missing".to_string(),
+                "unembedded: semantic 2, episodic 1, instructions 1 — run embed --missing"
+                    .to_string(),
             ]
         );
     }
 
     /// A database from before the instructions table, the state `update` would
-    /// migrate: status names it so the agent knows to run `update`.
+    /// migrate: status names it so the agent knows to run `update`, and counts
+    /// the tables the database has.
     #[test]
     fn a_schema_behind_the_binary_gets_a_schema_line() {
         let cfg = scratch("status-schema-behind");
         put(&cfg, Table::Semantic, "a fact", true);
-        batch(&cfg, "DROP TABLE IF EXISTS instructions;");
+        put(&cfg, Table::Semantic, "a blind fact", false);
+        batch(
+            &cfg,
+            "DROP INDEX IF EXISTS idx_instr_retired; DROP TABLE IF EXISTS instructions;",
+        );
 
         let out = report(&cfg, &Fake::up());
-        assert_eq!(out[0], "READY 1", "{out:?}");
         assert_eq!(
-            out.last().map(String::as_str),
-            Some("schema: 1 migration(s) pending (instructions) — run update"),
-            "{out:?}"
+            out,
+            vec![
+                "READY 2".to_string(),
+                "unembedded: semantic 1, episodic 0 — run embed --missing".to_string(),
+                "schema: 1 migration(s) pending (instructions) — run update".to_string(),
+            ]
         );
     }
 
+    /// The embedded schema carries every migration, so a database created
+    /// from it has nothing pending.
     #[test]
-    fn a_current_schema_gets_no_schema_line() {
+    fn a_fresh_schema_gets_no_schema_line() {
         let cfg = scratch("status-schema-current");
         put(&cfg, Table::Semantic, "a fact", true);
-        batch(&cfg, include_str!("../migrations/0.1.0/instructions.sql"));
 
         let out = report(&cfg, &Fake::up());
         assert!(!out.iter().any(|l| l.starts_with("schema:")), "{out:?}");

@@ -306,6 +306,41 @@ mod tests {
         }
     }
 
+    /// The embedded schema is today's: a database created from it already holds
+    /// every migration, and its instructions table is the very one the
+    /// migration gives a database from before it -- same columns, same CHECKs,
+    /// same index.
+    #[test]
+    fn a_fresh_database_holds_every_migration_and_the_same_instructions_table() {
+        let fresh = scratch("migrations-fresh");
+        let store = TursoStore::open(&fresh).unwrap();
+        for m in MIGRATIONS {
+            assert!(store.holds(m.probe.query).unwrap(), "{}", m.id);
+        }
+
+        let migrated = scratch("migrations-migrated");
+        crate::store::turso::dump::tests::batch(
+            &migrated,
+            "DROP INDEX IF EXISTS idx_instr_retired; DROP TABLE IF EXISTS instructions;",
+        );
+        let old = TursoStore::open(&migrated).unwrap();
+        for m in MIGRATIONS {
+            let stmts = statements(m.sql).unwrap();
+            old.migrate(m.probe.query, &stmts).unwrap();
+        }
+
+        let shape = |cfg| {
+            crate::store::turso::tests::rows(
+                cfg,
+                "SELECT type, name, sql FROM sqlite_schema WHERE tbl_name = 'instructions' \
+                 ORDER BY type, name;",
+            )
+        };
+        let want = shape(&migrated);
+        assert_eq!(want.len(), 2, "the table and its index: {want:?}");
+        assert_eq!(shape(&fresh), want);
+    }
+
     // ---- a note's shape ----------------------------------------------------
 
     #[test]
