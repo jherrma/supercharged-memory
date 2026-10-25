@@ -44,7 +44,8 @@ onto the binary:
      BACKUP_DIR and RECALL_ALPHA from the \"env\" block of ~/.claude/settings.json: real
      environment variables override the .env on every run. `config` must then show
      every value coming from the .env.
-  4. Run `update` and replace this block with the text it prints.
+  4. Run `update` and relay it; once the user agrees, replace this block, from its BEGIN
+     line through its END line, with what `update --print-block` prints.
   5. Point the scheduled backup job at `<this binary> backup`.";
 
 /// The first line inside a block `init` wrote: which binary version rendered it.

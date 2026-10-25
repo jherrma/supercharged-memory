@@ -13,7 +13,7 @@ use crate::config::{self, Config, ConfigError, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
-use crate::{backup, embed, find_existing, init, recall, restore, status, version};
+use crate::{backup, embed, find_existing, init, recall, restore, status, update, version};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -340,6 +340,32 @@ pub enum Command {
         yes: bool,
     },
 
+    /// After the binary was replaced: the notes, schema migrations and CLAUDE.md changes since.
+    ///
+    /// A dry run unless -y: compares the version the .env records with this
+    /// binary's, prints every migration note in between, the schema migrations
+    /// the database lacks (asked of the database itself, never read from the
+    /// .env) and what to change in CLAUDE.md, ending `Ask the user to confirm`.
+    /// -y backs up the database before the first migration, applies each in a
+    /// transaction of its own, and records the version only once all succeeded.
+    /// Never writes CLAUDE.md. Refuses a downgrade.
+    Update {
+        /// Apply: back up, migrate, record this binary's version in the .env.
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+
+        /// Print the managed block this binary would write, and nothing else:
+        /// what replaces the text between CLAUDE.md's markers.
+        #[arg(long = "print-block", conflicts_with = "yes")]
+        print_block: bool,
+
+        /// The episodic mode to render with, when the block's own policy line
+        /// cannot be read: every-prompt, major-actions, major-events or manual.
+        /// Ask the user; never assume one.
+        #[arg(long = "episodic-mode", value_name = "MODE")]
+        episodic_mode: Option<String>,
+    },
+
     /// Recall-quality harness: validate the eval set, report metrics, sweep RECALL_ALPHA.
     ///
     /// Deep sleep D6 runs this, and it is how the ranking is proven
@@ -371,6 +397,7 @@ impl Command {
             Command::Backup => "backup",
             Command::FindExistingMemory { .. } => "find-existing-memory",
             Command::Init { .. } => "init",
+            Command::Update { .. } => "update",
             Command::Eval => "eval",
             Command::Config => "config",
         }
@@ -479,6 +506,18 @@ impl Command {
                     yes: *yes,
                 },
             ),
+            Command::Update {
+                yes,
+                print_block,
+                episodic_mode,
+            } => update::run(
+                cfg,
+                &update::Args {
+                    yes: *yes,
+                    print_block: *print_block,
+                    episodic_mode: episodic_mode.clone(),
+                },
+            ),
             _ => Err(Error::NotImplemented {
                 command: self.name(),
             }),
@@ -562,6 +601,7 @@ mod tests {
             "backup",
             "find-existing-memory",
             "init",
+            "update",
             "eval",
             "config",
         ] {
@@ -700,6 +740,11 @@ mod tests {
                 episodic_mode: None,
                 yes: false,
             },
+            Command::Update {
+                yes: false,
+                print_block: false,
+                episodic_mode: None,
+            },
             Command::Eval,
             Command::Config,
         ] {
@@ -714,6 +759,7 @@ mod tests {
                     | Command::Restore { .. }
                     | Command::FindExistingMemory { .. }
                     | Command::Init { .. }
+                    | Command::Update { .. }
                     | Command::Config
             ) {
                 assert!(matches!(cmd.run(&cfg), Err(Error::NotImplemented { .. })));
@@ -803,6 +849,18 @@ mod tests {
             code(&["sm", "restore", "--out", "/nonexistent/x.db", "--into", "y"]),
             EXIT_USAGE,
             "restore rejects unknown flags"
+        );
+        // Rejected by clap before anything runs. Never add an update here that
+        // gets past clap: these run against the real environment.
+        assert_eq!(
+            code(&["sm", "update", "--force"]),
+            EXIT_USAGE,
+            "update rejects unknown flags"
+        );
+        assert_eq!(
+            code(&["sm", "update", "--print-block", "-y"]),
+            EXIT_USAGE,
+            "printing the block applies nothing, so it does not combine with -y"
         );
         // Validated before anything is probed or read, so this touches nothing.
         assert_eq!(

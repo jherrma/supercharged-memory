@@ -19,6 +19,7 @@ mod render;
 mod restore;
 mod status;
 mod store;
+mod update;
 mod version;
 
 use std::process::ExitCode;

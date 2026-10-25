@@ -6,6 +6,7 @@
 //! typed error from a driver. None of that heuristic survives, deliberately.
 
 pub mod dump;
+pub mod migrate;
 pub mod restore;
 
 use std::io::Read;
