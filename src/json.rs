@@ -18,6 +18,9 @@ pub enum Json {
     Null,
     Bool(bool),
     Int(i64),
+    /// Printed the way Python's `repr` prints a float, which is what
+    /// `json.dumps` writes.
+    Float(f64),
     Str(String),
     Array(Vec<Json>),
     Object(Vec<(String, Json)>),
@@ -79,6 +82,7 @@ fn write_value(out: &mut String, value: &Json, level: usize) {
         Json::Int(n) => {
             let _ = write!(out, "{n}");
         }
+        Json::Float(x) => out.push_str(&python_float(*x)),
         Json::Str(s) => write_str(out, s),
         Json::Array(items) if items.is_empty() => out.push_str("[]"),
         Json::Object(pairs) if pairs.is_empty() => out.push_str("{}"),
@@ -100,6 +104,47 @@ fn write_value(out: &mut String, value: &Json, level: usize) {
             }
             close(out, level, '}');
         }
+    }
+}
+
+/// Python's `repr(float)`: the shortest digits that round-trip, positional
+/// from 1e-4 up to (not including) 1e16 and scientific outside it, with a
+/// `.0` on an integral value; `NaN` and `Infinity` as `json.dumps` spells them.
+pub fn python_float(x: f64) -> String {
+    if x.is_nan() {
+        return "NaN".into();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "Infinity" } else { "-Infinity" }.into();
+    }
+    // `{:e}` is Rust's shortest round-trip digits, e.g. `-2.2e-1`.
+    let sci = format!("{x:e}");
+    let (mantissa, exp) = sci.split_once('e').expect("{:e} has an exponent");
+    let exp: i32 = exp.parse().expect("the exponent is an integer");
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(m) => ("-", m),
+        None => ("", mantissa),
+    };
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    if !(-4..16).contains(&exp) {
+        let (first, rest) = digits.split_at(1);
+        let rest = if rest.is_empty() {
+            String::new()
+        } else {
+            format!(".{rest}")
+        };
+        let exp_sign = if exp < 0 { '-' } else { '+' };
+        return format!("{sign}{first}{rest}e{exp_sign}{:02}", exp.abs());
+    }
+    if exp < 0 {
+        let zeros = "0".repeat((-exp - 1) as usize);
+        return format!("{sign}0.{zeros}{digits}");
+    }
+    let point = exp as usize + 1;
+    if digits.len() <= point {
+        format!("{sign}{digits}{}.0", "0".repeat(point - digits.len()))
+    } else {
+        format!("{sign}{}.{}", &digits[..point], &digits[point..])
     }
 }
 
@@ -196,6 +241,45 @@ mod tests {
     fn keys_are_escaped_too_and_keep_their_order() {
         let v = Json::object([("z\"ü", Json::Int(1)), ("a", Json::Int(2))]);
         assert_eq!(dumps(&v), "{\n \"z\\\"\\u00fc\": 1,\n \"a\": 2\n}");
+    }
+
+    /// Every expectation is Python 3's `json.dumps` of the same float.
+    #[test]
+    fn floats_print_like_python_repr() {
+        for (x, want) in [
+            (0.22, "0.22"),
+            (0.25, "0.25"),
+            (0.15, "0.15"),
+            (1.0, "1.0"),
+            (2.0, "2.0"),
+            (100.0, "100.0"),
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (-2.5, "-2.5"),
+            (1234.5, "1234.5"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            (0.0001, "0.0001"),
+            (0.00012, "0.00012"),
+            (9.5e-5, "9.5e-05"),
+            (1e-5, "1e-05"),
+            (1.5e-7, "1.5e-07"),
+            (5e-324, "5e-324"),
+            (1e15, "1000000000000000.0"),
+            (9999999999999998.0, "9999999999999998.0"),
+            (123456789012345.6, "123456789012345.6"),
+            (1e16, "1e+16"),
+            (1e22, "1e+22"),
+            (f64::MAX, "1.7976931348623157e+308"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "Infinity"),
+            (f64::NEG_INFINITY, "-Infinity"),
+        ] {
+            assert_eq!(python_float(x), want, "{x:e}");
+        }
+        assert_eq!(
+            dumps(&Json::object([("threshold", Json::Float(0.22))])),
+            "{\n \"threshold\": 0.22\n}"
+        );
     }
 
     #[test]

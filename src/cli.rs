@@ -7,13 +7,13 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 
 use crate::config::{self, Config, ConfigError, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
-use crate::{backup, embed, find_existing, init, recall, restore, status, update, version};
+use crate::{backup, embed, find_existing, init, recall, restore, sleep, status, update, version};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -250,12 +250,101 @@ pub enum Command {
     /// sets active=0; it never deletes.
     Coworkers,
 
-    /// Consolidation primitives: mark-processed, retire, rebuild-topics, cluster, purge.
+    /// Sleep-pass primitives: mark-processed, retire, rebuild-topics, purge, and read-only reports.
     ///
-    /// Deliberately dumb -- judgment stays with the LLM driving SLEEP.md.
-    /// --purge is the only hard-delete path in the system and keeps all four
-    /// of its refusals.
-    Sleep,
+    /// Deliberately dumb -- judgment stays with the agent driving the sleep
+    /// runbooks. Exactly one mode per run. --purge is the only hard-delete path
+    /// in the system and refuses without --confirm-purge, without a backup
+    /// newer than the database, and for any row that is current, unknown or
+    /// still pointed at. The reports print JSON and never write. None of it
+    /// touches the instructions table.
+    #[command(
+        group(
+            ArgGroup::new("mode")
+                .required(true)
+                .args([
+                    "mark_processed",
+                    "retire",
+                    "rebuild_topics",
+                    "purge",
+                    "cluster",
+                    "verify_candidates",
+                    "contradiction_candidates",
+                    "staleness",
+                ])
+        ),
+        group(
+            ArgGroup::new("report")
+                .multiple(true)
+                .args(["cluster", "verify_candidates", "contradiction_candidates", "staleness"])
+        ),
+        group(
+            ArgGroup::new("vectors")
+                .multiple(true)
+                .args(["cluster", "contradiction_candidates"])
+        ),
+        // One-member groups, because clap counts a required ARGUMENT as
+        // satisfied when it conflicts with one that is present -- and every
+        // other mode conflicts with it through `mode`. A required GROUP gets no
+        // such exemption, so `--retire 1 --confirm-purge` is still an error.
+        group(ArgGroup::new("purging").args(["purge"])),
+        group(ArgGroup::new("listing").args(["verify_candidates"]))
+    )]
+    Sleep {
+        /// Stamp processed_at on these episodic rows, kept and discarded alike.
+        /// Refused whole if one id is not an episodic row.
+        #[arg(long = "mark-processed", value_name = "ID[,ID...]")]
+        mark_processed: Option<String>,
+
+        /// Soft-delete one current semantic memory: sets retired_at, never deletes.
+        #[arg(long, value_name = "ID")]
+        retire: Option<i64>,
+
+        /// Replace the topic index wholesale from a JSON array on stdin,
+        /// [{"topic": "...", "keywords": "..."}]: a full replace, never a merge.
+        /// Refused over 500 characters in total.
+        #[arg(long = "rebuild-topics")]
+        rebuild_topics: bool,
+
+        /// HARD-DELETE these superseded or retired semantic rows (deep sleep
+        /// only). Pass every id in ONE call: a purge is a write, so a second
+        /// call fails the backup check.
+        #[arg(long, value_name = "ID[,ID...]")]
+        purge: Option<String>,
+
+        /// The acknowledgement that --purge is irreversible.
+        #[arg(long = "confirm-purge", requires = "purging")]
+        confirm_purge: bool,
+
+        /// Print clusters of rows whose stored vectors lie within --threshold, as JSON.
+        #[arg(long)]
+        cluster: bool,
+
+        /// Print the active rows quoting a checkable artifact, oldest first, as JSON.
+        #[arg(long = "verify-candidates")]
+        verify_candidates: bool,
+
+        /// Print pairs of rows close enough to possibly contradict, as JSON.
+        #[arg(long = "contradiction-candidates")]
+        contradiction_candidates: bool,
+
+        /// Print the age profile of the active rows, and the unembedded count, as JSON.
+        #[arg(long)]
+        staleness: bool,
+
+        /// The table a report covers (default semantic).
+        #[arg(long, value_enum, requires = "report")]
+        table: Option<OneTable>,
+
+        /// Maximum cosine distance within a cluster, above 0 and at most 2.
+        /// Default 0.22 semantic / 0.25 episodic; 0.15 for contradictions.
+        #[arg(long, requires = "vectors", value_parser = sleep::cluster::parse_threshold)]
+        threshold: Option<f64>,
+
+        /// --verify-candidates: list at most this many (0 = all).
+        #[arg(long, requires = "listing")]
+        limit: Option<u32>,
+    },
 
     /// Bulk-import a directory of files, one memory per file.
     ///
@@ -390,7 +479,7 @@ impl Command {
             Command::Remember { .. } => "remember",
             Command::Embed { .. } => "embed",
             Command::Coworkers => "coworkers",
-            Command::Sleep => "sleep",
+            Command::Sleep { .. } => "sleep",
             Command::Backfill => "backfill",
             Command::Seed => "seed",
             Command::Restore { .. } => "restore",
@@ -482,6 +571,7 @@ impl Command {
                     batch: *batch,
                 },
             ),
+            Command::Sleep { .. } => sleep::run(cfg, &self.sleep_mode()),
             Command::Backup => backup::run(cfg),
             Command::Restore { dump, out, force } => restore::run(
                 cfg,
@@ -521,6 +611,55 @@ impl Command {
             _ => Err(Error::NotImplemented {
                 command: self.name(),
             }),
+        }
+    }
+}
+
+impl Command {
+    /// The one mode a `sleep` invocation names. clap's `mode` group admits
+    /// exactly one, so the order here decides nothing.
+    fn sleep_mode(&self) -> sleep::Mode {
+        let Command::Sleep {
+            mark_processed,
+            retire,
+            rebuild_topics: _,
+            purge,
+            confirm_purge,
+            cluster,
+            verify_candidates,
+            contradiction_candidates,
+            staleness,
+            table,
+            threshold,
+            limit,
+        } = self
+        else {
+            unreachable!("sleep_mode is only called for sleep")
+        };
+        let table = table.map_or(store::Table::Semantic, Into::into);
+        let threshold = *threshold;
+        if let Some(ids) = mark_processed {
+            sleep::Mode::MarkProcessed(ids.clone())
+        } else if let Some(id) = retire {
+            sleep::Mode::Retire(*id)
+        } else if let Some(ids) = purge {
+            sleep::Mode::Purge {
+                ids: ids.clone(),
+                confirm: *confirm_purge,
+            }
+        } else if *cluster {
+            sleep::Mode::Cluster { table, threshold }
+        } else if *contradiction_candidates {
+            sleep::Mode::ContradictionCandidates { table, threshold }
+        } else if *verify_candidates {
+            sleep::Mode::VerifyCandidates {
+                table,
+                limit: limit.unwrap_or(0),
+            }
+        } else if *staleness {
+            sleep::Mode::Staleness { table }
+        } else {
+            sleep::Mode::RebuildTopics
         }
     }
 }
@@ -623,6 +762,7 @@ mod tests {
             "remember" => args.extend(["--table", "semantic", "--text", "a memory"]),
             "embed" => args.push("--missing"),
             "restore" => args.extend(["--out", "/nonexistent/restored.db"]),
+            "sleep" => args.push("--staleness"),
             _ => {}
         }
         args
@@ -724,7 +864,20 @@ mod tests {
                 batch: 1,
             },
             Command::Coworkers,
-            Command::Sleep,
+            Command::Sleep {
+                mark_processed: None,
+                retire: None,
+                rebuild_topics: false,
+                purge: None,
+                confirm_purge: false,
+                cluster: false,
+                verify_candidates: false,
+                contradiction_candidates: false,
+                staleness: true,
+                table: None,
+                threshold: None,
+                limit: None,
+            },
             Command::Backfill,
             Command::Seed,
             Command::Restore {
@@ -755,6 +908,7 @@ mod tests {
                     | Command::Recall { .. }
                     | Command::Remember { .. }
                     | Command::Embed { .. }
+                    | Command::Sleep { .. }
                     | Command::Backup
                     | Command::Restore { .. }
                     | Command::FindExistingMemory { .. }
@@ -763,6 +917,132 @@ mod tests {
                     | Command::Config
             ) {
                 assert!(matches!(cmd.run(&cfg), Err(Error::NotImplemented { .. })));
+            }
+        }
+    }
+
+    fn sleep_mode(args: &[&str]) -> sleep::Mode {
+        let mut full = vec!["sm", "sleep"];
+        full.extend(args);
+        Cli::try_parse_from(full)
+            .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+            .command
+            .sleep_mode()
+    }
+
+    #[test]
+    fn each_sleep_flag_names_its_mode() {
+        use crate::store::Table::{Episodic, Semantic};
+        use sleep::Mode;
+        for (args, want) in [
+            (
+                vec!["--mark-processed", "1,2"],
+                Mode::MarkProcessed("1,2".into()),
+            ),
+            (vec!["--retire", "5"], Mode::Retire(5)),
+            (vec!["--rebuild-topics"], Mode::RebuildTopics),
+            (
+                vec!["--purge", "2,3", "--confirm-purge"],
+                Mode::Purge {
+                    ids: "2,3".into(),
+                    confirm: true,
+                },
+            ),
+            (
+                vec!["--purge", "2"],
+                Mode::Purge {
+                    ids: "2".into(),
+                    confirm: false,
+                },
+            ),
+            (
+                vec!["--cluster"],
+                Mode::Cluster {
+                    table: Semantic,
+                    threshold: None,
+                },
+            ),
+            (
+                vec!["--cluster", "--table", "episodic", "--threshold", "0.3"],
+                Mode::Cluster {
+                    table: Episodic,
+                    threshold: Some(0.3),
+                },
+            ),
+            (
+                vec!["--contradiction-candidates", "--threshold", "0.12"],
+                Mode::ContradictionCandidates {
+                    table: Semantic,
+                    threshold: Some(0.12),
+                },
+            ),
+            (
+                vec!["--staleness", "--table", "episodic"],
+                Mode::Staleness { table: Episodic },
+            ),
+            (
+                vec!["--verify-candidates", "--limit", "40"],
+                Mode::VerifyCandidates {
+                    table: Semantic,
+                    limit: 40,
+                },
+            ),
+            (
+                vec!["--verify-candidates", "--table", "episodic"],
+                Mode::VerifyCandidates {
+                    table: Episodic,
+                    limit: 0,
+                },
+            ),
+        ] {
+            assert_eq!(sleep_mode(&args), want, "{args:?}");
+        }
+    }
+
+    /// Every malformed `sleep` is a usage error. Parsed only, never run: a
+    /// case that got past clap must not reach the real environment's database.
+    #[test]
+    fn malformed_sleep_invocations_are_usage_errors() {
+        for (args, why) in [
+            (vec![], "no mode"),
+            (vec!["--retire", "1", "--cluster"], "two modes"),
+            (vec!["--staleness", "--verify-candidates"], "two reports"),
+            (vec!["--confirm-purge"], "an acknowledgement is no mode"),
+            (
+                vec!["--retire", "1", "--confirm-purge"],
+                "--confirm-purge belongs to --purge",
+            ),
+            (
+                vec!["--purge", "5", "--confirm-purge", "--table", "episodic"],
+                "a purge only ever means semantic rows",
+            ),
+            (
+                vec!["--mark-processed", "1", "--table", "semantic"],
+                "no table",
+            ),
+            (vec!["--staleness", "--threshold", "0.2"], "no vectors"),
+            (vec!["--cluster", "--limit", "3"], "no limit"),
+            (
+                vec!["--cluster", "--threshold", "0"],
+                "nothing is closer than 0",
+            ),
+            (vec!["--cluster", "--threshold", "nan"], "not a distance"),
+            (
+                vec!["--cluster", "--threshold", "3"],
+                "beyond cosine's range",
+            ),
+            (vec!["--retire", "x"], "not an id"),
+            (
+                vec!["--cluster", "--table", "instructions"],
+                "not a memory table",
+            ),
+            (vec!["--staleness", "--frobnicate"], "unknown flag"),
+        ] {
+            let mut full = vec!["sm", "sleep"];
+            full.extend(args);
+            match Cli::try_parse_from(&full) {
+                Err(e) => assert!(e.use_stderr(), "{why}: {full:?}"),
+                Ok(cli) => panic!("{why}: {full:?} parsed as {:?}", cli.command),
             }
         }
     }

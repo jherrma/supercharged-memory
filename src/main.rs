@@ -17,6 +17,7 @@ mod recall;
 mod remember;
 mod render;
 mod restore;
+mod sleep;
 mod status;
 mod store;
 mod update;

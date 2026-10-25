@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use turso::{Builder, Connection, Value};
 
-use super::{Cell, Embedded, NewMemory, ResultSet, Scope, SearchQuery, Store, Table};
+use super::{
+    ActiveRow, Cell, Embedded, NewMemory, Purged, ResultSet, Scope, SearchQuery, Store, Table,
+};
 use crate::config::Config;
 use crate::error::{Error, Result};
 
@@ -586,16 +588,257 @@ impl Store for TursoStore {
             })
             .collect())
     }
+
+    fn active_rows(&self, table: Table) -> Result<Vec<ActiveRow>> {
+        let (active, params) = base_predicate(&every_row(table));
+        // The age is the engine's own date arithmetic, as the reference's SQL
+        // computed it, so a date it cannot read comes back NULL, not guessed.
+        let rs = self.query(
+            &format!(
+                "SELECT id, created_at, julianday('now') - julianday(created_at), topic, \
+                 memory_text, embedding IS NOT NULL FROM {}_memory WHERE {active} \
+                 ORDER BY created_at, id;",
+                table.as_str()
+            ),
+            params,
+        )?;
+        rs.rows
+            .into_iter()
+            .map(|r| match r.as_slice() {
+                [
+                    Cell::Int(id),
+                    Cell::Text(created_at),
+                    age,
+                    topic,
+                    Cell::Text(text),
+                    Cell::Int(embedded),
+                ] => Ok(ActiveRow {
+                    id: *id,
+                    created_at: created_at.clone(),
+                    age_days: match age {
+                        Cell::Real(d) => Some(*d),
+                        Cell::Int(d) => Some(*d as f64),
+                        _ => None,
+                    },
+                    topic: match topic {
+                        Cell::Text(t) => Some(t.clone()),
+                        _ => None,
+                    },
+                    memory_text: text.clone(),
+                    embedded: *embedded != 0,
+                }),
+                other => Err(Error::failed(format!(
+                    "unexpected row shape in {}_memory: {other:?}",
+                    table.as_str()
+                ))),
+            })
+            .collect()
+    }
+
+    fn close_pairs(&self, table: Table, below: f64) -> Result<Vec<(i64, i64)>> {
+        // `embedding IS NOT NULL` on both sides is not optional:
+        // vector_distance_cos raises on a NULL and takes the query down.
+        let active = |alias: &str| match table {
+            Table::Semantic => format!(
+                "{alias}.embedding IS NOT NULL AND {alias}.superseded_by IS NULL \
+                 AND {alias}.retired_at IS NULL"
+            ),
+            Table::Episodic => format!("{alias}.embedding IS NOT NULL"),
+        };
+        let rs = self.query(
+            &format!(
+                "SELECT a.id, b.id FROM {t}_memory a JOIN {t}_memory b ON a.id < b.id \
+                 WHERE {} AND {} AND vector_distance_cos(a.embedding, b.embedding) < ? \
+                 ORDER BY a.id, b.id;",
+                active("a"),
+                active("b"),
+                t = table.as_str()
+            ),
+            vec![Value::Real(below)],
+        )?;
+        Ok(rs
+            .rows
+            .iter()
+            .filter_map(|r| match (r.first(), r.get(1)) {
+                (Some(Cell::Int(a)), Some(Cell::Int(b))) => Some((*a, *b)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn existing_ids(&self, table: Table, ids: &[i64]) -> Result<Vec<i64>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rs = self.query(
+            &format!(
+                "SELECT id FROM {}_memory WHERE id IN ({}) ORDER BY id;",
+                table.as_str(),
+                placeholders(ids)
+            ),
+            int_params(ids),
+        )?;
+        Ok(ints(&rs))
+    }
+
+    fn mark_processed(&self, ids: &[i64]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let sql = format!(
+            "UPDATE episodic_memory SET processed_at = datetime('now') WHERE id IN ({});",
+            placeholders(ids)
+        );
+        self.with_retry(|| pollster::block_on(self.conn.execute(&sql, int_params(ids))))
+    }
+
+    fn retire_semantic(&self, id: i64) -> Result<bool> {
+        // The guard is in the UPDATE itself, so a row superseded or retired
+        // by another process since the caller looked is left alone.
+        let changed = self.with_retry(|| {
+            pollster::block_on(self.conn.execute(
+                "UPDATE semantic_memory SET retired_at = datetime('now'), \
+                 updated_at = datetime('now') \
+                 WHERE id = ? AND superseded_by IS NULL AND retired_at IS NULL;",
+                vec![Value::Integer(id)],
+            ))
+        })?;
+        Ok(changed == 1)
+    }
+
+    fn replace_topics(&self, topics: &[(String, String)]) -> Result<()> {
+        self.with_retry(|| {
+            pollster::block_on(async {
+                // Dropped without a commit, the transaction is rolled back: the
+                // index is replaced whole or not at all.
+                let tx = self.conn.unchecked_transaction().await?;
+                tx.execute("DELETE FROM topic_keywords;", ()).await?;
+                for (topic, keywords) in topics {
+                    tx.execute(
+                        "INSERT INTO topic_keywords (topic, keywords, updated_at) \
+                         VALUES (?, ?, datetime('now'));",
+                        vec![Value::Text(topic.clone()), Value::Text(keywords.clone())],
+                    )
+                    .await?;
+                }
+                tx.commit().await
+            })
+        })
+    }
+
+    fn stranded_by(&self, ids: &[i64]) -> Result<Vec<i64>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let list = placeholders(ids);
+        let mut params = int_params(ids);
+        params.extend(int_params(ids));
+        let rs = self.query(
+            &format!(
+                "SELECT id FROM semantic_memory WHERE superseded_by IN ({list}) \
+                 AND id NOT IN ({list}) ORDER BY id;"
+            ),
+            params,
+        )?;
+        Ok(ints(&rs))
+    }
+
+    fn purge_semantic(&self, ids: &[i64]) -> Result<Purged> {
+        let list = placeholders(ids);
+        let outcome = self.with_retry(|| {
+            pollster::block_on(async {
+                let tx = self.conn.unchecked_transaction().await?;
+                let coworker_tags = tx
+                    .execute(
+                        &format!(
+                            "DELETE FROM memory_coworkers WHERE memory_table = 'semantic' \
+                             AND memory_id IN ({list});"
+                        ),
+                        int_params(ids),
+                    )
+                    .await?;
+                // The same predicate the caller's checks used, inside the
+                // transaction: only rows no longer current go.
+                let rows = tx
+                    .execute(
+                        &format!(
+                            "DELETE FROM semantic_memory WHERE id IN ({list}) \
+                             AND (superseded_by IS NOT NULL OR retired_at IS NOT NULL);"
+                        ),
+                        int_params(ids),
+                    )
+                    .await?;
+                let stranded = {
+                    let mut left = tx
+                        .query(
+                            &format!(
+                                "SELECT count(*) FROM semantic_memory \
+                                 WHERE superseded_by IN ({list});"
+                            ),
+                            int_params(ids),
+                        )
+                        .await?;
+                    match left.next().await? {
+                        Some(row) => row.get_value(0)?,
+                        None => Value::Integer(0),
+                    }
+                };
+                if rows != ids.len() as u64 || stranded != Value::Integer(0) {
+                    tx.rollback().await?;
+                    return Ok(None);
+                }
+                tx.commit().await?;
+                Ok(Some(Purged {
+                    rows,
+                    coworker_tags,
+                }))
+            })
+        })?;
+        outcome.ok_or_else(|| {
+            Error::refused(
+                "the rows changed under the purge (one is current, missing, or still \
+                 pointed at) — nothing was deleted",
+            )
+        })
+    }
 }
 
 /// The active rows of a table that have no embedding.
 fn unembedded(table: Table) -> Scope {
     Scope {
+        embedded: Embedded::Without,
+        ..every_row(table)
+    }
+}
+
+/// Every active row of a table.
+fn every_row(table: Table) -> Scope {
+    Scope {
         table,
         project: None,
         coworker: None,
-        embedded: Embedded::Without,
+        embedded: Embedded::Any,
     }
+}
+
+/// `?,?,?` for an `IN (...)` over these ids.
+fn placeholders(ids: &[i64]) -> String {
+    vec!["?"; ids.len()].join(",")
+}
+
+fn int_params(ids: &[i64]) -> Vec<Value> {
+    ids.iter().map(|i| Value::Integer(*i)).collect()
+}
+
+/// The first column of each row, where it is an integer.
+fn ints(rs: &ResultSet) -> Vec<i64> {
+    rs.rows
+        .iter()
+        .filter_map(|r| match r.first() {
+            Some(Cell::Int(n)) => Some(*n),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The INSERT and its bound parameters.
@@ -935,6 +1178,367 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(written, vec![e]);
         assert!(distance(&cfg, Table::Episodic, e, &Fake::vector("blind event")) < 1e-6);
+    }
+
+    /// A unit vector at `deg` degrees in the plane of dimensions `2*plane` and
+    /// `2*plane+1`, zero elsewhere: two of them in one plane lie exactly
+    /// `1 - cos(angle between)` apart, and any two planes are orthogonal.
+    pub(crate) fn angle(plane: usize, deg: f64) -> Vec<f32> {
+        let mut v = vec![0.0f32; crate::config::DIM];
+        v[2 * plane] = deg.to_radians().cos() as f32;
+        v[2 * plane + 1] = deg.to_radians().sin() as f32;
+        v
+    }
+
+    /// A row with exactly this vector.
+    pub(crate) fn put_vector(cfg: &Config, table: Table, text: &str, v: &[f32]) -> i64 {
+        let id = put(cfg, table, text, false);
+        set_vector(cfg, table, id, v, "bge-m3");
+        id
+    }
+
+    fn supersede(cfg: &Config, old: i64, by: i64) {
+        rows(
+            cfg,
+            &format!("UPDATE semantic_memory SET superseded_by = {by} WHERE id = {old};"),
+        );
+    }
+
+    fn retire_directly(cfg: &Config, id: i64) {
+        rows(
+            cfg,
+            &format!("UPDATE semantic_memory SET retired_at = '2026-01-02' WHERE id = {id};"),
+        );
+    }
+
+    // ---- what a sleep pass reads and writes -------------------------------
+
+    #[test]
+    fn active_rows_are_current_semantic_or_every_episodic_row_oldest_first() {
+        let cfg = scratch("active-rows");
+        let late = put(&cfg, Table::Semantic, "late", true);
+        let early = put(&cfg, Table::Semantic, "early", false);
+        let tie = put(&cfg, Table::Semantic, "same time as early", false);
+        let old = put(&cfg, Table::Semantic, "superseded", true);
+        let gone = put(&cfg, Table::Semantic, "retired", true);
+        supersede(&cfg, old, late);
+        retire_directly(&cfg, gone);
+        rows(
+            &cfg,
+            &format!(
+                "UPDATE semantic_memory SET created_at = datetime('now', '-10 days'), \
+                 topic = 'a topic' WHERE id = {late};"
+            ),
+        );
+        rows(
+            &cfg,
+            &format!(
+                "UPDATE semantic_memory SET created_at = datetime('now', '-40 days') \
+                 WHERE id IN ({early}, {tie});"
+            ),
+        );
+        let e = put(&cfg, Table::Episodic, "an event", false);
+
+        let store = TursoStore::open(&cfg).unwrap();
+        let got = store.active_rows(Table::Semantic).unwrap();
+        let ids: Vec<i64> = got.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![early, tie, late], "{got:?}");
+        let late_row = &got[2];
+        assert_eq!(late_row.topic.as_deref(), Some("a topic"));
+        assert_eq!(late_row.memory_text, "late");
+        assert!(late_row.embedded);
+        assert!(!got[0].embedded);
+        assert_eq!(got[0].topic, None);
+        let age = late_row.age_days.unwrap();
+        assert!((age - 10.0).abs() < 0.01, "{age}");
+        assert!((got[0].age_days.unwrap() - 40.0).abs() < 0.01);
+        assert_eq!(late_row.created_at.len(), "2026-01-01 00:00:00".len());
+
+        let episodic = store.active_rows(Table::Episodic).unwrap();
+        assert_eq!(episodic.len(), 1);
+        assert_eq!(episodic[0].id, e);
+        assert_eq!(episodic[0].created_at, "2026-01-01 00:00:00");
+    }
+
+    /// A date the engine cannot read has no age, rather than a wrong one.
+    #[test]
+    fn an_unreadable_created_at_has_no_age() {
+        let cfg = scratch("active-rows-bad-date");
+        let id = put(&cfg, Table::Semantic, "odd date", false);
+        rows(
+            &cfg,
+            &format!("UPDATE semantic_memory SET created_at = 'last spring' WHERE id = {id};"),
+        );
+        let got = TursoStore::open(&cfg)
+            .unwrap()
+            .active_rows(Table::Semantic)
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].age_days, None);
+        assert_eq!(got[0].created_at, "last spring");
+    }
+
+    #[test]
+    fn close_pairs_are_active_embedded_rows_below_the_threshold_once_each() {
+        let cfg = scratch("close-pairs");
+        // 0 and 20 degrees: 1 - cos 20 = 0.0603. 0 and 40: 0.234.
+        let a = put_vector(&cfg, Table::Semantic, "a", &angle(0, 0.0));
+        let b = put_vector(&cfg, Table::Semantic, "b", &angle(0, 20.0));
+        let c = put_vector(&cfg, Table::Semantic, "c", &angle(0, 40.0));
+        let far = put_vector(&cfg, Table::Semantic, "other plane", &angle(1, 0.0));
+        let old = put_vector(&cfg, Table::Semantic, "superseded twin", &angle(0, 0.0));
+        let gone = put_vector(&cfg, Table::Semantic, "retired twin", &angle(0, 0.0));
+        put(&cfg, Table::Semantic, "no vector", false);
+        supersede(&cfg, old, a);
+        retire_directly(&cfg, gone);
+        let e1 = put_vector(&cfg, Table::Episodic, "e1", &angle(0, 0.0));
+        let e2 = put_vector(&cfg, Table::Episodic, "e2", &angle(0, 1.0));
+        let _ = far;
+
+        let store = TursoStore::open(&cfg).unwrap();
+        assert_eq!(
+            store.close_pairs(Table::Semantic, 0.10).unwrap(),
+            vec![(a, b), (b, c)]
+        );
+        assert_eq!(
+            store.close_pairs(Table::Semantic, 0.30).unwrap(),
+            vec![(a, b), (a, c), (b, c)]
+        );
+        assert!(store.close_pairs(Table::Semantic, 0.05).unwrap().is_empty());
+        assert_eq!(
+            store.close_pairs(Table::Episodic, 0.10).unwrap(),
+            vec![(e1, e2)]
+        );
+    }
+
+    #[test]
+    fn existing_ids_lists_rows_of_that_table_current_or_not() {
+        let cfg = scratch("existing-ids");
+        let s = put(&cfg, Table::Semantic, "s", false);
+        let old = put(&cfg, Table::Semantic, "old", false);
+        supersede(&cfg, old, s);
+        let e = put(&cfg, Table::Episodic, "e", false);
+        let store = TursoStore::open(&cfg).unwrap();
+        let mut got = store.existing_ids(Table::Semantic, &[s, old, 99]).unwrap();
+        got.sort();
+        assert_eq!(got, vec![s, old]);
+        assert_eq!(
+            store.existing_ids(Table::Episodic, &[e, 99]).unwrap(),
+            vec![e]
+        );
+        assert!(store.existing_ids(Table::Episodic, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mark_processed_stamps_only_the_given_episodic_rows() {
+        let cfg = scratch("mark-processed");
+        let a = put(&cfg, Table::Episodic, "a", false);
+        let b = put(&cfg, Table::Episodic, "b", false);
+        let c = put(&cfg, Table::Episodic, "c", false);
+        let store = TursoStore::open(&cfg).unwrap();
+        assert_eq!(store.mark_processed(&[a, c]).unwrap(), 2);
+        assert_eq!(
+            rows(
+                &cfg,
+                "SELECT id, processed_at IS NOT NULL FROM episodic_memory ORDER BY id;"
+            ),
+            vec![
+                vec![Cell::Int(a), Cell::Int(1)],
+                vec![Cell::Int(b), Cell::Int(0)],
+                vec![Cell::Int(c), Cell::Int(1)],
+            ]
+        );
+    }
+
+    #[test]
+    fn retire_semantic_sets_retired_at_on_a_current_row_and_deletes_nothing() {
+        let cfg = scratch("retire");
+        let a = put(&cfg, Table::Semantic, "a", false);
+        let old = put(&cfg, Table::Semantic, "old", false);
+        supersede(&cfg, old, a);
+        rows(
+            &cfg,
+            "UPDATE semantic_memory SET updated_at = '2026-01-01 00:00:00';",
+        );
+        let store = TursoStore::open(&cfg).unwrap();
+
+        assert!(store.retire_semantic(a).unwrap());
+        assert_eq!(
+            rows(
+                &cfg,
+                &format!(
+                    "SELECT retired_at >= datetime('now', '-1 minute'), \
+                     updated_at >= datetime('now', '-1 minute') \
+                     FROM semantic_memory WHERE id = {a};"
+                )
+            ),
+            vec![vec![Cell::Int(1), Cell::Int(1)]]
+        );
+        assert!(!store.retire_semantic(a).unwrap(), "already retired");
+        assert!(!store.retire_semantic(old).unwrap(), "superseded");
+        assert!(!store.retire_semantic(99).unwrap(), "unknown");
+        assert_eq!(
+            rows(&cfg, "SELECT count(*) FROM semantic_memory;"),
+            vec![vec![Cell::Int(2)]]
+        );
+        assert_eq!(
+            rows(
+                &cfg,
+                &format!("SELECT retired_at FROM semantic_memory WHERE id = {old};")
+            ),
+            vec![vec![Cell::Null]]
+        );
+    }
+
+    #[test]
+    fn replace_topics_is_a_full_replace() {
+        let cfg = scratch("replace-topics");
+        rows(
+            &cfg,
+            "INSERT INTO topic_keywords (topic, keywords) VALUES ('old', 'x'), ('kept?', 'y');",
+        );
+        let store = TursoStore::open(&cfg).unwrap();
+        store
+            .replace_topics(&[
+                ("kept?".into(), "new keywords".into()),
+                ("fresh".into(), "Grüße, ümlauts".into()),
+            ])
+            .unwrap();
+        assert_eq!(
+            rows(
+                &cfg,
+                "SELECT topic, keywords, updated_at >= datetime('now', '-1 minute') \
+                 FROM topic_keywords ORDER BY topic;"
+            ),
+            vec![
+                vec![
+                    Cell::Text("fresh".into()),
+                    Cell::Text("Grüße, ümlauts".into()),
+                    Cell::Int(1)
+                ],
+                vec![
+                    Cell::Text("kept?".into()),
+                    Cell::Text("new keywords".into()),
+                    Cell::Int(1)
+                ],
+            ]
+        );
+        store.replace_topics(&[]).unwrap();
+        assert_eq!(
+            rows(&cfg, "SELECT count(*) FROM topic_keywords;"),
+            vec![vec![Cell::Int(0)]]
+        );
+    }
+
+    #[test]
+    fn stranded_by_lists_rows_outside_the_set_that_one_inside_supersedes() {
+        let cfg = scratch("stranded-by");
+        let v1 = put(&cfg, Table::Semantic, "v1", false);
+        let v2 = put(&cfg, Table::Semantic, "v2", false);
+        let v3 = put(&cfg, Table::Semantic, "v3", false);
+        supersede(&cfg, v1, v2);
+        supersede(&cfg, v2, v3);
+        let store = TursoStore::open(&cfg).unwrap();
+        assert_eq!(store.stranded_by(&[v2]).unwrap(), vec![v1]);
+        assert!(store.stranded_by(&[v1, v2]).unwrap().is_empty());
+        assert!(store.stranded_by(&[v1]).unwrap().is_empty());
+    }
+
+    fn tag(cfg: &Config, table: &str, memory_id: i64, coworker: i64) {
+        rows(
+            cfg,
+            &format!(
+                "INSERT INTO memory_coworkers (memory_table, memory_id, coworker_id) \
+                 VALUES ('{table}', {memory_id}, {coworker});"
+            ),
+        );
+    }
+
+    #[test]
+    fn purge_deletes_the_rows_and_their_semantic_tags_and_nothing_else() {
+        let cfg = scratch("purge-semantic");
+        rows(
+            &cfg,
+            "INSERT INTO coworkers (name, expertise, personality) VALUES ('jeff', 'x', 'y');",
+        );
+        let keep = put(&cfg, Table::Semantic, "current", false);
+        let old = put(&cfg, Table::Semantic, "superseded", false);
+        let gone = put(&cfg, Table::Semantic, "retired", false);
+        supersede(&cfg, old, keep);
+        retire_directly(&cfg, gone);
+        // An episodic row with the purged id, and its tag: neither is touched.
+        put(&cfg, Table::Episodic, "e1", false);
+        put(&cfg, Table::Episodic, "e2", false);
+        tag(&cfg, "semantic", old, 1);
+        tag(&cfg, "semantic", keep, 1);
+        tag(&cfg, "episodic", old, 1);
+        rows(
+            &cfg,
+            &format!(
+                "INSERT INTO eval_cases (id, class, memory_table, query, expect_ids, \
+                 expect_stamps) VALUES ('x01', 'exact-id', 'semantic', 'q', '{old}', \
+                 '2026-01-01 00:00:00');"
+            ),
+        );
+
+        let store = TursoStore::open(&cfg).unwrap();
+        assert_eq!(
+            store.purge_semantic(&[old, gone]).unwrap(),
+            Purged {
+                rows: 2,
+                coworker_tags: 1
+            }
+        );
+        assert_eq!(
+            rows(&cfg, "SELECT id FROM semantic_memory ORDER BY id;"),
+            vec![vec![Cell::Int(keep)]]
+        );
+        assert_eq!(
+            rows(
+                &cfg,
+                "SELECT memory_table, memory_id FROM memory_coworkers ORDER BY memory_table;"
+            ),
+            vec![
+                vec![Cell::Text("episodic".into()), Cell::Int(old)],
+                vec![Cell::Text("semantic".into()), Cell::Int(keep)],
+            ]
+        );
+        assert_eq!(
+            rows(&cfg, "SELECT count(*) FROM episodic_memory;"),
+            vec![vec![Cell::Int(2)]]
+        );
+        assert_eq!(
+            rows(&cfg, "SELECT expect_ids FROM eval_cases;"),
+            vec![vec![Cell::Text(old.to_string())]],
+            "a dangling eval target is inert; --validate is what finds it"
+        );
+    }
+
+    /// The transaction re-checks what the caller checked: a current row or a
+    /// set that would strand a survivor deletes nothing at all.
+    #[test]
+    fn purge_refuses_a_current_row_or_a_stranding_set_and_deletes_nothing() {
+        let cfg = scratch("purge-guarded");
+        let v1 = put(&cfg, Table::Semantic, "v1", false);
+        let v2 = put(&cfg, Table::Semantic, "v2", false);
+        let v3 = put(&cfg, Table::Semantic, "v3", false);
+        supersede(&cfg, v1, v2);
+        supersede(&cfg, v2, v3);
+        let store = TursoStore::open(&cfg).unwrap();
+        for ids in [vec![v1, v3], vec![v2], vec![v1, 99]] {
+            let err = store.purge_semantic(&ids).unwrap_err();
+            assert_eq!(
+                err.exit_code(),
+                crate::error::EXIT_REFUSED,
+                "{ids:?}: {err}"
+            );
+            assert_eq!(
+                rows(&cfg, "SELECT count(*) FROM semantic_memory;"),
+                vec![vec![Cell::Int(3)]],
+                "{ids:?}"
+            );
+        }
+        assert_eq!(store.purge_semantic(&[v1, v2]).unwrap().rows, 2);
     }
 
     #[test]

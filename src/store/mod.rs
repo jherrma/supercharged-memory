@@ -116,6 +116,27 @@ pub struct NewMemory {
     pub coworkers: Vec<i64>,
 }
 
+/// An active row as the sleep reports read it: everything but its vector.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveRow {
+    pub id: i64,
+    pub created_at: String,
+    /// Days since `created_at`, by the database's own date arithmetic; `None`
+    /// when it cannot read the date.
+    pub age_days: Option<f64>,
+    pub topic: Option<String>,
+    pub memory_text: String,
+    pub embedded: bool,
+}
+
+/// What a purge deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Purged {
+    pub rows: u64,
+    /// `memory_coworkers` rows that scoped the deleted memories.
+    pub coworker_tags: u64,
+}
+
 /// Rows plus their column names, which is what the output format needs. It is a
 /// result set, not a query -- a MongoDB backend produces the same shape.
 #[derive(Debug, Clone)]
@@ -195,6 +216,38 @@ pub trait Store {
     /// Current semantic rows other than `id` whose embedding lies within cosine
     /// distance `below` of `vector`, nearest first: the near-duplicate report.
     fn semantic_within(&self, id: i64, vector: &[f32], below: f64) -> Result<Vec<(i64, f64)>>;
+
+    /// Every active row of a table (current semantic rows, every episodic
+    /// row), oldest first and by id within a tie.
+    fn active_rows(&self, table: Table) -> Result<Vec<ActiveRow>>;
+
+    /// Every pair of active, embedded rows closer than `below` in cosine
+    /// distance, once each, lower id first.
+    fn close_pairs(&self, table: Table, below: f64) -> Result<Vec<(i64, i64)>>;
+
+    /// Which of these ids are rows of this table, current or not.
+    fn existing_ids(&self, table: Table, ids: &[i64]) -> Result<Vec<i64>>;
+
+    /// Stamp `processed_at` on these episodic rows, in one statement. Returns
+    /// how many rows it stamped.
+    fn mark_processed(&self, ids: &[i64]) -> Result<u64>;
+
+    /// Retire one current semantic row: `retired_at` is set, nothing is
+    /// deleted. `false` when no current row has that id, and nothing changed.
+    fn retire_semantic(&self, id: i64) -> Result<bool>;
+
+    /// Replace the whole topic index with these (topic, keywords) rows, in one
+    /// transaction: a full replace, never a merge.
+    fn replace_topics(&self, topics: &[(String, String)]) -> Result<()>;
+
+    /// Rows outside `ids` that one of `ids` supersedes: the rows deleting
+    /// `ids` would leave pointing at nothing.
+    fn stranded_by(&self, ids: &[i64]) -> Result<Vec<i64>>;
+
+    /// Hard-delete these superseded or retired semantic rows and the
+    /// `memory_coworkers` rows scoping them, in one transaction. Refuses, and
+    /// deletes nothing, unless every id is such a row and none strands another.
+    fn purge_semantic(&self, ids: &[i64]) -> Result<Purged>;
 }
 
 /// Open the configured database, or refuse with the candidate report.
