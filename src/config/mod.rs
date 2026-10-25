@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 pub const DB_ENV: &str = "SUPERCHARGED_MEMORY_TURSO_PATH";
 /// bge-m3's output width. Asserted on every embedding; see `crate::embed`.
 pub const DIM: usize = 1024;
-/// `memory_text`'s CHECK cap, keywords included. Enforced by story 005.
+/// `memory_text`'s CHECK cap, keywords included. Enforced by `remember`.
 #[allow(dead_code)]
 pub const MAX_TEXT: usize = 2000;
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
@@ -34,10 +34,10 @@ pub struct Config {
     pub db_source: Source,
     pub backup_dir: PathBuf,
     pub ollama_url: String,
-    /// Read by story 005 (`remember`).
+    /// Read by `remember`.
     #[allow(dead_code)]
     pub embed_model: String,
-    /// Read by story 004 (`recall`) -- the keyword weight in the hybrid score.
+    /// Read by `recall` -- the keyword weight in the hybrid score.
     #[allow(dead_code)]
     pub recall_alpha: f64,
     /// The IO backend to open with, or `None` for the platform default.
@@ -109,10 +109,10 @@ impl Config {
             ),
         };
 
-        // NOTE (story 003): memlib.py defaulted BACKUP_DIR to the repo's own
+        // NOTE: memlib.py defaulted BACKUP_DIR to the repo's own
         // backups/ directory, derived from __file__. A binary has no repo, so the
         // default moves under XDG. An existing install therefore has to set
-        // BACKUP_DIR or move its dumps -- story 016 owes this a migration note.
+        // BACKUP_DIR or move its dumps -- the cutover owes this a migration note.
         // The candidate scan below still looks in whatever BACKUP_DIR resolves to,
         // so a machine that sets it keeps the MISSING failsafe intact.
         let backup_dir = match env.get("BACKUP_DIR") {

@@ -34,7 +34,7 @@ pub fn ollama_up(cfg: &Config) -> bool {
 /// Embed one text, or fail. There is deliberately no fallback vector: a row
 /// stored with a wrong or absent embedding is invisible to every later search.
 ///
-/// First caller is story 005 (`remember`); `status` only needs `ollama_up`.
+/// First caller is `remember`; `status` only needs `ollama_up`.
 #[allow(dead_code)]
 pub fn embed(cfg: &Config, text: &str) -> Result<Vec<f32>> {
     let agent: ureq::Agent = ureq::Agent::config_builder()

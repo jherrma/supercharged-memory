@@ -21,15 +21,12 @@ pub enum Error {
     Refused(String),
     /// Something went wrong while doing the work.
     Failed(String),
-    /// The command exists but its story has not landed yet.
-    NotImplemented {
-        command: &'static str,
-        story: &'static str,
-    },
+    /// The command exists but is not implemented yet.
+    NotImplemented { command: &'static str },
 }
 
-// The constructors are exercised by the tests below and used from story 005
-// onward, when the first real guard rails land.
+// The constructors are exercised by the tests below and used by the
+// real guard rails as they land.
 #[allow(dead_code)]
 impl Error {
     pub fn refused(reason: impl Into<String>) -> Self {
@@ -53,11 +50,8 @@ impl fmt::Display for Error {
         match self {
             Error::Refused(reason) => write!(f, "refused: {reason}"),
             Error::Failed(what) => write!(f, "error: {what}"),
-            Error::NotImplemented { command, story } => {
-                write!(
-                    f,
-                    "error: not implemented: {command} is filled in by story {story}"
-                )
+            Error::NotImplemented { command } => {
+                write!(f, "error: not implemented: {command}")
             }
         }
     }
@@ -95,15 +89,9 @@ mod tests {
     }
 
     #[test]
-    fn not_implemented_names_its_story() {
-        let e = Error::NotImplemented {
-            command: "recall",
-            story: "004",
-        };
-        assert_eq!(
-            e.to_string(),
-            "error: not implemented: recall is filled in by story 004"
-        );
+    fn not_implemented_names_its_command() {
+        let e = Error::NotImplemented { command: "recall" };
+        assert_eq!(e.to_string(), "error: not implemented: recall");
         assert_eq!(e.exit_code(), EXIT_ERROR);
     }
 }

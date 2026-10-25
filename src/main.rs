@@ -1,9 +1,8 @@
 //! supercharged-memory: the single binary behind the long-term memory system.
 //!
 //! It replaces a set of Python scripts that shelled out to the `tursodb` CLI and
-//! parsed its text output; see issue #17. Story 001 established this skeleton --
-//! every subcommand is wired up and documented here, and each one is filled in by
-//! its own story.
+//! parsed its text output; see issue #17. Every subcommand is wired up and documented here, and each
+//! one is filled in as it is ported.
 
 mod cli;
 mod config;

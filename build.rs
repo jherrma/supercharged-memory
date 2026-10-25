@@ -73,8 +73,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// Read the linked Turso version out of Cargo.lock rather than hardcoding it,
-/// so it cannot drift from what is actually compiled in. Story 003 adds the
-/// dependency; until then this reports "not linked".
+/// so it cannot drift from what is actually compiled in. Reports
+/// "not linked" if the dependency is absent.
 fn turso_version() -> String {
     let lock = match std::fs::read_to_string("Cargo.lock") {
         Ok(s) => s,

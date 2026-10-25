@@ -79,8 +79,8 @@ why_not() {
     # Apple ships no cross-linkable SDK for Linux and its licence does not allow
     # redistributing one, so this is a policy limit, not a missing package.
     # Point SDKROOT at a macOS SDK, or build the darwin artifacts on a Mac / in
-    # CI (story 017).
-    echo "SDKROOT is unset — point it at a macOS SDK, or build the darwin artifacts on a Mac / in CI (story 017)"
+    # CI.
+    echo "SDKROOT is unset — point it at a macOS SDK, or build the darwin artifacts on a Mac / in CI"
     return
   fi
   echo ""

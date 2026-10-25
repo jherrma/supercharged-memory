@@ -1,7 +1,7 @@
 //! The storage seam.
 //!
 //! The trait is deliberately MINIMAL: it holds exactly the operations a landed
-//! command needs, and grows as stories 004-014 land. A trait designed against
+//! command needs, and grows as commands land. A trait designed against
 //! imagined callers is how a backend interface ends up shaped like one database's
 //! query language, which is the mistake issue #3 (MongoDB) has to avoid.
 //!

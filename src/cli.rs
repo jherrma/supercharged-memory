@@ -1,7 +1,7 @@
 //! The CLI surface: every subcommand the Python scripts exposed, plus dispatch.
 //!
-//! Each variant carries the constraint its story must honour, so the brief is
-//! next to the signature rather than only in stories/17-native-cli/.
+//! Each variant carries the constraint its implementation must honour, so the brief
+//! is next to the signature.
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -215,7 +215,7 @@ pub enum Command {
 
     /// Seed a fresh database with starter memories.
     ///
-    /// Story 009 decides whether this survives: its Python interface was "edit
+    /// Whether this survives is undecided: its Python interface was "edit
     /// the list inside the script", which a compiled binary cannot offer.
     Seed,
 
@@ -245,7 +245,7 @@ pub enum Command {
 
     /// Recall-quality harness: validate the eval set, report metrics, sweep RECALL_ALPHA.
     ///
-    /// Deep sleep D6 runs this, and it is how story 004 proves the ranking is
+    /// Deep sleep D6 runs this, and it is how the ranking is proven
     /// unchanged. eval_cases are AUTHORED and cannot be regenerated.
     Eval,
 }
@@ -267,23 +267,6 @@ impl Command {
             Command::FindExistingMemory => "find-existing-memory",
             Command::Install => "install",
             Command::Eval => "eval",
-        }
-    }
-
-    /// The story that fills this command in.
-    pub fn story(&self) -> &'static str {
-        match self {
-            Command::Status | Command::Recall { .. } => "004",
-            Command::Remember { .. } => "005",
-            Command::Coworkers => "006",
-            Command::Sleep => "007",
-            Command::Backfill => "008",
-            Command::Seed => "009",
-            Command::Restore => "010",
-            Command::Backup => "011",
-            Command::FindExistingMemory => "012",
-            Command::Install => "013",
-            Command::Eval => "014",
         }
     }
 
@@ -354,7 +337,6 @@ impl Command {
             ),
             _ => Err(Error::NotImplemented {
                 command: self.name(),
-                story: self.story(),
             }),
         }
     }
@@ -436,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn every_subcommand_reports_a_story_and_a_name() {
+    fn every_subcommand_reports_a_name() {
         for cmd in [
             Command::Status,
             Command::Recall {
@@ -479,7 +461,6 @@ mod tests {
             Command::Eval,
         ] {
             assert!(!cmd.name().is_empty());
-            assert!(!cmd.story().is_empty());
             if !matches!(
                 cmd,
                 Command::Status | Command::Recall { .. } | Command::Remember { .. }
