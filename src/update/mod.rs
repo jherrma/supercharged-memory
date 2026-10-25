@@ -24,7 +24,7 @@ use chrono::NaiveDate;
 use crate::backup;
 use crate::claude_md::{self, EpisodicMode};
 use crate::config::dotenv::{self, OnConflict};
-use crate::config::{Config, VERSION_KEY};
+use crate::config::{Config, Source, VERSION_KEY};
 use crate::error::{Error, Result};
 use crate::store::Store;
 use crate::store::turso::TursoStore;
@@ -116,7 +116,11 @@ pub fn execute(
         Err(why) => Report::Unreadable(why.clone()),
     };
 
-    let Some(recorded) = recorded_version(cfg)? else {
+    let recorded = recorded_version(cfg)?;
+    if let Some(line) = env_version_warning(cfg, recorded.as_deref()) {
+        out(line);
+    }
+    let Some(recorded) = recorded else {
         return not_set_up(cfg, args, &md_path, &report, out);
     };
     let installed = Version::parse(&recorded).map_err(|why| {
@@ -136,22 +140,7 @@ pub fn execute(
     }
 
     let store = open_memory_database(cfg)?;
-    let mut ordered = Vec::with_capacity(release.migrations.len());
-    for m in release.migrations {
-        let version = Version::parse(m.version)
-            .map_err(|why| Error::failed(format!("migration {}: {why}", m.id)))?;
-        ordered.push((version, m));
-    }
-    ordered.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut pending = Vec::new();
-    for (_, m) in ordered {
-        if !store
-            .holds(m.probe.query)
-            .map_err(|e| Error::failed(format!("probing migration {}: {}", m.id, reason(e))))?
-        {
-            pending.push(m);
-        }
-    }
+    let pending = pending_schema(&store, release)?;
     drop(store);
     let notes = migrations::between(release.notes, &installed, &own).map_err(Error::failed)?;
 
@@ -419,6 +408,52 @@ fn read_claude_md(path: &Path) -> std::result::Result<Option<String>, String> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// The schema migrations `release` carries that `store` does not hold yet, oldest
+/// first. Read-only: `update` plans from it and `status` reports it.
+pub(crate) fn pending_schema<'a>(
+    store: &TursoStore,
+    release: &Release<'a>,
+) -> Result<Vec<&'a Migration>> {
+    let mut ordered = Vec::with_capacity(release.migrations.len());
+    for m in release.migrations {
+        let version = Version::parse(m.version)
+            .map_err(|why| Error::failed(format!("migration {}: {why}", m.id)))?;
+        ordered.push((version, m));
+    }
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut pending = Vec::new();
+    for (_, m) in ordered {
+        if !store
+            .holds(m.probe.query)
+            .map_err(|e| Error::failed(format!("probing migration {}: {}", m.id, reason(e))))?
+        {
+            pending.push(m);
+        }
+    }
+    Ok(pending)
+}
+
+/// A real environment variable that names a different version from the one the
+/// `.env` records. Every other reader takes the environment first, so the
+/// disagreement is said here: `update` compares the `.env` and ignores the
+/// variable.
+fn env_version_warning(cfg: &Config, recorded: Option<&str>) -> Option<String> {
+    let setting = cfg.settings.iter().find(|s| s.key == VERSION_KEY)?;
+    if setting.source != Source::Env {
+        return None;
+    }
+    let env = setting.value.as_deref()?;
+    if Some(env) == recorded {
+        return None;
+    }
+    let recorded = recorded.unwrap_or("no version");
+    Some(format!(
+        "warn: {VERSION_KEY}={env} is set in the real environment, but {} records {recorded}; \
+         update compares the .env and ignores the environment",
+        cfg.dotenv_path.display()
+    ))
 }
 
 /// The version the `.env` file itself records -- the machine's record, which
@@ -692,7 +727,12 @@ mod tests {
         }
 
         fn cfg(&self) -> Config {
-            let vars: HashMap<String, String> = [
+            self.cfg_with(&[])
+        }
+
+        /// The fixture's config with extra variables in the real environment.
+        fn cfg_with(&self, extra: &[(&str, &str)]) -> Config {
+            let mut vars: HashMap<String, String> = [
                 (
                     "CLAUDE_CONFIG_DIR",
                     self.root.join("claude").display().to_string(),
@@ -702,6 +742,9 @@ mod tests {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
             .collect();
+            for (k, v) in extra {
+                vars.insert(k.to_string(), v.to_string());
+            }
             Config::from_env(&Env {
                 vars,
                 home: self.root.join("home"),
@@ -981,6 +1024,36 @@ mod tests {
     }
 
     // ---- nothing to do, or only CLAUDE.md --------------------------------------
+
+    /// A real environment variable overrides the `.env` for every other reader,
+    /// but `update` compares the `.env`, so the disagreement must be named.
+    #[test]
+    fn a_real_environment_version_that_disagrees_with_the_dotenv_is_named() {
+        let f = Fixture::installed("env-version", "0.3.0");
+        batch(&f.db_cfg(), WIDGETS.sql);
+        let cfg = f.cfg_with(&[(VERSION_KEY, "0.2.0")]);
+        let out = update(&cfg, &Args::default(), &release(&[WIDGETS])).unwrap();
+        let warn = out
+            .iter()
+            .find(|l| l.starts_with("warn:"))
+            .unwrap_or_else(|| panic!("no warn line in: {}", text(&out)));
+        assert!(warn.contains(VERSION_KEY), "{warn}");
+        assert!(warn.contains("0.2.0"), "{warn}");
+        assert!(warn.contains("0.3.0"), "{warn}");
+    }
+
+    #[test]
+    fn a_real_environment_version_that_agrees_with_the_dotenv_is_not_reported() {
+        let f = Fixture::installed("env-agrees", "0.3.0");
+        batch(&f.db_cfg(), WIDGETS.sql);
+        let cfg = f.cfg_with(&[(VERSION_KEY, "0.3.0")]);
+        let out = update(&cfg, &Args::default(), &release(&[WIDGETS])).unwrap();
+        assert!(
+            !out.iter().any(|l| l.starts_with("warn:")),
+            "{}",
+            text(&out)
+        );
+    }
 
     #[test]
     fn up_to_date_says_so_and_writes_nothing() {

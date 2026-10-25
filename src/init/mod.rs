@@ -1190,9 +1190,14 @@ mod tests {
             db_path: f.default_db(),
             ..cfg.clone()
         };
+        // The embedded schema predates the instructions table, so the first
+        // migration is still pending on a fresh database and status says so.
         assert_eq!(
             crate::status::report(&db_cfg, &Fake::up()),
-            vec!["EMPTY".to_string()]
+            vec![
+                "EMPTY".to_string(),
+                "schema: 1 migration(s) pending (instructions) — run update".to_string(),
+            ]
         );
 
         // The .env: the four keys.

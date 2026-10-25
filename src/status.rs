@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::embed::{self, Embedder, Unavailable};
 use crate::error::Result;
 use crate::store::{Embedded, Scope, Store, Table, candidates, turso::TursoStore};
+use crate::update::{self, Release};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Status {
@@ -112,6 +113,20 @@ pub(crate) fn unembedded(store: &impl Store) -> Result<Vec<(&'static str, u64)>>
         .collect()
 }
 
+/// The line that names a schema behind this binary, or nothing when every
+/// migration it carries is applied. Pending migrations are named so the agent
+/// knows the next step is `update`.
+pub(crate) fn schema_line(pending: &[&str]) -> Option<String> {
+    if pending.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "schema: {} migration(s) pending ({}) — run update",
+        pending.len(),
+        pending.join(", ")
+    ))
+}
+
 pub(crate) fn report(cfg: &Config, embedder: &dyn Embedder) -> Vec<String> {
     if !cfg.db_exists() {
         let mut out = vec![Status::Missing.line()];
@@ -121,14 +136,20 @@ pub(crate) fn report(cfg: &Config, embedder: &dyn Embedder) -> Vec<String> {
         return out;
     }
     let counts = TursoStore::open(cfg)
-        .and_then(|s| Ok((s.total_memories()?, unembedded(&s)?)))
+        .and_then(|s| {
+            let pending = update::pending_schema(&s, &Release::this_binary())?;
+            Ok((s.total_memories()?, unembedded(&s)?, pending))
+        })
         .map_err(|e| e.to_string().trim_start_matches("error: ").to_string());
-    let (count, missing) = match counts {
-        Ok((n, missing)) => (Ok(n), missing),
-        Err(e) => (Err(e), Vec::new()),
+    let (count, missing, pending) = match counts {
+        Ok((n, missing, pending)) => (Ok(n), missing, pending),
+        Err(e) => (Err(e), Vec::new(), Vec::new()),
     };
     let embeddings = embed::availability(cfg, embedder);
-    lines(&classify(true, count, &embeddings), &embeddings, &missing)
+    let mut out = lines(&classify(true, count, &embeddings), &embeddings, &missing);
+    let pending: Vec<&str> = pending.iter().map(|m| m.id).collect();
+    out.extend(schema_line(&pending));
+    out
 }
 
 pub fn run(cfg: &Config) -> Result<()> {
@@ -142,6 +163,7 @@ pub fn run(cfg: &Config) -> Result<()> {
 mod tests {
     use super::*;
     use crate::embed::fake::Fake;
+    use crate::store::turso::dump::tests::batch;
     use crate::store::turso::tests::{put, rows, scratch};
 
     const UP: std::result::Result<(), Unavailable> = Ok(());
@@ -271,6 +293,7 @@ mod tests {
     #[test]
     fn status_counts_active_unembedded_rows_per_table() {
         let cfg = scratch("status-unembedded");
+        batch(&cfg, include_str!("../migrations/0.1.0/instructions.sql"));
         put(&cfg, Table::Semantic, "embedded", true);
         let old = put(&cfg, Table::Semantic, "blind and superseded", false);
         put(&cfg, Table::Semantic, "blind one", false);
@@ -289,6 +312,33 @@ mod tests {
                 "unembedded: semantic 2, episodic 1 — run embed --missing".to_string(),
             ]
         );
+    }
+
+    /// A database from before the instructions table, the state `update` would
+    /// migrate: status names it so the agent knows to run `update`.
+    #[test]
+    fn a_schema_behind_the_binary_gets_a_schema_line() {
+        let cfg = scratch("status-schema-behind");
+        put(&cfg, Table::Semantic, "a fact", true);
+        batch(&cfg, "DROP TABLE IF EXISTS instructions;");
+
+        let out = report(&cfg, &Fake::up());
+        assert_eq!(out[0], "READY 1", "{out:?}");
+        assert_eq!(
+            out.last().map(String::as_str),
+            Some("schema: 1 migration(s) pending (instructions) — run update"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_current_schema_gets_no_schema_line() {
+        let cfg = scratch("status-schema-current");
+        put(&cfg, Table::Semantic, "a fact", true);
+        batch(&cfg, include_str!("../migrations/0.1.0/instructions.sql"));
+
+        let out = report(&cfg, &Fake::up());
+        assert!(!out.iter().any(|l| l.starts_with("schema:")), "{out:?}");
     }
 
     #[test]
