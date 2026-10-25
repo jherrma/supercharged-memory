@@ -13,7 +13,7 @@ use crate::config::{self, Config, ConfigError, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
-use crate::{embed, find_existing, init, recall, status, version};
+use crate::{backup, embed, find_existing, init, recall, status, version};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -273,10 +273,12 @@ pub enum Command {
     /// Never over a live database. A restore that is not counted is not a restore.
     Restore,
 
-    /// Write a validated gzipped dump to BACKUP_DIR, with daily+weekly retention.
+    /// Write a verified, gzipped SQL dump to BACKUP_DIR; keep 3 daily, 4 weekly.
     ///
-    /// Folds in supercharged-memory-backup.sh, which was a second implementation
-    /// of memlib's rules in shell and drifted from it.
+    /// stdout is the dump's absolute path and nothing else, printed once the
+    /// dump is written, verified and in place; everything else goes to stderr,
+    /// and a failure prints nothing on stdout. One read snapshot, so writers
+    /// are never blocked. Needs no tursodb.
     Backup,
 
     /// Probe for file-based Claude memory to migrate (read-only, no DB, no Ollama).
@@ -435,6 +437,7 @@ impl Command {
                     batch: *batch,
                 },
             ),
+            Command::Backup => backup::run(cfg),
             Command::FindExistingMemory { quiet } => find_existing::run(cfg, *quiet),
             Command::Init {
                 db_path,
@@ -676,6 +679,7 @@ mod tests {
                     | Command::Recall { .. }
                     | Command::Remember { .. }
                     | Command::Embed { .. }
+                    | Command::Backup
                     | Command::FindExistingMemory { .. }
                     | Command::Init { .. }
                     | Command::Config
@@ -748,6 +752,13 @@ mod tests {
             code(&["sm", "init", "--force"]),
             EXIT_USAGE,
             "init rejects unknown flags like every command"
+        );
+        // Rejected by clap, so nothing runs: a scheduled `backup` with a stray
+        // argument must fail, not back up something else.
+        assert_eq!(
+            code(&["sm", "backup", "--out", "/tmp/x"]),
+            EXIT_USAGE,
+            "backup takes no arguments"
         );
         // Validated before anything is probed or read, so this touches nothing.
         assert_eq!(

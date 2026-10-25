@@ -5,6 +5,10 @@
 //! because this corpus stores tursodb error strings as memory rows -- is now a
 //! typed error from a driver. None of that heuristic survives, deliberately.
 
+pub mod dump;
+
+use std::io::Read;
+use std::path::Path;
 use std::time::Duration;
 
 use turso::{Builder, Connection, Value};
@@ -23,6 +27,21 @@ const BACKOFF_STEP: Duration = Duration::from_millis(300);
 /// The schema a new database is created from, compiled in from the repo's
 /// `schema.sql`.
 pub const SCHEMA: &str = include_str!("../../schema.sql");
+
+/// Why a file cannot be a database, judged by its header alone, or `None` when
+/// it can be. An empty or foreign file is never opened: opening an empty one
+/// creates WAL files beside it.
+pub fn not_a_database(path: &Path) -> std::io::Result<Option<&'static str>> {
+    let mut head = Vec::new();
+    std::fs::File::open(path)?.take(16).read_to_end(&mut head)?;
+    Ok(if head.is_empty() {
+        Some("an empty file — a stale process re-creating a renamed path leaves one")
+    } else if head != b"SQLite format 3\0" {
+        Some("not an SQLite database")
+    } else {
+        None
+    })
+}
 
 pub struct TursoStore {
     conn: Connection,

@@ -18,7 +18,7 @@ pub mod tursodb;
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::claude_md::{self, EpisodicMode};
@@ -408,15 +408,8 @@ fn database(
 /// database. An empty or non-SQLite file is judged by its header alone: opening
 /// an empty one would create WAL files beside it.
 fn memory_count(cfg: &Config, db: &Path) -> std::result::Result<u64, String> {
-    let mut head = Vec::new();
-    fs::File::open(db)
-        .and_then(|f| f.take(16).read_to_end(&mut head))
-        .map_err(|e| e.to_string())?;
-    if head.is_empty() {
-        return Err("an empty file — a stale process re-creating a renamed path leaves one".into());
-    }
-    if head != b"SQLite format 3\0" {
-        return Err("not an SQLite database".into());
+    if let Some(why) = crate::store::turso::not_a_database(db).map_err(|e| e.to_string())? {
+        return Err(why.into());
     }
     TursoStore::open(&at(cfg, db))
         .and_then(|s| s.total_memories())
