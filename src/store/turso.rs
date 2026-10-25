@@ -20,6 +20,10 @@ use crate::error::{Error, Result};
 const MAX_ATTEMPTS: u32 = 6;
 const BACKOFF_STEP: Duration = Duration::from_millis(300);
 
+/// The schema a new database is created from, compiled in from the repo's
+/// `schema.sql`.
+pub const SCHEMA: &str = include_str!("../../schema.sql");
+
 pub struct TursoStore {
     conn: Connection,
 }
@@ -51,6 +55,13 @@ impl TursoStore {
         .map_err(map_err)?;
 
         Ok(TursoStore { conn })
+    }
+
+    /// Create the memory tables from the embedded schema, through this same
+    /// connection: the database `init` creates is opened exactly the way every
+    /// other command opens it.
+    pub fn create_schema(&self) -> Result<()> {
+        self.with_retry(|| pollster::block_on(self.conn.execute_batch(SCHEMA)))
     }
 
     /// Run a query returning a single integer.
@@ -641,9 +652,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::config::{DB_ENV, DotEnv, Env};
 
-    /// The repo's schema, the same file a fresh install is created from.
-    const SCHEMA: &str = include_str!("../../schema.sql");
-
     /// A config pointing at a fresh database built from the real schema, in a
     /// directory of its own. Ollama is pointed at a port that refuses at once,
     /// in case anything reaches past an injected embedder.
@@ -751,6 +759,21 @@ pub(crate) mod tests {
     #[test]
     fn the_scratch_database_has_the_memory_tables() {
         let cfg = scratch("fixture");
+        assert_eq!(TursoStore::open(&cfg).unwrap().total_memories().unwrap(), 0);
+    }
+
+    /// What `init` does: an empty file created exclusively, opened through the
+    /// one opener, given the schema.
+    #[test]
+    fn create_schema_turns_an_empty_file_into_a_memory_database() {
+        let mut cfg = scratch("create-schema");
+        cfg.db_path = cfg.db_path.with_file_name("fresh.db");
+        std::fs::File::create_new(&cfg.db_path).unwrap();
+        let store = TursoStore::open(&cfg).unwrap();
+        store.create_schema().unwrap();
+        assert_eq!(store.total_memories().unwrap(), 0);
+        // Idempotent, like the schema itself.
+        store.create_schema().unwrap();
         assert_eq!(TursoStore::open(&cfg).unwrap().total_memories().unwrap(), 0);
     }
 

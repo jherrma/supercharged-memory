@@ -100,7 +100,6 @@ pub struct Config {
     #[allow(dead_code)]
     pub version: Option<String>,
     /// Where to look for the `tursodb` CLI. Only detected, never required.
-    #[allow(dead_code)]
     pub turso_bin: PathBuf,
     /// The eval harness's derived query-embedding cache.
     #[allow(dead_code)]
@@ -114,6 +113,12 @@ pub struct Config {
     /// Claude Code's config dir: `CLAUDE_CONFIG_DIR` from the real environment,
     /// else `~/.claude`. Where its CLAUDE.md and file-based memory live.
     pub claude_dir: PathBuf,
+    /// Claude Code's global config file, where user-scope MCP servers are
+    /// registered: `~/.claude.json`, or inside `CLAUDE_CONFIG_DIR` when that
+    /// is set.
+    pub claude_json: PathBuf,
+    /// The user's home directory.
+    pub home: PathBuf,
     /// The binary and its `.env`, for the reports that explain a path.
     pub exe: PathBuf,
     pub dotenv_path: PathBuf,
@@ -416,13 +421,16 @@ impl Config {
         // Claude Code itself looks, and only the real environment tells it that.
         // Re-collected from its components so it prints the way the reference's
         // `pathlib.Path` printed it -- no trailing or doubled separator.
-        let claude_dir = env
-            .get("CLAUDE_CONFIG_DIR")
-            .filter(|s| !s.is_empty())
+        let config_dir = env.get("CLAUDE_CONFIG_DIR").filter(|s| !s.is_empty());
+        let claude_dir: PathBuf = config_dir
             .map(PathBuf::from)
             .unwrap_or_else(|| env.home.join(".claude"))
             .components()
             .collect();
+        let claude_json = match config_dir {
+            Some(_) => claude_dir.join(".claude.json"),
+            None => env.home.join(".claude.json"),
+        };
 
         let mut settings = r.settings;
         settings.sort_by_key(|s| KEYS.iter().position(|k| *k == s.key));
@@ -456,6 +464,8 @@ impl Config {
             eval_dir,
             vfs,
             claude_dir,
+            claude_json,
+            home: env.home.clone(),
             exe: env.dotenv.exe.clone(),
             dotenv_path: env.dotenv.path.clone(),
             dotenv_present: env.dotenv.present(),
@@ -855,8 +865,13 @@ pub(crate) mod tests {
     fn the_claude_config_dir_defaults_under_home_and_follows_its_env_var() {
         let c = Config::from_env(&env(&[])).unwrap();
         assert_eq!(c.claude_dir, PathBuf::from("/home/tester/.claude"));
+        assert_eq!(c.home, PathBuf::from("/home/tester"));
+        // Claude Code's global config sits in the home directory by default,
+        // and inside the config dir when one is set.
+        assert_eq!(c.claude_json, PathBuf::from("/home/tester/.claude.json"));
         let c = Config::from_env(&env(&[("CLAUDE_CONFIG_DIR", "/cfg/claude")])).unwrap();
         assert_eq!(c.claude_dir, PathBuf::from("/cfg/claude"));
+        assert_eq!(c.claude_json, PathBuf::from("/cfg/claude/.claude.json"));
         // Empty is unset, as everywhere else.
         let c = Config::from_env(&env(&[("CLAUDE_CONFIG_DIR", "")])).unwrap();
         assert_eq!(c.claude_dir, PathBuf::from("/home/tester/.claude"));

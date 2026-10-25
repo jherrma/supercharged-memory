@@ -32,6 +32,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+// The managed block's markers: the block is this system's instructions, not
+// the user's memory, whichever writer put it there.
+use crate::claude_md::{BLOCK_BEGIN_PREFIX, BLOCK_END};
 use crate::config::{Config, MAX_TEXT};
 use crate::error::Result;
 use crate::json::{self, Json};
@@ -44,13 +47,6 @@ use crate::json::{self, Json};
 /// reserve -- the same 1800 chars of prose the migration runbook asks for.
 pub const KEYWORD_RESERVE: usize = 200;
 pub const EFFECTIVE_MAX_TEXT: usize = MAX_TEXT - KEYWORD_RESERVE;
-
-/// The start of this system's managed block in CLAUDE.md. A prefix, not a whole
-/// line: the installer script wrote `(managed by install-claude-md.sh) -->` after
-/// it and `init` writes its own ending, and both blocks are this system's
-/// instructions, not the user's memory.
-pub const BLOCK_BEGIN_PREFIX: &str = "<!-- BEGIN agentic-memory";
-pub const BLOCK_END: &str = "<!-- END agentic-memory -->";
 
 /// `.md` only: Claude Code's file-based memory writes nothing else (its memory
 /// permission gate is a `.md` suffix test). Matched case-insensitively -- a

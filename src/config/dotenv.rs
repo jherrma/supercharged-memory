@@ -275,7 +275,6 @@ impl DotEnv {
 // The writer, shared by first-run setup and by `update`.
 
 /// What to do with a key that already holds a different value.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnConflict {
     /// Leave it and report it. The default for every caller: a value the user

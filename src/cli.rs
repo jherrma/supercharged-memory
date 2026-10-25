@@ -4,6 +4,7 @@
 //! is next to the signature.
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -12,7 +13,7 @@ use crate::config::{self, Config, ConfigError, Env};
 use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
-use crate::{embed, find_existing, recall, status, version};
+use crate::{embed, find_existing, init, recall, status, version};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -291,12 +292,33 @@ pub enum Command {
         quiet: bool,
     },
 
-    /// Render CLAUDE.md.template into ~/.claude/CLAUDE.md between the managed markers.
+    /// First-run setup: create the database, write the .env, install the instructions.
     ///
-    /// Reads the existing block BEFORE it defaults, recovers EPISODIC_MODE and
-    /// BASE_PATH from it, refuses a BASE_PATH that disagrees, and writes the
-    /// sync stamp UPDATE.md is built on.
-    Install,
+    /// A dry run unless -y: prints the plan, ending `Ask the user to confirm`,
+    /// and changes nothing. Never writes an existing database, never overwrites
+    /// a differing .env value, never rewrites CLAUDE.md text -- it appends the
+    /// instructions only when their headline is absent. Ollama and tursodb are
+    /// optional; each missing one is listed with what the user loses.
+    Init {
+        /// The database file: adopted if it is a memory database, created from
+        /// the embedded schema if absent. Default: the configured path.
+        #[arg(long = "db-path", value_name = "FILE")]
+        db_path: Option<PathBuf>,
+
+        /// Where `backup` writes its dumps. Default: the configured directory.
+        #[arg(long = "backup-dir", value_name = "DIR")]
+        backup_dir: Option<PathBuf>,
+
+        /// How much the agent stores as episodic memory: every-prompt,
+        /// major-actions, major-events (default) or manual.
+        #[arg(long = "episodic-mode", value_name = "MODE")]
+        episodic_mode: Option<String>,
+
+        /// Apply the plan. Also the acknowledgement of every missing dependency
+        /// the plan lists.
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
 
     /// Recall-quality harness: validate the eval set, report metrics, sweep RECALL_ALPHA.
     ///
@@ -328,7 +350,7 @@ impl Command {
             Command::Restore => "restore",
             Command::Backup => "backup",
             Command::FindExistingMemory { .. } => "find-existing-memory",
-            Command::Install => "install",
+            Command::Init { .. } => "init",
             Command::Eval => "eval",
             Command::Config => "config",
         }
@@ -414,6 +436,20 @@ impl Command {
                 },
             ),
             Command::FindExistingMemory { quiet } => find_existing::run(cfg, *quiet),
+            Command::Init {
+                db_path,
+                backup_dir,
+                episodic_mode,
+                yes,
+            } => init::run(
+                cfg,
+                &init::Args {
+                    db_path: db_path.clone(),
+                    backup_dir: backup_dir.clone(),
+                    episodic_mode: episodic_mode.clone(),
+                    yes: *yes,
+                },
+            ),
             _ => Err(Error::NotImplemented {
                 command: self.name(),
             }),
@@ -496,7 +532,7 @@ mod tests {
             "restore",
             "backup",
             "find-existing-memory",
-            "install",
+            "init",
             "eval",
             "config",
         ] {
@@ -505,6 +541,9 @@ mod tests {
                 "{want} is not registered"
             );
         }
+        // `init` replaced the installer script's stand-in; nothing is left to
+        // call by the old name.
+        assert!(!registered.contains(&"install".to_string()));
     }
 
     /// Minimal valid arguments per subcommand, so each one gets past clap.
@@ -621,7 +660,12 @@ mod tests {
             Command::Restore,
             Command::Backup,
             Command::FindExistingMemory { quiet: false },
-            Command::Install,
+            Command::Init {
+                db_path: None,
+                backup_dir: None,
+                episodic_mode: None,
+                yes: false,
+            },
             Command::Eval,
             Command::Config,
         ] {
@@ -633,6 +677,7 @@ mod tests {
                     | Command::Remember { .. }
                     | Command::Embed { .. }
                     | Command::FindExistingMemory { .. }
+                    | Command::Init { .. }
                     | Command::Config
             ) {
                 assert!(matches!(cmd.run(&cfg), Err(Error::NotImplemented { .. })));
@@ -698,6 +743,22 @@ mod tests {
             code(&["sm", "find-existing-memory", "--quiet", "--json"]),
             EXIT_USAGE,
             "the probe rejects unknown flags too"
+        );
+        assert_eq!(
+            code(&["sm", "init", "--force"]),
+            EXIT_USAGE,
+            "init rejects unknown flags like every command"
+        );
+        // Validated before anything is probed or read, so this touches nothing.
+        assert_eq!(
+            code(&["sm", "init", "--episodic-mode", "sometimes"]),
+            EXIT_REFUSED,
+            "an invalid episodic mode is a refusal"
+        );
+        assert_eq!(
+            code(&["sm", "init", "--db-path", "relative.db", "-y"]),
+            EXIT_REFUSED,
+            "a relative path cannot go into the .env"
         );
         assert_eq!(code(&["sm", "frobnicate"]), EXIT_USAGE, "unknown command");
         assert_eq!(code(&["sm"]), EXIT_USAGE, "no arguments prints usage");

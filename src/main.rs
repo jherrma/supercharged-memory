@@ -4,11 +4,13 @@
 //! parsed its text output; see issue #17. Every subcommand is wired up and documented here, and each
 //! one is filled in as it is ported.
 
+mod claude_md;
 mod cli;
 mod config;
 mod embed;
 mod error;
 mod find_existing;
+mod init;
 mod json;
 mod recall;
 mod remember;

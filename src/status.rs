@@ -112,7 +112,7 @@ pub(crate) fn unembedded(store: &impl Store) -> Result<Vec<(&'static str, u64)>>
         .collect()
 }
 
-fn report(cfg: &Config, embedder: &dyn Embedder) -> Vec<String> {
+pub(crate) fn report(cfg: &Config, embedder: &dyn Embedder) -> Vec<String> {
     if !cfg.db_exists() {
         let mut out = vec![Status::Missing.line()];
         for line in candidates::missing_report(cfg) {
