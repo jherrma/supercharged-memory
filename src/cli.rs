@@ -15,7 +15,7 @@ use crate::remember;
 use crate::store;
 use crate::{
     backup, coworkers, embed, eval, find_existing, init, instructions, recall, restore, rows,
-    sleep, status, update, version,
+    runbook, sleep, status, update, version,
 };
 
 #[derive(Parser, Debug)]
@@ -822,6 +822,18 @@ pub enum Command {
     /// built-in default; a real variable that overrides a differing .env value
     /// says so.
     Config,
+
+    /// Print a procedure the instructions point at, or list them.
+    ///
+    /// The runbooks are compiled in; nothing is read from disk. With no name,
+    /// one line per runbook. `{{EXE}}` in a text is replaced by this binary's
+    /// path, so a printed command line runs as it stands. Needs no database.
+    Runbook {
+        /// The runbook to print: setup, update, sleep, deep-sleep, migrate or
+        /// new-coworker.
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+    },
 }
 
 impl Command {
@@ -848,6 +860,7 @@ impl Command {
             Command::Update { .. } => "update",
             Command::Eval { .. } => "eval",
             Command::Config => "config",
+            Command::Runbook { .. } => "runbook",
         }
     }
 
@@ -855,6 +868,7 @@ impl Command {
         match self {
             Command::Status => status::run(cfg),
             Command::Config => config::run(cfg),
+            Command::Runbook { name } => runbook::run(cfg, name.as_deref()),
             Command::Recall {
                 query,
                 table,
@@ -1302,6 +1316,7 @@ mod tests {
             "update",
             "eval",
             "config",
+            "runbook",
         ] {
             assert!(
                 registered.contains(&want.to_string()),
@@ -1531,6 +1546,7 @@ mod tests {
                 last_run: false,
             },
             Command::Config,
+            Command::Runbook { name: None },
         ] {
             assert!(!cmd.name().is_empty());
             if !matches!(
@@ -1552,6 +1568,7 @@ mod tests {
                     | Command::Init { .. }
                     | Command::Update { .. }
                     | Command::Config
+                    | Command::Runbook { .. }
             ) {
                 assert!(matches!(cmd.run(&cfg), Err(Error::NotImplemented { .. })));
             }
@@ -2318,6 +2335,21 @@ mod tests {
         );
         // Rejected by clap, so nothing runs: a scheduled `backup` with a stray
         // argument must fail, not back up something else.
+        assert_eq!(
+            code(&["sm", "runbook", "sleep", "setup"]),
+            EXIT_USAGE,
+            "runbook takes one name at most"
+        );
+        assert_eq!(
+            code(&["sm", "runbook", "no-such-runbook"]),
+            EXIT_REFUSED,
+            "an unknown name is a refusal"
+        );
+        assert_eq!(
+            code(&["sm", "runbook"]),
+            EXIT_OK,
+            "no name lists the runbooks"
+        );
         assert_eq!(
             code(&["sm", "backup", "--out", "/tmp/x"]),
             EXIT_USAGE,

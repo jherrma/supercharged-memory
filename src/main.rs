@@ -21,6 +21,7 @@ mod remember;
 mod render;
 mod restore;
 mod rows;
+mod runbook;
 mod sleep;
 mod status;
 mod store;
