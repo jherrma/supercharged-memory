@@ -14,8 +14,8 @@ use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
 use crate::{
-    backup, coworkers, embed, find_existing, init, instructions, recall, restore, sleep, status,
-    update, version,
+    backup, coworkers, embed, eval, find_existing, init, instructions, recall, restore, sleep,
+    status, update, version,
 };
 
 #[derive(Parser, Debug)]
@@ -621,11 +621,109 @@ pub enum Command {
         episodic_mode: Option<String>,
     },
 
-    /// Recall-quality harness: validate the eval set, report metrics, sweep RECALL_ALPHA.
+    /// Recall-quality harness: validate the eval set, score the ranking, sweep RECALL_ALPHA.
     ///
-    /// Deep sleep D6 runs this, and it is how the ranking is proven
-    /// unchanged. eval_cases are AUTHORED and cannot be regenerated.
-    Eval,
+    /// Exactly one mode per run. eval_cases are AUTHORED and cannot be
+    /// regenerated, so nothing here deletes one: --retire-case sets
+    /// retired_at. --validate needs no embeddings and exits 1 while a case
+    /// points at a purged, superseded or reused row; --report, --sweep and
+    /// --variants need Ollama and an embedded corpus and refuse without them.
+    /// --report appends one eval_runs row; --sweep only reports and never
+    /// changes RECALL_ALPHA. --add-case computes the stamps from the targets:
+    /// they are never typed.
+    #[command(
+        group(
+            ArgGroup::new("mode")
+                .required(true)
+                .args([
+                    "validate",
+                    "report",
+                    "sweep",
+                    "variants",
+                    "import",
+                    "repoint",
+                    "retire_case",
+                    "add_case",
+                    "last_run",
+                ])
+        ),
+        // One-member groups, because clap counts a required ARGUMENT as
+        // satisfied when it conflicts with one that is present.
+        group(ArgGroup::new("adding").args(["add_case"])),
+        group(ArgGroup::new("repointing").args(["repoint"]))
+    )]
+    Eval {
+        /// Check every live case still points at current rows whose created_at
+        /// matches its stamp. Exit 1 when one does not; 0 with nothing to check.
+        #[arg(long)]
+        validate: bool,
+
+        /// Score the shipped ranking at the configured RECALL_ALPHA, record the
+        /// run and diff it against the last one.
+        #[arg(long)]
+        report: bool,
+
+        /// Score the shipped ranking at each of these alphas (comma-separated)
+        /// and print the plateau. Never records, never changes the value.
+        #[arg(long, value_name = "A,B,C", value_parser = eval::score::parse_alphas)]
+        sweep: Option<eval::score::Alphas>,
+
+        /// Developer comparison: the frozen legacy ranker, pure cosine,
+        /// IDF-lexicographic and the shipped blend.
+        #[arg(long)]
+        variants: bool,
+
+        /// Migrate a legacy eval.jsonl / history.jsonl directory into the
+        /// database. Idempotent; refused whole when anything in it is invalid.
+        #[arg(long, value_name = "DIR")]
+        import: Option<PathBuf>,
+
+        /// Point a case at a new target (a current row) and refresh its stamp.
+        #[arg(long, num_args = 2, value_names = ["CASE", "NEW_ID"])]
+        repoint: Option<Vec<String>>,
+
+        /// --repoint: the target to replace, required when the case has more
+        /// than one.
+        #[arg(long, value_name = "OLD_ID", requires = "repointing")]
+        from: Option<i64>,
+
+        /// Retire a case: sets retired_at, never deletes.
+        #[arg(long = "retire-case", value_name = "CASE")]
+        retire_case: Option<String>,
+
+        /// Author a case (with --id, --class, --table, --query, --expect). The
+        /// stamps are read from the targets.
+        #[arg(
+            long = "add-case",
+            requires_all = ["id", "class", "table", "query", "expect"]
+        )]
+        add_case: bool,
+
+        /// --add-case: the case's label, unique forever.
+        #[arg(long, requires = "adding")]
+        id: Option<String>,
+
+        /// --add-case: its class, at most 32 characters, one already in use
+        /// unless no case exists.
+        #[arg(long, requires = "adding")]
+        class: Option<String>,
+
+        /// --add-case: the table the targets are in.
+        #[arg(long, value_enum, requires = "adding")]
+        table: Option<OneTable>,
+
+        /// --add-case: the query a real user would type, 1 to 512 characters.
+        #[arg(long, requires = "adding")]
+        query: Option<String>,
+
+        /// --add-case: the target ids, comma-separated, all current.
+        #[arg(long, value_name = "ID[,ID...]", requires = "adding")]
+        expect: Option<String>,
+
+        /// The newest eval_runs.ran_at, or `none`.
+        #[arg(long = "last-run")]
+        last_run: bool,
+    },
 
     /// Print every setting, its value and where it came from: env, .env or default.
     ///
@@ -655,7 +753,7 @@ impl Command {
             Command::FindExistingMemory { .. } => "find-existing-memory",
             Command::Init { .. } => "init",
             Command::Update { .. } => "update",
-            Command::Eval => "eval",
+            Command::Eval { .. } => "eval",
             Command::Config => "config",
         }
     }
@@ -743,6 +841,7 @@ impl Command {
             ),
             Command::Sleep { .. } => sleep::run(cfg, &self.sleep_mode()),
             Command::Coworkers { .. } => coworkers::run(cfg, &self.coworkers_mode()),
+            Command::Eval { .. } => eval::run(cfg, &self.eval_mode()),
             Command::Backup => backup::run(cfg),
             Command::Restore { dump, out, force } => restore::run(
                 cfg,
@@ -892,6 +991,61 @@ impl Command {
             coworkers::Mode::Load(name.clone())
         } else {
             coworkers::Mode::List
+        }
+    }
+
+    /// The one mode an `eval` invocation names. clap's `mode` group admits
+    /// exactly one, so the order here decides nothing.
+    fn eval_mode(&self) -> eval::Mode {
+        let Command::Eval {
+            validate: _,
+            report,
+            sweep,
+            variants,
+            import,
+            repoint,
+            from,
+            retire_case,
+            add_case,
+            id,
+            class,
+            table,
+            query,
+            expect,
+            last_run,
+        } = self
+        else {
+            unreachable!("eval_mode is only called for eval")
+        };
+        let given = |v: &Option<String>| v.clone().unwrap_or_default();
+        if *report {
+            eval::Mode::Report
+        } else if let Some(alphas) = sweep {
+            eval::Mode::Sweep(alphas.0.clone())
+        } else if *variants {
+            eval::Mode::Variants
+        } else if let Some(dir) = import {
+            eval::Mode::Import(dir.clone())
+        } else if let Some([case, to]) = repoint.as_deref() {
+            eval::Mode::Repoint {
+                case: case.clone(),
+                to: to.clone(),
+                from: *from,
+            }
+        } else if let Some(case) = retire_case {
+            eval::Mode::RetireCase(case.clone())
+        } else if *add_case {
+            eval::Mode::AddCase {
+                id: given(id),
+                class: given(class),
+                table: table.map_or(store::Table::Semantic, Into::into),
+                query: given(query),
+                expect: given(expect),
+            }
+        } else if *last_run {
+            eval::Mode::LastRun
+        } else {
+            eval::Mode::Validate
         }
     }
 
@@ -1047,6 +1201,7 @@ mod tests {
             "restore" => args.extend(["--out", "/nonexistent/restored.db"]),
             "sleep" => args.push("--staleness"),
             "coworkers" => args.push("--list"),
+            "eval" => args.push("--validate"),
             _ => {}
         }
         args
@@ -1214,7 +1369,23 @@ mod tests {
                 print_block: false,
                 episodic_mode: None,
             },
-            Command::Eval,
+            Command::Eval {
+                validate: true,
+                report: false,
+                sweep: None,
+                variants: false,
+                import: None,
+                repoint: None,
+                from: None,
+                retire_case: None,
+                add_case: false,
+                id: None,
+                class: None,
+                table: None,
+                query: None,
+                expect: None,
+                last_run: false,
+            },
             Command::Config,
         ] {
             assert!(!cmd.name().is_empty());
@@ -1227,6 +1398,7 @@ mod tests {
                     | Command::Instructions { .. }
                     | Command::Embed { .. }
                     | Command::Coworkers { .. }
+                    | Command::Eval { .. }
                     | Command::Sleep { .. }
                     | Command::Backup
                     | Command::Restore { .. }
@@ -1358,6 +1530,148 @@ mod tests {
             (vec!["--staleness", "--frobnicate"], "unknown flag"),
         ] {
             let mut full = vec!["sm", "sleep"];
+            full.extend(args);
+            match Cli::try_parse_from(&full) {
+                Err(e) => assert!(e.use_stderr(), "{why}: {full:?}"),
+                Ok(cli) => panic!("{why}: {full:?} parsed as {:?}", cli.command),
+            }
+        }
+    }
+
+    fn eval_mode(args: &[&str]) -> eval::Mode {
+        let mut full = vec!["sm", "eval"];
+        full.extend(args);
+        parsed(&full).eval_mode()
+    }
+
+    #[test]
+    fn each_eval_flag_names_its_mode() {
+        use eval::Mode;
+        assert_eq!(eval_mode(&["--validate"]), Mode::Validate);
+        assert_eq!(eval_mode(&["--report"]), Mode::Report);
+        assert_eq!(eval_mode(&["--variants"]), Mode::Variants);
+        assert_eq!(eval_mode(&["--last-run"]), Mode::LastRun);
+        assert_eq!(
+            eval_mode(&["--sweep", "0.05,0.1,0.5"]),
+            Mode::Sweep(vec![0.05, 0.1, 0.5])
+        );
+        assert_eq!(
+            eval_mode(&["--import", "/old/eval"]),
+            Mode::Import(PathBuf::from("/old/eval"))
+        );
+        assert_eq!(
+            eval_mode(&["--retire-case", "s01"]),
+            Mode::RetireCase("s01".into())
+        );
+        assert_eq!(
+            eval_mode(&["--repoint", "s01", "42"]),
+            Mode::Repoint {
+                case: "s01".into(),
+                to: "42".into(),
+                from: None
+            }
+        );
+        assert_eq!(
+            eval_mode(&["--repoint", "s01", "42", "--from", "7"]),
+            Mode::Repoint {
+                case: "s01".into(),
+                to: "42".into(),
+                from: Some(7)
+            }
+        );
+        assert_eq!(
+            eval_mode(&[
+                "--add-case",
+                "--id",
+                "s09",
+                "--class",
+                "semantic",
+                "--table",
+                "episodic",
+                "--query",
+                "how do I x",
+                "--expect",
+                "288,289",
+            ]),
+            Mode::AddCase {
+                id: "s09".into(),
+                class: "semantic".into(),
+                table: store::Table::Episodic,
+                query: "how do I x".into(),
+                expect: "288,289".into(),
+            }
+        );
+    }
+
+    /// Every malformed `eval` is a usage error. Parsed only, never run: a case
+    /// that got past clap must not reach the real environment's database.
+    #[test]
+    fn malformed_eval_invocations_are_usage_errors() {
+        let add = [
+            "--add-case",
+            "--id",
+            "s09",
+            "--class",
+            "semantic",
+            "--table",
+            "semantic",
+            "--query",
+            "q",
+            "--expect",
+            "1",
+        ];
+        let without = |flag: &str| -> Vec<&str> {
+            let mut out = Vec::new();
+            let mut skip = false;
+            for a in add {
+                if skip {
+                    skip = false;
+                } else if a == flag {
+                    skip = true;
+                } else {
+                    out.push(a);
+                }
+            }
+            out
+        };
+        let mut cases: Vec<(Vec<&str>, &str)> = vec![
+            (vec![], "no mode"),
+            (vec!["--validate", "--report"], "two modes"),
+            (vec!["--report", "--last-run"], "two modes"),
+            (vec!["--sweep"], "no alphas"),
+            (vec!["--sweep", "a,b"], "not numbers"),
+            (vec!["--sweep", "0.1,,0.2"], "an empty alpha"),
+            (vec!["--sweep", "-1"], "a negative alpha"),
+            (vec!["--repoint", "s01"], "no new id"),
+            (vec!["--repoint", "s01", "1", "2"], "three values"),
+            (vec!["--from", "7"], "--from belongs to --repoint"),
+            (
+                vec!["--retire-case", "s01", "--from", "7"],
+                "--from belongs to --repoint",
+            ),
+            (vec!["--repoint", "s01", "1", "--from", "x"], "not an id"),
+            (vec!["--id", "s01"], "a field is no mode"),
+            (
+                vec!["--validate", "--id", "s01"],
+                "--id belongs to --add-case",
+            ),
+            (
+                vec!["--report", "--query", "q"],
+                "--query belongs to --add-case",
+            ),
+            (vec!["--validate", "--table", "semantic"], "no table"),
+            (vec!["--validate", "--expect", "1"], "no targets"),
+            (vec!["--validate", "--class", "x"], "no class"),
+            (vec!["--validate", "--frobnicate"], "unknown flag"),
+        ];
+        for flag in ["--id", "--class", "--table", "--query", "--expect"] {
+            cases.push((without(flag), "--add-case needs every field"));
+        }
+        let mut instructions_table = add.to_vec();
+        instructions_table[6] = "instructions";
+        cases.push((instructions_table, "instructions are not measured"));
+        for (args, why) in cases {
+            let mut full = vec!["sm", "eval"];
             full.extend(args);
             match Cli::try_parse_from(&full) {
                 Err(e) => assert!(e.use_stderr(), "{why}: {full:?}"),

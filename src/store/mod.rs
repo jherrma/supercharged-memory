@@ -22,7 +22,7 @@ use crate::recall::rank::WeightedToken;
 /// A table that stores rows with text and an embedding: the two memory tables,
 /// and the instructions -- directives, not memories, but searched, embedded and
 /// guarded the same way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Table {
     Semantic,
     Episodic,
@@ -208,6 +208,52 @@ pub struct Appraised {
     pub superseded: Vec<i64>,
 }
 
+/// An authored recall-quality case: a query, the rows it should find, and the
+/// `created_at` of each of those rows at the time it was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalCase {
+    pub id: String,
+    pub class: String,
+    /// `Semantic` or `Episodic`; instructions are not measured.
+    pub table: Table,
+    pub query: String,
+    pub expect: Vec<i64>,
+    /// `created_at` of each target when the case was authored, in `expect`
+    /// order. A reused row id shows up as a stamp that no longer matches.
+    pub stamps: Vec<String>,
+    pub retired: bool,
+}
+
+/// What a row id currently is: whether it exists, when it was created, and
+/// whether it is current truth and has a vector to be ranked by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub id: i64,
+    pub created_at: String,
+    pub current: bool,
+    pub embedded: bool,
+}
+
+/// One step of a semantic supersede chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainLink {
+    pub superseded_by: Option<i64>,
+    pub retired: bool,
+}
+
+/// One scored run of the harness.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvalRun {
+    /// `None` lets the schema default to CURRENT_TIMESTAMP.
+    pub ran_at: Option<String>,
+    pub alpha: f64,
+    pub embed_model: String,
+    pub n_cases: i64,
+    pub r1: f64,
+    pub r5: f64,
+    pub mrr: f64,
+}
+
 /// Rows plus their column names, which is what the output format needs. It is a
 /// result set, not a query -- a MongoDB backend produces the same shape.
 #[derive(Debug, Clone)]
@@ -377,6 +423,56 @@ pub trait Store {
     /// The current `feedback` memories tagged to this coworker, created at or
     /// after `since`, oldest first.
     fn feedback_since(&self, coworker: i64, since: &str) -> Result<ResultSet>;
+
+    /// Whether the database holds both eval tables. One from before the
+    /// harness lacks them, and nothing migrates them in.
+    fn has_eval_tables(&self) -> Result<bool>;
+
+    /// Every live eval case (not retired), by id.
+    fn eval_cases(&self) -> Result<Vec<EvalCase>>;
+
+    /// The eval case with exactly this id, retired or not.
+    fn eval_case(&self, id: &str) -> Result<Option<EvalCase>>;
+
+    /// What each of these ids is in this table, for the ids that exist. A
+    /// semantic row is current when it is neither superseded nor retired.
+    fn targets(&self, table: Table, ids: &[i64]) -> Result<Vec<Target>>;
+
+    /// The supersede link of one semantic row, or `None` when no row has the id.
+    fn chain_link(&self, id: i64) -> Result<Option<ChainLink>>;
+
+    /// Store a new eval case as given; the caller computed the stamps.
+    fn insert_eval_case(&self, case: &EvalCase) -> Result<()>;
+
+    /// Replace the targets and their stamps of a live case in ONE statement,
+    /// so the two columns can never disagree. `false` when no live case has
+    /// this id.
+    fn set_eval_targets(&self, case: &str, expect: &[i64], stamps: &[String]) -> Result<bool>;
+
+    /// Retire one live eval case: `retired_at` is set, nothing is deleted.
+    /// `false` when no live case has this id.
+    fn retire_eval_case(&self, case: &str) -> Result<bool>;
+
+    /// The most recently recorded run (highest id): the baseline a report
+    /// diffs against.
+    fn last_eval_run(&self) -> Result<Option<EvalRun>>;
+
+    /// The newest `ran_at` of any run.
+    fn newest_eval_run_time(&self) -> Result<Option<String>>;
+
+    /// Record one run.
+    fn insert_eval_run(&self, run: &EvalRun) -> Result<()>;
+
+    /// Whether a run with exactly these figures and this `ran_at` is recorded.
+    fn has_eval_run(&self, run: &EvalRun) -> Result<bool>;
+
+    /// Id and lowercased text of every active row that has a vector: the rows a
+    /// vector search ranks.
+    fn eval_corpus(&self, table: Table) -> Result<Vec<(i64, String)>>;
+
+    /// Id and cosine distance (six decimals) to `vector` of every active row
+    /// that has a vector, by id.
+    fn eval_distances(&self, table: Table, vector: &[f32]) -> Result<Vec<(i64, f64)>>;
 }
 
 /// Open the configured database, or refuse with the candidate report.

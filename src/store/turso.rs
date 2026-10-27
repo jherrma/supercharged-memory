@@ -17,8 +17,9 @@ use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Builder, Connection, Value};
 
 use super::{
-    ActiveRow, Appraisal, Appraised, Cell, Coworker, Embedded, InstructionKey, InstructionState,
-    NewMemory, Purged, ResultSet, Scope, SearchQuery, Store, Table,
+    ActiveRow, Appraisal, Appraised, Cell, ChainLink, Coworker, Embedded, EvalCase, EvalRun,
+    InstructionKey, InstructionState, NewMemory, Purged, ResultSet, Scope, SearchQuery, Store,
+    Table, Target,
 };
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -1144,6 +1145,317 @@ impl Store for TursoStore {
             vec![Value::Text(since.to_string()), Value::Integer(coworker)],
         )
     }
+
+    fn has_eval_tables(&self) -> Result<bool> {
+        let n = self.scalar_i64(
+            "SELECT count(*) FROM sqlite_schema \
+             WHERE type = 'table' AND name IN ('eval_cases', 'eval_runs');",
+        )?;
+        Ok(n == 2)
+    }
+
+    fn eval_cases(&self) -> Result<Vec<EvalCase>> {
+        let rs = self.query(
+            &format!("{EVAL_CASE_COLUMNS} WHERE retired_at IS NULL ORDER BY id;"),
+            Vec::new(),
+        )?;
+        rs.rows.iter().map(|r| eval_case_from(r)).collect()
+    }
+
+    fn eval_case(&self, id: &str) -> Result<Option<EvalCase>> {
+        let rs = self.query(
+            &format!("{EVAL_CASE_COLUMNS} WHERE id = ?;"),
+            vec![Value::Text(id.to_string())],
+        )?;
+        rs.rows.first().map(|r| eval_case_from(r)).transpose()
+    }
+
+    fn targets(&self, table: Table, ids: &[i64]) -> Result<Vec<Target>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rs = self.query(
+            &format!(
+                "SELECT id, created_at, CASE WHEN {} THEN 1 ELSE 0 END, \
+                 embedding IS NOT NULL FROM {} WHERE id IN ({}) ORDER BY id;",
+                active(table),
+                table.name(),
+                placeholders(ids)
+            ),
+            int_params(ids),
+        )?;
+        Ok(rs
+            .rows
+            .iter()
+            .filter_map(|r| match r.as_slice() {
+                [
+                    Cell::Int(id),
+                    Cell::Text(created_at),
+                    Cell::Int(current),
+                    Cell::Int(embedded),
+                ] => Some(Target {
+                    id: *id,
+                    created_at: created_at.clone(),
+                    current: *current != 0,
+                    embedded: *embedded != 0,
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn chain_link(&self, id: i64) -> Result<Option<ChainLink>> {
+        let rs = self.query(
+            "SELECT superseded_by, retired_at IS NOT NULL FROM semantic_memory WHERE id = ?;",
+            vec![Value::Integer(id)],
+        )?;
+        Ok(match rs.rows.first().map(Vec::as_slice) {
+            Some([next, Cell::Int(retired)]) => Some(ChainLink {
+                superseded_by: match next {
+                    Cell::Int(n) => Some(*n),
+                    _ => None,
+                },
+                retired: *retired != 0,
+            }),
+            _ => None,
+        })
+    }
+
+    fn insert_eval_case(&self, case: &EvalCase) -> Result<()> {
+        self.with_retry(|| {
+            pollster::block_on(self.conn.execute(
+                "INSERT INTO eval_cases (id, class, memory_table, query, expect_ids, expect_stamps) \
+                 VALUES (?, ?, ?, ?, ?, ?);",
+                vec![
+                    Value::Text(case.id.clone()),
+                    Value::Text(case.class.clone()),
+                    Value::Text(case.table.as_str().to_string()),
+                    Value::Text(case.query.clone()),
+                    Value::Text(join_ids(&case.expect)),
+                    Value::Text(case.stamps.join(",")),
+                ],
+            ))
+        })?;
+        Ok(())
+    }
+
+    fn set_eval_targets(&self, case: &str, expect: &[i64], stamps: &[String]) -> Result<bool> {
+        // One statement writes both columns, so they cannot disagree; the guard
+        // leaves a case retired by another process since the caller looked alone.
+        let changed = self.with_retry(|| {
+            pollster::block_on(self.conn.execute(
+                "UPDATE eval_cases SET expect_ids = ?, expect_stamps = ? \
+                 WHERE id = ? AND retired_at IS NULL;",
+                vec![
+                    Value::Text(join_ids(expect)),
+                    Value::Text(stamps.join(",")),
+                    Value::Text(case.to_string()),
+                ],
+            ))
+        })?;
+        Ok(changed == 1)
+    }
+
+    fn retire_eval_case(&self, case: &str) -> Result<bool> {
+        let changed = self.with_retry(|| {
+            pollster::block_on(self.conn.execute(
+                "UPDATE eval_cases SET retired_at = datetime('now') \
+                 WHERE id = ? AND retired_at IS NULL;",
+                vec![Value::Text(case.to_string())],
+            ))
+        })?;
+        Ok(changed == 1)
+    }
+
+    fn last_eval_run(&self) -> Result<Option<EvalRun>> {
+        let rs = self.query(
+            "SELECT ran_at, alpha, embed_model, n_cases, r1, r5, mrr FROM eval_runs \
+             ORDER BY id DESC LIMIT 1;",
+            Vec::new(),
+        )?;
+        Ok(match rs.rows.first().map(Vec::as_slice) {
+            Some(
+                [
+                    Cell::Text(ran_at),
+                    alpha,
+                    Cell::Text(model),
+                    Cell::Int(n),
+                    r1,
+                    r5,
+                    mrr,
+                ],
+            ) => Some(EvalRun {
+                ran_at: Some(ran_at.clone()),
+                alpha: as_f64(alpha),
+                embed_model: model.clone(),
+                n_cases: *n,
+                r1: as_f64(r1),
+                r5: as_f64(r5),
+                mrr: as_f64(mrr),
+            }),
+            _ => None,
+        })
+    }
+
+    fn newest_eval_run_time(&self) -> Result<Option<String>> {
+        let rs = self.query("SELECT max(ran_at) FROM eval_runs;", Vec::new())?;
+        Ok(match rs.rows.first().and_then(|r| r.first()) {
+            Some(Cell::Text(t)) => Some(t.clone()),
+            _ => None,
+        })
+    }
+
+    fn insert_eval_run(&self, run: &EvalRun) -> Result<()> {
+        let mut cols = vec!["alpha", "embed_model", "n_cases", "r1", "r5", "mrr"];
+        let mut params = vec![
+            Value::Real(run.alpha),
+            Value::Text(run.embed_model.clone()),
+            Value::Integer(run.n_cases),
+            Value::Real(run.r1),
+            Value::Real(run.r5),
+            Value::Real(run.mrr),
+        ];
+        // Left out, `ran_at` takes the schema's CURRENT_TIMESTAMP.
+        if let Some(at) = &run.ran_at {
+            cols.push("ran_at");
+            params.push(Value::Text(at.clone()));
+        }
+        let sql = format!(
+            "INSERT INTO eval_runs ({}) VALUES ({});",
+            cols.join(", "),
+            vec!["?"; cols.len()].join(", ")
+        );
+        self.with_retry(|| pollster::block_on(self.conn.execute(&sql, params.clone())))?;
+        Ok(())
+    }
+
+    fn has_eval_run(&self, run: &EvalRun) -> Result<bool> {
+        let mut sql = String::from(
+            "SELECT count(*) FROM eval_runs \
+             WHERE alpha = ? AND n_cases = ? AND r1 = ? AND r5 = ? AND mrr = ?",
+        );
+        let mut params = vec![
+            Value::Real(run.alpha),
+            Value::Integer(run.n_cases),
+            Value::Real(run.r1),
+            Value::Real(run.r5),
+            Value::Real(run.mrr),
+        ];
+        if let Some(at) = &run.ran_at {
+            sql.push_str(" AND ran_at = ?");
+            params.push(Value::Text(at.clone()));
+        }
+        let rs = self.query(&format!("{sql};"), params)?;
+        Ok(matches!(rs.rows.first().and_then(|r| r.first()), Some(Cell::Int(n)) if *n > 0))
+    }
+
+    fn eval_corpus(&self, table: Table) -> Result<Vec<(i64, String)>> {
+        let rs = self.query(
+            &format!(
+                "SELECT id, lower(memory_text) FROM {} \
+                 WHERE {} AND embedding IS NOT NULL ORDER BY id;",
+                table.name(),
+                active(table)
+            ),
+            Vec::new(),
+        )?;
+        Ok(rs
+            .rows
+            .into_iter()
+            .filter_map(|r| match <[Cell; 2]>::try_from(r) {
+                Ok([Cell::Int(id), Cell::Text(text)]) => Some((id, text)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn eval_distances(&self, table: Table, vector: &[f32]) -> Result<Vec<(i64, f64)>> {
+        let rs = self.query(
+            &format!(
+                "SELECT id, round(vector_distance_cos(embedding, {}), 6) FROM {} \
+                 WHERE {} AND embedding IS NOT NULL ORDER BY id;",
+                vector_literal(vector),
+                table.name(),
+                active(table)
+            ),
+            Vec::new(),
+        )?;
+        Ok(rs
+            .rows
+            .iter()
+            .filter_map(|r| match r.as_slice() {
+                [Cell::Int(id), d] => Some((*id, as_f64(d))),
+                _ => None,
+            })
+            .collect())
+    }
+}
+
+/// The columns of an eval case, in the order `eval_case_from` reads them.
+const EVAL_CASE_COLUMNS: &str = "SELECT id, class, memory_table, query, expect_ids, \
+     expect_stamps, retired_at IS NOT NULL FROM eval_cases";
+
+/// An eval case from one row of `EVAL_CASE_COLUMNS`. A target list that does
+/// not parse is an error, not an empty case: the row is damaged.
+fn eval_case_from(row: &[Cell]) -> Result<EvalCase> {
+    let [
+        Cell::Text(id),
+        Cell::Text(class),
+        Cell::Text(table),
+        Cell::Text(query),
+        Cell::Text(ids),
+        Cell::Text(stamps),
+        Cell::Int(retired),
+    ] = row
+    else {
+        return Err(Error::failed("an eval_cases row has an unexpected shape"));
+    };
+    let table = match table.as_str() {
+        "semantic" => Table::Semantic,
+        "episodic" => Table::Episodic,
+        other => {
+            return Err(Error::failed(format!(
+                "eval case {id} names the table '{other}', which is neither semantic nor episodic"
+            )));
+        }
+    };
+    let expect = ids
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim().parse::<i64>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| {
+            Error::failed(format!(
+                "eval case {id} has a malformed expect_ids: '{ids}'"
+            ))
+        })?;
+    Ok(EvalCase {
+        id: id.clone(),
+        class: class.clone(),
+        table,
+        query: query.clone(),
+        expect,
+        stamps: stamps
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+        retired: *retired != 0,
+    })
+}
+
+fn join_ids(ids: &[i64]) -> String {
+    ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+}
+
+/// A number from a REAL column, which comes back as an integer when it holds
+/// a whole one.
+fn as_f64(c: &Cell) -> f64 {
+    match c {
+        Cell::Real(x) => *x,
+        Cell::Int(n) => *n as f64,
+        _ => f64::NAN,
+    }
 }
 
 /// The active rows of a table that have no embedding.
@@ -2233,5 +2545,283 @@ pub(crate) mod tests {
             vec![vec![Cell::Int(4)]],
             "nothing is ever deleted"
         );
+    }
+
+    // ---- eval cases and runs -------------------------------------------------
+
+    /// One eval case row, written directly.
+    fn case_row(cfg: &Config, id: &str, class: &str, table: &str, ids: &str, stamps: &str) {
+        rows(
+            cfg,
+            &format!(
+                "INSERT INTO eval_cases (id, class, memory_table, query, expect_ids, expect_stamps) \
+                 VALUES ('{id}', '{class}', '{table}', 'query {id}', '{ids}', '{stamps}');"
+            ),
+        );
+    }
+
+    #[test]
+    fn a_database_without_the_eval_tables_says_so() {
+        let cfg = scratch("eval-tables");
+        let store = TursoStore::open(&cfg).unwrap();
+        assert!(store.has_eval_tables().unwrap());
+        rows(&cfg, "DROP TABLE eval_runs;");
+        assert!(!store.has_eval_tables().unwrap(), "one table is not enough");
+    }
+
+    #[test]
+    fn eval_cases_are_the_live_ones_by_id_and_eval_case_finds_any() {
+        let cfg = scratch("eval-cases");
+        case_row(
+            &cfg,
+            "b02",
+            "semantic",
+            "semantic",
+            "5,6",
+            "2026-01-01 00:00:00,2026-01-02 00:00:00",
+        );
+        case_row(&cfg, "a01", "exact", "episodic", "9", "2026-01-03 00:00:00");
+        case_row(&cfg, "c03", "exact", "semantic", "1", "2026-01-01 00:00:00");
+        rows(
+            &cfg,
+            "UPDATE eval_cases SET retired_at = '2026-02-01 00:00:00' WHERE id = 'c03';",
+        );
+        let store = TursoStore::open(&cfg).unwrap();
+
+        let live = store.eval_cases().unwrap();
+        assert_eq!(
+            live.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["a01", "b02"]
+        );
+        assert_eq!(
+            live[1],
+            EvalCase {
+                id: "b02".into(),
+                class: "semantic".into(),
+                table: Table::Semantic,
+                query: "query b02".into(),
+                expect: vec![5, 6],
+                stamps: vec!["2026-01-01 00:00:00".into(), "2026-01-02 00:00:00".into()],
+                retired: false,
+            }
+        );
+        assert_eq!(live[0].table, Table::Episodic);
+
+        let retired = store
+            .eval_case("c03")
+            .unwrap()
+            .expect("a retired case is found");
+        assert!(retired.retired);
+        assert!(!store.eval_case("a01").unwrap().unwrap().retired);
+        assert_eq!(store.eval_case("zzz").unwrap(), None);
+    }
+
+    #[test]
+    fn targets_say_what_each_id_is_and_leave_out_ids_that_do_not_exist() {
+        let cfg = scratch("eval-targets");
+        let current = put(&cfg, Table::Semantic, "a current fact", true);
+        let old = put(&cfg, Table::Semantic, "an old fact", true);
+        supersede(&cfg, old, current);
+        let blind = put(&cfg, Table::Semantic, "stored without a vector", false);
+        let retired = put(&cfg, Table::Semantic, "a retired fact", true);
+        retire_directly(&cfg, retired);
+        let event = put(&cfg, Table::Episodic, "something happened", true);
+        let store = TursoStore::open(&cfg).unwrap();
+
+        let got = store
+            .targets(Table::Semantic, &[current, old, blind, retired, 999])
+            .unwrap();
+        let by_id = |id: i64| got.iter().find(|t| t.id == id).cloned();
+        assert_eq!(got.len(), 4, "999 does not exist: {got:?}");
+        let t = by_id(current).unwrap();
+        assert_eq!(t.created_at, "2026-01-01 00:00:00");
+        assert!(t.current && t.embedded);
+        assert!(!by_id(old).unwrap().current, "superseded");
+        assert!(!by_id(retired).unwrap().current, "retired");
+        let t = by_id(blind).unwrap();
+        assert!(t.current && !t.embedded);
+
+        // The same id means a different row in the other table; episodic rows
+        // are always current.
+        let got = store.targets(Table::Episodic, &[event]).unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].current && got[0].embedded);
+        assert!(store.targets(Table::Semantic, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_chain_link_is_the_superseding_id_and_whether_the_row_is_retired() {
+        let cfg = scratch("eval-chain");
+        let a = put(&cfg, Table::Semantic, "first", true);
+        let b = put(&cfg, Table::Semantic, "second", true);
+        supersede(&cfg, a, b);
+        retire_directly(&cfg, b);
+        let store = TursoStore::open(&cfg).unwrap();
+        assert_eq!(
+            store.chain_link(a).unwrap(),
+            Some(ChainLink {
+                superseded_by: Some(b),
+                retired: false
+            })
+        );
+        assert_eq!(
+            store.chain_link(b).unwrap(),
+            Some(ChainLink {
+                superseded_by: None,
+                retired: true
+            })
+        );
+        assert_eq!(store.chain_link(999).unwrap(), None);
+    }
+
+    fn case(id: &str, expect: Vec<i64>, stamps: Vec<&str>) -> EvalCase {
+        EvalCase {
+            id: id.into(),
+            class: "semantic".into(),
+            table: Table::Semantic,
+            query: format!("how do I {id}"),
+            expect,
+            stamps: stamps.into_iter().map(String::from).collect(),
+            retired: false,
+        }
+    }
+
+    #[test]
+    fn a_stored_case_reads_back_and_its_targets_and_stamps_change_together() {
+        let cfg = scratch("eval-write");
+        let store = TursoStore::open(&cfg).unwrap();
+        let c = case("s01", vec![3], vec!["2026-01-01 00:00:00"]);
+        store.insert_eval_case(&c).unwrap();
+        assert_eq!(store.eval_case("s01").unwrap(), Some(c));
+
+        assert!(
+            store
+                .set_eval_targets(
+                    "s01",
+                    &[4, 5],
+                    &["2026-03-01 00:00:00".into(), "2026-03-02 00:00:00".into()]
+                )
+                .unwrap()
+        );
+        let got = store.eval_case("s01").unwrap().unwrap();
+        assert_eq!(got.expect, vec![4, 5]);
+        assert_eq!(got.stamps, ["2026-03-01 00:00:00", "2026-03-02 00:00:00"]);
+
+        assert!(!store.set_eval_targets("nope", &[1], &["x".into()]).unwrap());
+        rows(
+            &cfg,
+            "UPDATE eval_cases SET retired_at = datetime('now') WHERE id = 's01';",
+        );
+        assert!(
+            !store.set_eval_targets("s01", &[9], &["y".into()]).unwrap(),
+            "a retired case is not edited"
+        );
+        assert_eq!(store.eval_case("s01").unwrap().unwrap().expect, vec![4, 5]);
+    }
+
+    #[test]
+    fn retiring_a_case_sets_retired_at_once_and_deletes_nothing() {
+        let cfg = scratch("eval-retire");
+        let store = TursoStore::open(&cfg).unwrap();
+        store
+            .insert_eval_case(&case("s01", vec![1], vec!["x"]))
+            .unwrap();
+        assert!(store.retire_eval_case("s01").unwrap());
+        assert!(!store.retire_eval_case("s01").unwrap(), "already retired");
+        assert!(!store.retire_eval_case("nope").unwrap());
+        assert_eq!(
+            rows(&cfg, "SELECT count(*), count(retired_at) FROM eval_cases;"),
+            vec![vec![Cell::Int(1), Cell::Int(1)]]
+        );
+        assert!(store.eval_cases().unwrap().is_empty());
+    }
+
+    fn run(ran_at: Option<&str>, r5: f64) -> EvalRun {
+        EvalRun {
+            ran_at: ran_at.map(String::from),
+            alpha: 0.15,
+            embed_model: "bge-m3".into(),
+            n_cases: 4,
+            r1: 0.5,
+            r5,
+            mrr: 0.625,
+        }
+    }
+
+    #[test]
+    fn runs_are_recorded_and_the_last_one_is_the_highest_id() {
+        let cfg = scratch("eval-runs");
+        let store = TursoStore::open(&cfg).unwrap();
+        assert_eq!(store.last_eval_run().unwrap(), None);
+        assert_eq!(store.newest_eval_run_time().unwrap(), None);
+
+        // Inserted out of date order: the baseline is the latest INSERT, the
+        // newest time is the latest date.
+        store
+            .insert_eval_run(&run(Some("2026-05-01 10:00:00"), 0.75))
+            .unwrap();
+        store
+            .insert_eval_run(&run(Some("2026-04-01 10:00:00"), 1.0))
+            .unwrap();
+        assert_eq!(
+            store.last_eval_run().unwrap(),
+            Some(run(Some("2026-04-01 10:00:00"), 1.0))
+        );
+        assert_eq!(
+            store.newest_eval_run_time().unwrap().as_deref(),
+            Some("2026-05-01 10:00:00")
+        );
+
+        assert!(
+            store
+                .has_eval_run(&run(Some("2026-05-01 10:00:00"), 0.75))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .has_eval_run(&run(Some("2026-05-01 10:00:00"), 0.5))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .has_eval_run(&run(Some("2026-05-02 10:00:00"), 0.75))
+                .unwrap()
+        );
+
+        // No date given: the schema stamps now.
+        store.insert_eval_run(&run(None, 0.25)).unwrap();
+        let last = store.last_eval_run().unwrap().unwrap();
+        assert_eq!(last.r5, 0.25);
+        assert!(last.ran_at.is_some_and(|t| t.starts_with("20")));
+    }
+
+    #[test]
+    fn the_eval_corpus_and_distances_cover_active_embedded_rows_only() {
+        let cfg = scratch("eval-corpus");
+        let kept = put(&cfg, Table::Semantic, "Turso Needs The WAL Flag", true);
+        let old = put(&cfg, Table::Semantic, "superseded", true);
+        supersede(&cfg, old, kept);
+        put(&cfg, Table::Semantic, "stored without a vector", false);
+        let retired = put(&cfg, Table::Semantic, "retired", true);
+        retire_directly(&cfg, retired);
+        let event = put(&cfg, Table::Episodic, "an event", true);
+        let store = TursoStore::open(&cfg).unwrap();
+
+        assert_eq!(
+            store.eval_corpus(Table::Semantic).unwrap(),
+            vec![(kept, "turso needs the wal flag".to_string())]
+        );
+        assert_eq!(
+            store.eval_corpus(Table::Episodic).unwrap(),
+            vec![(event, "an event".to_string())]
+        );
+
+        let q = crate::embed::fake::Fake::vector("some query");
+        let got = store.eval_distances(Table::Semantic, &q).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, kept);
+        let exact = distance(&cfg, Table::Semantic, kept, &q);
+        assert!((got[0].1 - exact).abs() <= 5e-7, "{} vs {exact}", got[0].1);
+        assert_eq!(got[0].1, (got[0].1 * 1e6).round() / 1e6, "six decimals");
     }
 }

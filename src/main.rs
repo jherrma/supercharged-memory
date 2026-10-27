@@ -11,6 +11,7 @@ mod config;
 mod coworkers;
 mod embed;
 mod error;
+mod eval;
 mod find_existing;
 mod init;
 mod instructions;
