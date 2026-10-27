@@ -364,11 +364,9 @@ mod tests {
         }
     }
 
-    /// The cutover's checklist: the texts still name the repository checkout.
-    /// It fails until they are rewritten for the binary, so it only runs on request
-    /// (`cargo test -- --ignored`).
+    /// Nothing an agent is told to run or open may point at the repository
+    /// checkout: there is none on the machine the binary is installed on.
     #[test]
-    #[ignore = "the embedded texts still name the repository checkout"]
     fn no_embedded_text_points_at_the_checkout() {
         let mut offenders = Vec::new();
         for (origin, text) in corpus() {
@@ -377,6 +375,261 @@ mod tests {
             }
         }
         assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+    }
+
+    /// The Python scripts, their interpreter, the installer script and the
+    /// settings file the old setup edited are not part of the product any more.
+    #[test]
+    fn no_embedded_text_names_the_python_era() {
+        const GONE: [&str; 8] = [
+            "python3",
+            "python ",
+            ".py",
+            "settings.json",
+            "install-claude-md",
+            "PYTHONUTF8",
+            "schema.sql",
+            "migration-steps",
+        ];
+        let mut offenders = Vec::new();
+        for (origin, text) in corpus() {
+            for gone in GONE {
+                if text.contains(gone) {
+                    offenders.push(format!("{origin}: {gone:?}"));
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+    }
+
+    /// The `{{EXE}} <command> --flags` a text hands the agent, each with the flags
+    /// written in the same command line.
+    fn command_lines(text: &str) -> Vec<(String, String, Vec<String>)> {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut found = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            for (at, _) in line.match_indices("{{EXE}} ") {
+                let mut rest = line[at + "{{EXE}} ".len()..].to_string();
+                let mut next = i;
+                while rest.trim_end().ends_with('\\') && next + 1 < lines.len() {
+                    next += 1;
+                    rest.push(' ');
+                    rest.push_str(lines[next]);
+                }
+                let span = rest.split('`').next().unwrap_or("").to_string();
+                let sub: String = span
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                    .collect();
+                let flags = span
+                    .match_indices("--")
+                    .map(|(f, _)| {
+                        span[f + 2..]
+                            .chars()
+                            .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                            .collect::<String>()
+                    })
+                    .filter(|f| !f.is_empty())
+                    .collect();
+                found.push((line.trim().to_string(), sub, flags));
+            }
+        }
+        found
+    }
+
+    /// A command line in an embedded text must exist: a runbook that names a
+    /// subcommand or a flag the binary does not have fails on the user's machine.
+    #[test]
+    fn every_command_an_embedded_text_gives_exists() {
+        use clap::CommandFactory;
+        let cli = crate::cli::Cli::command();
+        let mut offenders = Vec::new();
+        let mut seen = 0;
+        for (origin, text) in corpus() {
+            for (line, sub, flags) in command_lines(text) {
+                if sub.is_empty() {
+                    continue;
+                }
+                seen += 1;
+                let Some(cmd) = cli.find_subcommand(&sub) else {
+                    offenders.push(format!("{origin}: no subcommand {sub:?} in: {line}"));
+                    continue;
+                };
+                for flag in flags {
+                    let known = flag == "help"
+                        || cmd
+                            .get_arguments()
+                            .any(|a| a.get_long() == Some(flag.as_str()));
+                    if !known {
+                        offenders.push(format!("{origin}: `{sub}` has no --{flag} in: {line}"));
+                    }
+                }
+            }
+        }
+        assert!(seen > 40, "only {seen} command lines found");
+        assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+    }
+
+    fn book(name: &str) -> &'static str {
+        RUNBOOKS.iter().find(|r| r.name == name).unwrap().text
+    }
+
+    #[test]
+    fn the_template_runs_everything_through_the_binary() {
+        let t = crate::claude_md::TEMPLATE;
+        for want in [
+            "{{EXE}} status",
+            "{{EXE}} recall --baseline",
+            "{{EXE}} recall --topics",
+            "{{EXE}} recall --candidates",
+            "{{EXE}} remember --table",
+            "{{EXE}} backfill --dir",
+            "{{EXE}} coworkers --list",
+            "{{EXE}} coworkers --load",
+            "{{EXE}} coworkers --appraise",
+            "{{EXE}} instructions --get",
+            "{{EXE}} runbook sleep",
+            "{{EXE}} runbook deep-sleep",
+            "{{EXE}} runbook migrate",
+            "{{EXE}} backup",
+            "{{EXE}} update",
+        ] {
+            assert!(t.contains(want), "the template lacks {want:?}");
+        }
+        // Reads are commands now, not SQL through a client.
+        assert!(!t.contains("SELECT"), "the template still hands out SQL");
+        assert!(!t.contains("MCP calls"), "{t}");
+        // Never a quoted binary: the placeholder carries its own quotes.
+        assert!(!t.contains("\"{{EXE}}\""));
+    }
+
+    /// The MCP, when registered read-only, cannot write; a read-write one makes
+    /// "writes go through the CLI" a convention only.
+    #[test]
+    fn the_template_says_the_cli_only_rule_is_advisory_for_a_writable_mcp() {
+        let t = crate::claude_md::TEMPLATE;
+        assert!(t.contains("advisory"), "{t}");
+        assert!(t.contains("read-only"), "{t}");
+    }
+
+    /// Without embeddings the agent stores anyway, and says what was skipped.
+    #[test]
+    fn the_template_no_longer_forbids_storing_without_embeddings() {
+        let t = crate::claude_md::TEMPLATE;
+        assert!(!t.contains("CANNOT store"), "{t}");
+        assert!(t.contains("embed --missing"), "{t}");
+    }
+
+    #[test]
+    fn the_template_did_not_grow_beyond_the_instructions_line() {
+        let lines = crate::claude_md::TEMPLATE.lines().count();
+        assert!(lines <= 122, "the template is {lines} lines; it was 121");
+    }
+
+    #[test]
+    fn the_template_says_when_to_use_an_instruction() {
+        let t = crate::claude_md::TEMPLATE;
+        assert!(t.contains("use instruction"), "{t}");
+        assert!(t.contains("{{EXE}} instruct "), "{t}");
+    }
+
+    #[test]
+    fn the_runbooks_point_at_each_other_by_command() {
+        assert!(mentioned(book("sleep")).contains(&"deep-sleep".to_string()));
+        assert!(mentioned(book("deep-sleep")).contains(&"sleep".to_string()));
+        assert!(mentioned(book("setup")).contains(&"migrate".to_string()));
+        assert!(mentioned(book("setup")).contains(&"new-coworker".to_string()));
+        assert!(mentioned(book("migrate")).contains(&"deep-sleep".to_string()));
+    }
+
+    #[test]
+    fn setup_is_built_around_init() {
+        let t = book("setup");
+        for want in [
+            "{{EXE}} init",
+            "{{EXE}} init -y",
+            "Missing",
+            "{{EXE}} embed --missing",
+            "{{EXE}} find-existing-memory",
+            "{{EXE}} coworkers --add",
+            "--readonly",
+            "optional",
+        ] {
+            assert!(t.contains(want), "SETUP lacks {want:?}");
+        }
+        assert!(!t.contains("Work from the repository root"));
+        assert!(
+            !t.contains("Step 1 \u{2014} Turso"),
+            "tursodb is not step 1 any more"
+        );
+    }
+
+    #[test]
+    fn update_is_built_around_the_update_command() {
+        let t = book("update");
+        for want in [
+            "{{EXE}} update",
+            "{{EXE}} update -y",
+            "{{EXE}} update --print-block",
+            "rendered-by",
+            "synced-at",
+            "restart",
+        ] {
+            assert!(t.contains(want), "UPDATE lacks {want:?}");
+        }
+        assert!(!t.contains("git pull"), "UPDATE still pulls a checkout");
+        assert!(!t.contains("Work from the repository root"));
+    }
+
+    /// Embeddings are optional: a degraded status is not a stop sign.
+    #[test]
+    fn no_runbook_stops_on_degraded() {
+        let deep = book("deep-sleep");
+        assert!(!deep.contains("`DEGRADED n` \u{2192} stop here"), "D0");
+        assert!(deep.contains("embed --missing"));
+        let migrate = book("migrate");
+        assert!(!migrate.contains("`DEGRADED n` \u{2192} stop"), "M0");
+        assert!(migrate.contains("embed --missing"));
+    }
+
+    #[test]
+    fn the_eval_set_is_edited_through_the_eval_command() {
+        let t = book("deep-sleep");
+        for want in [
+            "{{EXE}} eval --validate",
+            "{{EXE}} eval --report",
+            "{{EXE}} eval --sweep",
+            "{{EXE}} eval --add-case",
+            "{{EXE}} eval --repoint",
+            "{{EXE}} eval --retire-case",
+            "{{EXE}} eval --last-run",
+        ] {
+            assert!(t.contains(want), "DEEP-SLEEP lacks {want:?}");
+        }
+        assert!(!t.contains("UPDATE eval_cases"));
+        assert!(!t.contains("INSERT INTO eval_cases"));
+    }
+
+    #[test]
+    fn rows_are_read_with_list_and_show_not_sql() {
+        for name in ["sleep", "deep-sleep", "migrate"] {
+            let t = book(name);
+            assert!(!t.contains("tursodb"), "{name} still reads through tursodb");
+            assert!(!t.contains("SELECT"), "{name} still hands out SQL");
+        }
+        assert!(book("sleep").contains("{{EXE}} list --table episodic --unprocessed"));
+        assert!(book("sleep").contains("{{EXE}} show --table episodic"));
+        assert!(book("deep-sleep").contains("{{EXE}} list --table semantic --not-current"));
+        assert!(book("migrate").contains("{{EXE}} list --table semantic --source migration"));
+    }
+
+    #[test]
+    fn the_coworker_runbook_states_the_schema_caps() {
+        let t = book("new-coworker");
+        assert!(t.contains("3000"), "{t}");
+        assert!(!t.contains("256 chars") && !t.contains("1000 chars"));
+        assert!(!t.contains("docs/") && !t.contains("coworkers/"));
+        assert!(t.contains("{{EXE}} coworkers --add"));
     }
 
     /// Placeholders the binary can fill: nothing but `{{EXE}}` may stay in a runbook.

@@ -46,13 +46,23 @@ fn each_name_prints_its_source_file_and_nothing_else() {
     for (name, file) in FILES {
         let out = run(&dir, &[name]);
         assert_eq!(out.status.code(), Some(0), "{name}: {}", text(&out.stderr));
-        let want = fs::read(
+        let source = fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("instructions")
                 .join(file),
         )
         .unwrap();
-        assert_eq!(out.stdout, want, "{name} differs from {file}");
+        // The only change is the binary's own path, written as a command line
+        // writes it, where the source says {{EXE}}.
+        let exe = fs::canonicalize(BIN).unwrap().display().to_string();
+        let exe = if exe.contains(char::is_whitespace) {
+            format!("\"{exe}\"")
+        } else {
+            exe
+        };
+        assert!(source.contains("{{EXE}}"), "{file} names no command");
+        let want = source.replace("{{EXE}}", &exe);
+        assert_eq!(text(&out.stdout), want, "{name} differs from {file}");
         assert!(out.stderr.is_empty(), "{name}: {}", text(&out.stderr));
     }
     assert!(

@@ -1,184 +1,131 @@
-# UPDATE — sync this machine with the repo
+# UPDATE — bring this machine up to date with the binary
 
-**This file is an instruction set for Claude Code.** When the user says "update
-the memory system", "run UPDATE.md", or similar, execute the steps below in
-order. It brings a machine that was set up earlier back in line with `master`:
-applies any **breaking-change migrations** that landed since, then re-renders
-`~/.claude/CLAUDE.md` from the current template.
+**This file is an instruction set for Claude Code.** When the user says "update the
+memory system", "I replaced the binary", or similar, execute the steps below in
+order. Updating means: the user replaced the binary with a newer one, and the
+`.env`, the database and `~/.claude/CLAUDE.md` have to catch up with it.
 
-Work from the repository root. Report each step in one line. **Ask before
-applying anything** — this runbook reads and reports on its own, but never
-changes the machine without the user's ok.
+Report each step in one line. **Ask before applying anything** — `update` without
+`-y` only reads and reports; it never changes the machine.
 
-> **On Windows, run every `python3` in this file as `python`, and add `--vfs
-> experimental_win_iocp` to every `tursodb` command in it.** There is no
-> `python3` on Windows: the name is a Microsoft Store alias stub that prints
-> `Python was not found` **and exits 0**, so a command reads as a successful,
-> empty result and the agent reports work it never did. And
-> `--experimental-multiprocess-wal` on its own is refused by Windows' default IO
-> backend (`experimental multiprocess WAL is not supported by the active IO
-> backend`), so a `tursodb` line without the VFS does nothing at all — pair the
-> two flags, never drop the WAL one. See `instructions/SETUP.md`, section *Windows*.
+How it knows where the machine stands: the `.env` beside the binary records the
+version that last updated it (`SUPERCHARGED_MEMORY_VERSION`), and the managed block
+in CLAUDE.md starts with the line `<!-- supercharged-memory: rendered-by <version> -->`.
+Migration notes are keyed by version, and which schema migrations are pending is
+asked of the database itself.
 
-Two variables used throughout:
+## Step 1 — Replace the binary in place
 
-- `TARGET` — the installed instructions, default `~/.claude/CLAUDE.md`
-- **sync stamp** — the line `<!-- supercharged-memory: synced-at <sha> -->` that
-  `install-claude-md.sh` writes into the managed block. It records the repo commit
-  this machine was last installed from, and it is the only ledger this runbook
-  needs: the repo's own git history supplies everything else.
+The user downloads the new binary. It must **replace the old one at the same path
+and under the same name**: the `.env` sits beside the binary, and the instructions
+in CLAUDE.md name its path. If it landed elsewhere, move it over the old one. If
+the path or name must change, say so; `update` detects the moved binary and
+reports it (Step 3).
 
-## Step 1 — Read the sync stamp
+## Step 2 — The dry run
 
 ```bash
-TARGET="${TARGET:-$HOME/.claude/CLAUDE.md}"
-grep -o 'synced-at [0-9a-f]\{7,40\}\(-dirty\)\?' "$TARGET" || echo "no stamp"
+{{EXE}} update
 ```
 
-- **A sha** → hold it as `STAMP`. Continue.
-- **`<sha>-dirty`** → the install was rendered from an uncommitted working tree.
-  Use the sha as `STAMP` but tell the user: anything that was uncommitted then is
-  invisible to the comparison below.
-- **`unknown`** → the install came from a copy that wasn't a git work tree. Treat
-  it as "no stamp".
-- **No stamp / no managed block** → the machine was installed before stamping
-  existed (or never installed). Do **not** guess a base commit. Say so, and in
-  Step 4 list *every* migration note instead of a computed subset, asking the user
-  which already apply. `install-claude-md.sh` will write a stamp at the end, so
-  this only happens once.
+It compares the version the `.env` records with this binary's and prints, in
+order:
 
-## Step 2 — Update the checkout
+- every migration note between the two versions, oldest first;
+- the schema migrations the database lacks;
+- what to change in CLAUDE.md: either "instructions current", or the diff between
+  the installed block and the one this binary would write;
+- a last line, `Ask the user to confirm` (something is pending) or `Up to date`.
+
+It refuses a downgrade (a `.env` written by a newer binary) and a machine without
+a `.env` (run `{{EXE}} runbook setup` instead, which uses `init`).
+
+On `Up to date`, say so and stop.
+
+## Step 3 — Relay and ask
+
+Show the user, in a few lines each:
+
+1. **Each migration note** — what broke, how to resolve it, how to verify. A
+   step a note asks for by hand is yours to do once the user agrees; `-y` does
+   not do it for you.
+2. **The schema migrations** pending, which `-y` applies after a backup.
+3. **The CLAUDE.md change**, as a short list of *behavior* changes (new rule,
+   changed threshold, new pointer), not a line-by-line diff. Two things to read
+   carefully:
+   - The stamp line differs on every update: that is the point, not a change to
+     report.
+   - Content present in the installed block but absent from the render, **inside**
+     the markers, is a **local hand-edit that replacing the block destroys**.
+     `update` lists each one. Surface it and ask whether to keep it (add it
+     outside the markers) or drop it deliberately. Never silently overwrite one.
+   - A moved binary: if the commands in the block name another path than this
+     binary's, the diff shows it; replacing the block fixes it.
+
+If the report says the block's episodic mode cannot be read, **ask the user which
+mode** and re-run with `--episodic-mode <mode>`. Never assume the default: the
+wrong one silently changes how much gets stored.
+
+Ask for the go-ahead before Step 4.
+
+## Step 4 — Apply
 
 ```bash
-git status --porcelain          # must be empty
-git rev-parse HEAD              # note the old HEAD
-git pull --ff-only
-git rev-parse HEAD              # note the new HEAD
+{{EXE}} update -y
 ```
 
-If `git status --porcelain` is **not** empty, stop and show the user the dirty
-files — pulling over local edits is their call, not yours. If the pull is not a
-fast-forward, stop and report; do not merge or rebase to force it.
+It backs up the database before the first migration (the dump is the only undo),
+applies each migration in a transaction of its own, and records this binary's
+version in the `.env` only once all of them succeeded. If one fails it stops,
+names the statement, and leaves the version alone: report it and do not go on.
+Then do whatever hand steps the notes asked for, and run each note's
+**Verification**, showing its output.
 
-Report old → new HEAD, and the commit subjects in between:
+`update` never writes CLAUDE.md. Once the user has agreed, replace the managed
+block yourself: from the `<!-- BEGIN agentic-memory` line through the
+`<!-- END agentic-memory -->` line, with exactly what this prints, and leave
+everything outside the markers alone:
 
 ```bash
-git log --oneline "$STAMP"..HEAD
+{{EXE}} update --print-block
 ```
 
-If `STAMP` equals `HEAD` and no migrations are pending, tell the user there is
-nothing to update and stop here.
+(Add `--episodic-mode <mode>` when Step 3 needed it.)
 
-## Step 3 — Find pending migrations
+## Step 5 — Report
 
-Breaking changes each ship a note in `migration-steps/` anchored to the commit
-that introduced them (see the repo's `CLAUDE.md` for the authoring rule). A note
-is **pending** when its commit is in history now but was not yet installed:
+One summary: old → new version, notes relayed, migrations applied (or none), what
+changed in the instructions, and the backup's path. Then tell the user to
+**restart the Claude Code session** to pick up the new `~/.claude/CLAUDE.md`.
 
-```bash
-for f in migration-steps/*.md; do
-  [ -e "$f" ] || continue
-  sha="$(grep -m1 -oE '^commit:[[:space:]]*[0-9a-f]{7,40}' "$f" | grep -oE '[0-9a-f]{7,40}')"
-  [ -n "$sha" ] || { echo "MALFORMED $f (no commit: line)"; continue; }
-  if ! git merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
-    echo "NOT-IN-HISTORY $f ($sha)"          # note references an unknown commit
-  elif git merge-base --is-ancestor "$sha" "$STAMP" 2>/dev/null; then
-    echo "ALREADY-INSTALLED $f ($sha)"       # skip silently
-  else
-    echo "PENDING $f ($sha)"
-  fi
-done
+Finish with `{{EXE}} status` and show the result, and with `{{EXE}} update` once
+more: it must say `Up to date`.
+
+## A machine installed from a repository checkout (legacy)
+
+Before the binary existed, this system was installed by cloning a repository and
+running an installer script. Such a machine is recognisable by the first line of
+the managed block in CLAUDE.md:
+
+```
+<!-- supercharged-memory: synced-at <sha> -->
 ```
 
-`merge-base --is-ancestor` is used rather than parsing `git log` output so a note
-whose commit is unreachable (rewritten history, wrong sha) surfaces as
-`NOT-IN-HISTORY` instead of being silently treated as pending.
+and by commands that start with an interpreter and a path into the checkout. The
+binary does **not** rewrite that block: `init` and `update` find it, leave it
+untouched, and print the cutover note instead (`update -y` refuses). Relay that
+note and follow it step by step with the user; in short it:
 
-Report a `MALFORMED` or `NOT-IN-HISTORY` note to the user — it is a bug in the
-note, not something to work around.
+1. keeps the binary in a permanent place under a stable name;
+2. runs `init` with `--db-path` pointing at the **existing** database, `--backup-dir`
+   at the existing dumps and `--episodic-mode` as the block has it, so the database
+   is adopted and the `.env` written, and the old block is left alone;
+3. removes the environment variables the old setup put into Claude Code's
+   settings, because a real environment variable overrides the `.env` on every
+   run, and checks with `{{EXE}} config` that every value now comes from the `.env`;
+4. replaces the old block with what `{{EXE}} update --print-block` prints;
+5. runs `{{EXE}} update -y` for the schema migration;
+6. points the scheduled backup job at `{{EXE}} backup`.
 
-## Step 4 — Apply pending migrations
-
-Read each pending note in full, **oldest commit first**
-(`git log --format='%ct %H' --reverse` to order them, or just sort by the note's
-date-prefixed filename — the two agree by convention).
-
-For each note, in order:
-
-1. Show the user its **What broke** and **How to resolve** sections in a couple of
-   lines, and ask whether to apply it.
-2. On approval, run the note's resolution commands exactly as written. If the note
-   touches the database, run
-   `bash scripts/supercharged-memory-backup.sh` first — a migration that rewrites
-   a table has no undo other than that dump.
-3. Run the note's **Verification** section and show its output. Do not proceed to
-   the next note if verification fails; stop and report.
-
-If Step 1 found no stamp, list every note in `migration-steps/` here instead, with
-its commit and one-line summary, and ask the user which ones this machine still
-needs — some will already have been applied by hand.
-
-## Step 5 — Diff the installed instructions against the template
-
-Re-render the template with **this machine's own settings** and compare it to what
-is installed, so the user sees what would actually change:
-
-```bash
-# The values this machine was installed with:
-EPISODIC_MODE="$(grep -o 'Episodic policy on this machine — `[a-z-]*`' "$TARGET" \
-                 | grep -o '`[a-z-]*`' | tr -d '`')"
-DB="$(jq -r '.env.SUPERCHARGED_MEMORY_TURSO_PATH // empty' ~/.claude/settings.json)"
-
-TMP="$(mktemp -d)"
-cp "$TARGET" "$TMP/preview.md"          # copy FIRST — see note below
-TARGET="$TMP/preview.md" EPISODIC_MODE="$EPISODIC_MODE" \
-  SUPERCHARGED_MEMORY_TURSO_PATH="$DB" bash scripts/install-claude-md.sh >/dev/null
-diff -u "$TARGET" "$TMP/preview.md" || true
-```
-
-**Render into a copy of the installed file, never into an empty temp file.** The
-installer only replaces the managed block and leaves everything else alone, so
-rendering into a fresh file makes every line the user keeps *outside* the markers
-show up as a deletion — burying the changes that matter in noise.
-
-If either value comes back empty, ask the user rather than falling back to a
-default — installing with the wrong `EPISODIC_MODE` silently changes how much gets
-stored, and the wrong DB path is how an agent ends up reporting `MISSING` against a
-healthy database.
-
-Summarize the diff as a compact bullet list of *behavior* changes (new rule, changed
-threshold, new pointer), not a line-by-line dump. Two things to read carefully in it:
-
-- The **stamp line always differs** — that is the point, not a change worth reporting.
-- Content present in the installed file but absent from the render, **inside** the
-  markers, is a **local hand-edit that re-installing will destroy**. Surface each one
-  and ask whether to port it into `CLAUDE.md.template` first (then re-render), or drop
-  it deliberately. Never silently overwrite one.
-
-## Step 6 — Re-install
-
-Ask for the go-ahead, then:
-
-```bash
-EPISODIC_MODE="$EPISODIC_MODE" SUPERCHARGED_MEMORY_TURSO_PATH="$DB" \
-  bash scripts/install-claude-md.sh
-```
-
-It replaces the managed block and writes the new stamp. Any content the user has
-outside the markers is left untouched.
-
-Passing both values is a cross-check, not the only guard: the installer itself reads
-`EPISODIC_MODE` back out of the block it is about to replace, and refuses the run
-outright if `BASE_PATH` differs from the one that block was rendered from (override
-with `ALLOW_BASE_PATH_CHANGE=1` only when the repo really moved). Its closing report
-names where each value came from — check that `EPISODIC_MODE` reads `env` or
-`recovered from the existing block`, never `script default`.
-
-## Step 7 — Report
-
-One summary: old → new HEAD, migrations applied (or none pending), what changed in
-the instructions, and the new stamp. Then tell the user to **restart the Claude Code
-session** to pick up the new `~/.claude/CLAUDE.md`.
-
-If any migration touched the database, finish with
-`python3 scripts/recall.py --status` and show the result.
+The Python scripts may stay in the checkout; nothing the instructions say points
+at them any more.

@@ -2,7 +2,7 @@
 
 **This file is an instruction set for Claude Code.** Reached one of two ways: the
 user said "deep sleep", or they answered yes to the offer at the end of
-`SLEEP.md`. **User-triggered only** — never scheduled, never proactive.
+`{{EXE}} runbook sleep`. **User-triggered only** — never scheduled, never proactive.
 
 Deep sleep does what a normal sleep pass deliberately doesn't: it deletes what the
 user has agreed is dead weight, looks at *all* current semantic memory at once
@@ -13,16 +13,6 @@ Phases are numbered in execution order. **Every phase that writes runs its
 judgment in subagents and its decisions past the user** — see *Subagent contract*
 below for why, and how.
 
-> **On Windows, run every `python3` in this file as `python`, and add `--vfs
-> experimental_win_iocp` to every `tursodb` command in it.** There is no
-> `python3` on Windows: the name is a Microsoft Store alias stub that prints
-> `Python was not found` **and exits 0**, so a command reads as a successful,
-> empty result and the agent reports work it never did. And
-> `--experimental-multiprocess-wal` on its own is refused by Windows' default IO
-> backend (`experimental multiprocess WAL is not supported by the active IO
-> backend`), so a `tursodb` line without the VFS does nothing at all — pair the
-> two flags, never drop the WAL one. See `instructions/SETUP.md`, section *Windows*.
-
 ## Subagent contract
 
 The orchestrating agent must never hold `memory_text` in bulk: that context cost
@@ -30,8 +20,8 @@ scales with the corpus and is the reason this file exists. So:
 
 - The orchestrator queries **skinny metadata only** (ids, topics, dates, counts)
   and dispatches subagents that read the actual text themselves.
-- Each worker prompt is **self-contained**: the ids it owns, the exact `tursodb`
-  read command, its judgment rules, and (if it writes) the exact `remember.py`
+- Each worker prompt is **self-contained**: the ids it owns, the exact read
+  command, its judgment rules, and (if it writes) the exact `remember`
   invocation plus your model id for `--model`.
 - Workers are spawned **in one message** so they run concurrently.
 - **Compaction and pattern workers propose only.** They return JSON; the
@@ -42,44 +32,51 @@ scales with the corpus and is the reason this file exists. So:
 Read rows in a worker with:
 
 ```bash
-# On Windows this needs `--vfs experimental_win_iocp` too, or the open is refused.
-tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal -q -m list \
-  "SELECT id, topic, category, memory_text FROM semantic_memory WHERE id IN (...);"
+{{EXE}} show --table semantic <id1,id2,...>
 ```
+
+It prints every column and the whole text, never the embedding. An id that is not
+there is named on stderr and the exit is non-zero, so a partial read cannot pass
+for a complete one.
 
 ## D0 — Normal sleep (prerequisite) + health check
 
 The normal pass must already be done — compacting a corpus that is missing this
 session's lessons merges against stale content. If you arrived here from
-`SLEEP.md`, it is. If the user said "deep sleep" cold, run `SLEEP.md` first, then
-come back.
+`{{EXE}} runbook sleep`, it is. If the user said "deep sleep" cold, run that
+runbook first, then come back.
 
 ```bash
-python3 scripts/recall.py --status
+{{EXE}} status
 ```
 
-`READY n` → continue. **`DEGRADED n` → stop here**: Ollama is down, so no merged
-memory and no pattern row can be embedded, and `--cluster` would have nothing to
-work with. Report and stop; the rest of deep sleep is pointless without it.
+`READY n` → continue with every phase.
+
+**`DEGRADED n` is not a stop sign, but it changes what can run.** Without
+embeddings, the phases that read stored vectors have nothing to work with:
+`sleep --cluster` (D3 and D4's map stage) refuses when no row has a vector, and
+the eval scoring modes (D6.2, D6.4) refuse. If Ollama can be started, do that and
+run `{{EXE}} embed --missing`, then go on. If it cannot, run what does not need
+vectors — D1, D2, D5, D6.1, D6.3 and D7 — and **say in the report which phases
+were skipped and why**, rather than reporting a partial deep sleep as a full one.
+Rows without a vector (the `unembedded:` line of `status`) are skipped by the
+clustering and listed in its `no_embedding` field, not judged.
 
 ## D1 — Backup
 
 ```bash
-bash scripts/supercharged-memory-backup.sh
+{{EXE}} backup
 ```
 
-Not optional. D2 hard-deletes rows, and this dump is the only undo. `sleep.py
---purge` refuses to run unless it finds a dump newer than the DB file.
+Not optional. D2 hard-deletes rows, and this dump is the only undo. `sleep --purge`
+refuses to run unless it finds a dump newer than the database's last write.
 
 ## D2 — Purge gate (the user decides, every run)
 
 List everything that is no longer current truth:
 
-```sql
-SELECT id, topic, created_at, superseded_by, retired_at, substr(memory_text,1,80)
-FROM semantic_memory
-WHERE superseded_by IS NOT NULL OR retired_at IS NOT NULL
-ORDER BY created_at;
+```bash
+{{EXE}} list --table semantic --not-current --preview 80
 ```
 
 Show it as a compact table and ask **which ids to delete** — all, none, or a
@@ -90,12 +87,12 @@ someone decided no longer applies. Whether that history still earns its space is
 the user's call, not yours.
 
 ```bash
-python3 scripts/sleep.py --purge <id1,id2,...> --confirm-purge
+{{EXE}} sleep --purge <id1,id2,...> --confirm-purge
 ```
 
 **Pass every selected id in ONE call.** The backup gate compares the dump against
-the DB's mtime, and a purge is itself a write — so a second call in the same pass
-is refused until you re-run the backup. The script also refuses a current row, an
+the database's last write, and a purge is itself a write — so a second call in the
+same pass is refused until you re-run `{{EXE}} backup`. It also refuses a current row, an
 unknown id, a missing `--confirm-purge`, and any id whose deletion would strand a
 surviving row that points at it (purge the whole chain together instead). It
 clears the rows' `memory_coworkers` entries too.
@@ -109,7 +106,7 @@ normal outcome, not a failure.
 already stored:
 
 ```bash
-python3 scripts/sleep.py --cluster                      # semantic, default threshold 0.22
+{{EXE}} sleep --cluster                      # semantic, default threshold 0.22
 ```
 
 Returns `{"table", "threshold", "clusters":[{"cluster":N,"ids":[...]}], "no_embedding":[...]}`.
@@ -153,22 +150,11 @@ length, `why_safe` — **not** the full texts. Ask the user which to apply ("do
 1,3,4"). Then per approved merge:
 
 ```bash
-# Pair --experimental-multiprocess-wal with a --vfs wherever a tursodb line is handed
-# out: on Windows the default IO backend refuses the flag outright, so this lookup
-# returns nothing and the merge below then backdates the survivor to an empty string.
-# `none` is memlib's sentinel for "no --vfs at all", so it must not be passed
-# through as a backend name -- tursodb refuses that with `no such VFS: none`.
-# Built with set --/"$@": `${v:+--vfs "$v"}` expands to TWO arguments in bash but
-# stays ONE in zsh, where tursodb then rejects `--vfs experimental_win_iocp` whole.
-set -- --experimental-multiprocess-wal
-case "${TURSO_VFS-}" in ""|none|NONE) ;; *) set -- "$@" --vfs "$TURSO_VFS" ;; esac
-oldest="$("${TURSO_BIN:-$HOME/.turso/tursodb}" "$SUPERCHARGED_MEMORY_TURSO_PATH" "$@" \
-  -q -m list \
-  "SELECT min(created_at) FROM semantic_memory WHERE id IN (<id1,id2,id3>);")"
-# On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
-python3 scripts/remember.py --table semantic --category <c> --topic "<t>" \
+# the oldest input's date: `list` prints oldest first, take the first row's created_at
+{{EXE}} list --table semantic --ids <id1,id2,id3>
+{{EXE}} remember --table semantic --category <c> --topic "<t>" \
   --keywords "<k1, k2, ...>" --source deep-sleep --model <your-model-id> \
-  --supersedes <id1,id2,id3> --created-at "$oldest" --text "<merged>"
+  --supersedes <id1,id2,id3> --created-at "<that created_at>" --text "<merged>"
 ```
 
 One call, one transaction: the new row is inserted and **all** listed ids are
@@ -189,7 +175,7 @@ likely.
 use the same `--supersedes`. Merging N equivalent facts keeps the oldest date;
 *revising* one fact because something was learned (`--supersedes <one id>`, the
 store rule in `CLAUDE.md`) is new knowledge and must keep today's, or a
-just-corrected row sorts to the back of D7. `remember.py` cannot tell the two
+just-corrected row sorts to the back of D7. `remember` cannot tell the two
 apart from its arguments — this phase can, so the rule lives here. Note
 `--created-at` backdates the survivor's `updated_at` too (the writer sets both);
 nothing reads a semantic row's `updated_at` for judgment today.
@@ -213,7 +199,7 @@ There are two kinds of pattern and no single worker can see both:
 **1. Map — partitioned by episodic cluster.**
 
 ```bash
-python3 scripts/sleep.py --cluster --table episodic     # slightly looser: default 0.25
+{{EXE}} sleep --cluster --table episodic     # slightly looser: default 0.25
 ```
 
 Group by embedding similarity, **not** by exact `topic` — episodic topics are
@@ -241,8 +227,7 @@ session can check the claim against the episodic rows instead of trusting it.
 **5. Apply after approval:**
 
 ```bash
-# On Windows run this as `python` — the `python3` stub exits 0 having written nothing.
-python3 scripts/remember.py --table semantic --category pattern --topic "<t>" \
+{{EXE}} remember --table semantic --category pattern --topic "<t>" \
   --keywords "<k1, k2, ...>" --source deep-sleep --model <your-model-id> \
   --text "<claim> ... Derived from episodic ids: 12, 44, 91." \
   [--supersedes <old-pattern-id>]
@@ -256,7 +241,7 @@ itself.
 
 The corpus changed in D2/D3/D4, so rebuild the topic index exactly as normal
 sleep's last phase does (same 500-char hard cap, same full-replace semantics) —
-see `SLEEP.md` phase 7.
+see Step 7 of `{{EXE}} runbook sleep`.
 
 Then one report:
 
@@ -280,18 +265,24 @@ on your own.**
 via `retired_at`) and `eval_runs` (one row per run). Both are covered by the `.dump`
 backup, which is the point: the cases are authored and cannot be regenerated, and a
 past corpus cannot be re-measured. The only thing still on disk is the
-query-embedding cache at `<db parent>/eval/qvec.json`
-(`SUPERCHARGED_MEMORY_EVAL_DIR` overrides) — pure derived data, delete it freely.
+query-embedding cache, one file per embedding model, at
+`<db parent>/eval/qvec-<model>.json` (`SUPERCHARGED_MEMORY_EVAL_DIR` in the `.env`
+overrides the directory) — pure derived data, delete it freely.
+
+Every change to the set goes through `{{EXE}} eval`; never edit the tables by hand.
+`--validate` needs no embeddings; `--report`, `--sweep` and `--variants` need
+Ollama and an embedded corpus even when every query vector is cached, and refuse
+without them.
 
 **If `eval_cases` is empty: skip D6 and say so.** Do NOT generate one automatically.
 An LLM writing a query while looking at the row it should retrieve produces lexical
 overlap a real user never produces, which biases the whole exercise toward the
-keyword layer — see `investigations/2026-08-18-recall-keyword-layer.md`.
+keyword layer.
 
 ### D6.1 — Validate
 
 ```bash
-python3 <repo>/investigations/eval-harness.py --validate
+{{EXE}} eval --validate
 ```
 
 Exit 0 = every case points at a live, current row; go to D6.2. Otherwise it prints
@@ -301,14 +292,14 @@ Exit 0 with `nothing to validate` = `eval_cases` holds no cases at all. That is 
 fresh-install case the preamble above already tells you to skip D6 on, reported as
 what it is rather than as a failure — an empty case set has nothing pointing at a
 purged, superseded or reused row. The scoring modes (`--report`, `--sweep`,
-`--variants`) still exit 1 there: there is no metric to compute.
+`--variants`) refuse there: there is no metric to compute.
 
 - `<old> -> <new>` — the target was merged in D3. Repointing is correct: same fact,
-  new row id. Apply it, and refresh that target's stamp:
-  `UPDATE eval_cases SET expect_ids='...', expect_stamps=(SELECT created_at FROM
-  semantic_memory WHERE id=<new>) WHERE id='<case>';`
+  new row id. Apply it; the command refreshes that target's stamp itself:
+  `{{EXE}} eval --repoint <case> <new>`. For a case with several targets add
+  `--from <old>` to say which one moves.
 - `<old> -> GONE` — purged in D2 or retired. **Retire the case**
-  (`UPDATE eval_cases SET retired_at=CURRENT_TIMESTAMP WHERE id='<case>';`). Do not
+  (`{{EXE}} eval --retire-case <case>`: it sets `retired_at`, never deletes). Do not
   repoint it at a loosely-related row; that quietly changes what the metric measures,
   and a metric whose definition drifts is worse than no metric.
 - `<old> -> ID REUSED` — the row id came back attached to a different memory.
@@ -321,10 +312,10 @@ All three are proposals — show them, let the user confirm, then write.
 ### D6.2 — Regression report
 
 ```bash
-python3 <repo>/investigations/eval-harness.py --report
+{{EXE}} eval --report
 ```
 
-Scores the shipped `recall.py` at the configured `RECALL_ALPHA`, appends one row to
+Scores the shipped ranking at the configured `RECALL_ALPHA`, appends one row to
 `eval_runs`, and diffs against the previous run. Report the three numbers and the
 delta. Note the noise floor it prints — with a small set one case is several points,
 so a one-case swing is **not** a finding.
@@ -339,10 +330,18 @@ report as if it were measured.
 The set's value is its size — one case is `100/N` percentage points of every metric,
 and that noise floor is what limits every conclusion drawn from it.
 
-Dispatch **one** worker over semantic rows created since the newest `eval_runs.ran_at`. Its contract:
+Get the newest run's timestamp, then the candidate rows created since:
 
-- It reads `id`, `topic` and `keywords` for its candidate rows — **never
-  `memory_text`.**
+```bash
+{{EXE}} eval --last-run
+{{EXE}} list --table semantic --current --since "<that timestamp>" --keywords
+```
+
+`--last-run` prints the timestamp, or `none`: then omit `--since`. Dispatch **one**
+worker over those rows. Its contract:
+
+- It reads `id`, `topic` and `keywords` (the `list` output) — **never the row's
+  text, so never `show`.**
 - It drafts a query a real user would type to find that memory, and it **must not
   reuse a distinctive token that appears in the row's topic or keywords.** Force
   paraphrase. A query built from the row's own wording tests the keyword layer
@@ -351,24 +350,25 @@ Dispatch **one** worker over semantic rows created since the newest `eval_runs.r
   `class` drawn from the classes already present in `eval_cases`.
 - It proposes at most 3.
 
-Show the drafts to the user, then insert each approved one — stamping the targets so
-a later id reuse is detectable:
+Show the drafts to the user, then add each approved one. The command reads the
+stamps off the targets itself, so a later id reuse is detectable; they are never
+typed:
 
-```sql
-INSERT INTO eval_cases (id, class, memory_table, query, expect_ids, expect_stamps)
-VALUES ('s09','semantic','semantic','<query>','288',
-        (SELECT created_at FROM semantic_memory WHERE id=288));
+```bash
+{{EXE}} eval --add-case --id s09 --class semantic --table semantic \
+  --query "<query>" --expect 288
 ```
 
-For a multi-target case, `expect_ids` and `expect_stamps` are comma-separated **in
-the same order**. Re-run D6.1 afterwards to confirm.
+For a multi-target case, `--expect` takes the ids comma-separated. The class must
+already be in use (unless no case exists yet), and a label is never reusable.
+Re-run D6.1 afterwards to confirm.
 
 ### D6.4 — Alpha: ask, never change
 
 Run the sweep **only** if D6.2 flagged a regression, or the user asks:
 
 ```bash
-python3 <repo>/investigations/eval-harness.py --sweep 0.05,0.1,0.15,0.2,0.3,0.5
+{{EXE}} eval --sweep 0.05,0.1,0.15,0.2,0.3,0.5
 ```
 
 It prints the recall@5 plateau, the best value inside it, and whether the configured
@@ -379,10 +379,11 @@ It prints the recall@5 plateau, the best value inside it, and whether the config
 - **Outside the plateau → ASK the user**, showing the sweep table and the proposed
   value. Changing it is their call, never yours.
 
-If they accept, the persistent place for it is `env` in `~/.claude/settings.json`
-(Claude Code's Bash tool never sources `~/.zshrc`, so a profile export would not
-reach the scripts). Editing the default in `recall.py` instead is a repo change that
-would need a `migration-steps/` note; per-machine calibration belongs in settings.
+If they accept, the persistent place for it is `RECALL_ALPHA=<value>` in the `.env`
+beside the binary (add or edit the line, then check that
+`{{EXE}} config` shows the value with source `.env`: a real environment variable
+would override it). The built-in default only changes with a new release;
+per-machine calibration belongs in the `.env`.
 
 Record in the report: the numbers, the plateau, what was asked, and what the user
 decided.
@@ -393,8 +394,8 @@ decided.
 two more numbers, and both are computable from what the DB already holds:
 
 ```bash
-python3 scripts/sleep.py --staleness
-python3 scripts/sleep.py --contradiction-candidates
+{{EXE}} sleep --staleness
+{{EXE}} sleep --contradiction-candidates
 ```
 
 **Staleness distribution** is the age profile of current rows. Age is not wrongness
@@ -415,13 +416,14 @@ subject, disagreeing" from "same subject, complementary". Dispatch **one worker 
 
 Report `contradiction rate = confirmed / candidates` with both raw counts, because
 the rate alone hides how big the shortlist was. A confirmed contradiction is fixed
-the normal way — `remember.py --supersedes` with text that resolves it — and that is
+the normal way — `remember --supersedes` with text that resolves it — and that is
 the user's call, not the worker's.
 
-**Neither number is persisted.** `eval_runs` has fixed columns and this work adds no
-schema, so there is no stored baseline to diff against: carry the numbers in the
-report and compare by eye. If they prove worth trending, that is a schema change and
-a `migration-steps/` note of its own.
+**Neither number is persisted.** `eval_runs` has fixed columns, so there is no
+stored baseline to diff against: carry the numbers in the report and compare by
+eye. If they prove worth trending, that is a schema change of its own.
+`--staleness` also reports `n_without_embedding`; a non-zero count means
+`embed --missing` has work to do.
 
 ## D7 — Verify (staleness check)
 
@@ -433,26 +435,28 @@ of the Keep / Remove / Move / **Verify** review framework are already covered
 
 Runs **last** on purpose. It is the heaviest phase per unit of value, and unlike D2
 and D3 it does not invalidate the eval set *before* D6 measures it. The cost of that
-placement: **if you retire anything here, re-run `eval-harness.py --validate`
+placement: **if you retire anything here, re-run `{{EXE}} eval --validate`
 afterwards** (D6.1's command) so no case is left pointing at a row you just retired.
 
 **1. Get the candidate list.** Read-only, no LLM, no embeddings — this works with
 Ollama down:
 
 ```bash
-python3 scripts/sleep.py --verify-candidates --limit 40
+{{EXE}} sleep --verify-candidates --limit 40
 ```
 
 Returns `{"table","n_current","n_candidates","n_no_artifacts","limit","candidates":[...]}`,
 each candidate carrying `id`, `topic`, `created_at`, `age_days`, `artifacts` (which
-classes it mentions: `paths`, `flags`, `env`, `versions`) and `artifact_classes`.
+classes it mentions: `paths`, `flags`, `env`, `versions`, `commands`, `python`) and
+`artifact_classes`. `commands` is this binary's own interface: a subcommand with
+one of its flags, or any `.env` key.
 Oldest first, artifact-class count as tiebreak. `n_no_artifacts` is the remainder
 that quotes nothing checkable — those rows are not unverifiable, they are simply
 **out of scope for a mechanical pass**, and saying so is part of the report.
 
 There is deliberately no "most-retrieved" ordering: a frequently-recalled stale row
 is the worst case, but the only way to know which rows those are is to make
-`recall.py` write on every query, and keeping recall a pure reader was judged the
+`recall` write on every query, and keeping recall a pure reader was judged the
 better trade. Age plus artifact density is the accepted proxy.
 
 **2. One worker per batch of ≤12 candidates**, spawned in one message. The
@@ -460,41 +464,42 @@ orchestrator passes ids only — the worker reads the text itself. Give each wor
 this rule verbatim:
 
 > For each memory id you own: read the row, extract every concrete artifact it
-> tells a reader to use — script paths, CLI flags, env var names, file paths,
-> version numbers, model ids — and CHECK EACH ONE against the repo and the machine
-> as it is today. A path: does the file exist? A flag: does `--help` still list it,
-> or does the script's argparse still define it? An env var: is it still read
-> anywhere? A version: is that still what is installed?
-> Report per id, and NOTHING else: `{"id":N,"checked":["--flag","path/x.py"],
+> tells a reader to use — commands, CLI flags, env var and `.env` key names, file
+> paths, version numbers, model ids — and CHECK EACH ONE against the machine as it
+> is today. A command or flag of this system: does `{{EXE}} <command> --help` still
+> list it? A `.env` key: does `{{EXE}} config` still print it? A path: does the file
+> exist? A version: is that still what is installed? A row that names a Python
+> script from the old repository checkout is describing the legacy implementation:
+> report it `stale` only if you can confirm the command it describes no longer
+> exists, otherwise `unverifiable`.
+> Report per id, and NOTHING else: `{"id":N,"checked":["--flag","path/to/file"],
 > "stale":["--old-flag"],"verdict":"current|stale|unverifiable","evidence":"one line
 > naming what you ran or read"}`. `stale` lists only artifacts you CONFIRMED are
 > gone or renamed — an artifact you could not check is `unverifiable`, never
-> `stale`. On Windows invoke a script as `python`: the `python3` stub prints an
-> advert and exits 0, so a flag checked through it is `unverifiable`, not `stale`.
-> Do not propose replacement text and do not retire anything.
+> `stale`. Do not propose replacement text and do not retire anything.
 
 **3. Present the batch.** One compact table: id, topic, age, verdict, the stale
 artifact, and the worker's evidence line — **not** the full texts. Then ask the user
 per stale row which action they want, and never pick for them:
 
 - the fact still holds, only the artifact was renamed → **supersede** with corrected
-  text (`remember.py --supersedes <id>`), which is the normal fix
-- the fact itself no longer applies → **retire** (`sleep.py --retire <id>`)
+  text (`remember --supersedes <id>`), which is the normal fix
+- the fact itself no longer applies → **retire** (`sleep --retire <id>`)
 - unclear → **leave it and say so in the report**
 
-A `stale` verdict is never grounds to retire on your own authority. `SLEEP.md`
-Step 6's rule holds here: when it is not clear-cut, ask.
+A `stale` verdict is never grounds to retire on your own authority. Step 6 of
+`{{EXE}} runbook sleep` holds here: when it is not clear-cut, ask.
 
 **4. If anything was retired or superseded**, re-run D6.1's validation and rebuild
 the topic index (D5's command), because the corpus changed after both ran:
 
 ```bash
-python3 <repo>/investigations/eval-harness.py --validate
+{{EXE}} eval --validate
 ```
 
 On a corpus with no authored eval cases this prints `nothing to validate` and exits
 0. That is the expected outcome, not a failing step to stop on: a fresh install has
-no cases, and `MIGRATE-EXISTING-MEMORY.md` M4 reaches this step with D6 deliberately
+no cases, and `{{EXE}} runbook migrate` (M4) reaches this step with D6 deliberately
 skipped for exactly that reason. Note it in the report and carry on to the topic
 rebuild.
 

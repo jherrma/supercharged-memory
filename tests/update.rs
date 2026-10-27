@@ -2,10 +2,9 @@
 //! own with its `.env`, a database and a CLAUDE.md, run with a scrubbed
 //! environment.
 //!
-//! The embedded CLAUDE.md template still names the Python scripts, which a
-//! binary cannot fill in, so here the CLAUDE.md report says it could not
-//! compare, and `--print-block` refuses. The comparison itself is unit-tested
-//! against a template the binary can fill.
+//! The CLAUDE.md the machine holds is the block this binary prints itself, so
+//! the instructions compare as current; a block that differs is reported with
+//! its diff.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -84,6 +83,10 @@ impl Machine {
         )
         .unwrap();
         fs::write(m.claude_md(), BLOCK_MD).unwrap();
+        // What `init` would have written: this binary's own render.
+        let printed = m.run(&["update", "--print-block"]);
+        assert!(printed.status.success(), "{}", stderr(&printed));
+        fs::write(m.claude_md(), format!("# Mine\n\n{}", stdout(&printed))).unwrap();
         m
     }
 
@@ -205,6 +208,7 @@ fn last_line(s: &str) -> &str {
 #[test]
 fn a_dry_run_then_yes_then_up_to_date() {
     let m = Machine::installed("cycle", "0.0.1");
+    let md = fs::read_to_string(m.claude_md()).unwrap();
 
     // The dry run: the note, the pending migration, and nothing written.
     let before = m.snapshot();
@@ -214,9 +218,7 @@ fn a_dry_run_then_yes_then_up_to_date() {
     assert_eq!(last_line(&text), "Ask the user to confirm", "{text}");
     assert!(text.contains("The `instructions` table"), "{text}");
     assert!(text.contains("table `instructions` exists"), "{text}");
-    // The interim state: the template names the Python scripts.
-    assert!(text.contains("not compared"), "{text}");
-    assert!(text.contains("{{BASE_PATH}}"), "{text}");
+    assert!(text.contains("instructions current"), "{text}");
     assert_eq!(
         changed(&before, &m.snapshot()),
         Vec::<String>::new(),
@@ -240,7 +242,7 @@ fn a_dry_run_then_yes_then_up_to_date() {
             .any(|l| l == format!("SUPERCHARGED_MEMORY_VERSION={VERSION}")),
         "{env}"
     );
-    assert_eq!(fs::read_to_string(m.claude_md()).unwrap(), BLOCK_MD);
+    assert_eq!(fs::read_to_string(m.claude_md()).unwrap(), md);
 
     // Again: up to date, and nothing written.
     let before = m.snapshot();
@@ -297,10 +299,38 @@ fn a_legacy_machine_gets_the_cutover_note() {
 }
 
 #[test]
-fn print_block_is_refused_while_the_template_names_the_python_scripts() {
+fn print_block_prints_the_block_this_binary_renders_and_nothing_else() {
     let m = Machine::installed("print-block", VERSION);
+    let before = fs::read(m.claude_md()).unwrap();
     let out = m.run(&["update", "--print-block"]);
-    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
-    assert!(stderr(&out).contains("{{BASE_PATH}}"), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    let exe = m.exe.display().to_string();
+    assert!(text.starts_with("<!-- BEGIN agentic-memory"), "{text}");
+    assert!(text.contains(&format!("{exe} status")), "{text}");
+    assert!(text.contains("`manual`"), "{text}");
+    for gone in ["{{", "python", "scripts/", "BASE_PATH"] {
+        assert!(!text.contains(gone), "{gone:?} in:\n{text}");
+    }
+    assert_eq!(
+        fs::read(m.claude_md()).unwrap(),
+        before,
+        "CLAUDE.md written"
+    );
+}
+
+#[test]
+fn a_hand_edited_block_is_reported_with_its_diff() {
+    let m = Machine::installed("edited", VERSION);
+    let md = fs::read_to_string(m.claude_md()).unwrap();
+    fs::write(
+        m.claude_md(),
+        md.replace("## Rules", "## Rules\n- a local hand-edit"),
+    )
+    .unwrap();
+    let out = m.run(&["update"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("a local hand-edit"), "{text}");
+    assert!(!text.contains("instructions current"), "{text}");
 }

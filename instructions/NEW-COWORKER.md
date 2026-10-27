@@ -1,6 +1,6 @@
 # Creating a new coworker
 
-What you need before running `coworkers.py --add`, and how to construct a
+What you need before running `{{EXE}} coworkers --add`, and how to construct a
 personality that's actually coherent instead of a grab-bag of adjectives.
 
 ## Required fields
@@ -8,12 +8,14 @@ personality that's actually coherent instead of a grab-bag of adjectives.
 | Field | Cap | Notes |
 |-------|-----|-------|
 | `--name` | 64 chars | Unique, forever (retire instead of delete/reuse). |
-| `--expertise` | 256 chars | What they're good at reviewing/advising on — a domain, not a personality trait. |
-| `--personality` | 1000 chars | Tone, biases, what they push back on. Construct this from the Big-Five model below — don't freehand it. |
+| `--expertise` | 3000 chars | What they're good at reviewing/advising on — a domain, not a personality trait. |
+| `--personality` | 3000 chars | Tone, biases, what they push back on. Construct this from the Big-Five model below — don't freehand it. |
 
-`trust_level` defaults to `supervised` and isn't set at creation — see
-`docs/2026-07-23-ai-coworkers-design.md` for the appraisal flow that adjusts
-it later. There's no dedicated schema field for the Big-Five dimensions
+A name has no comma. `trust_level` defaults to `supervised` and isn't set at
+creation: an appraisal adjusts it later (see *After adding* below), or
+`{{EXE}} coworkers --set-trust <name> <level>` sets it directly (`supervised`,
+`trusted` or `autonomous`; none of them loosens a baseline rule). There's no
+dedicated schema field for the Big-Five dimensions
 below — `personality` stays one free-text column; the model is a
 **construction method**, not new structure to store.
 
@@ -22,7 +24,7 @@ below — `personality` stays one free-text column; the model is a
 Use these 30 facets as a checklist while drafting `--personality`: for each
 of the 5 dimensions, decide roughly where the coworker sits (high / medium /
 low), then pick 2–3 facets that define their specific flavor — you will not
-fit all 30 into 1000 characters, and you shouldn't try. The facets are the
+fit all 30 into the personality field's characters, and you shouldn't try. The facets are the
 palette; the personality text is the finished sentence, not a facet-by-facet
 list.
 
@@ -113,9 +115,21 @@ Note how the facets *informed* the sentence without being named one-by-one
 — the reader gets a specific, consistent character, not a psychology
 report.
 
-## After adding
+## Adding, then appraising
 
-Document the coworker in `coworkers/<name>.md` (see `coworkers/README.md`
-for the template) and, once you've worked with them a while, run an
-appraisal (`coworkers.py --appraise <name> --trust <level> --text "..."`) —
-see `docs/2026-07-23-ai-coworkers-design.md` for that flow.
+```bash
+{{EXE}} coworkers --add --name <Name> --expertise "<...>" --personality "<...>"
+```
+
+The coworker starts active and `supervised`. The name is unique forever: retire
+a coworker (`coworkers --retire <name>`) instead of reusing it; nothing is ever
+deleted. To use one in a session, the user says "load <Name>", and the agent runs
+`{{EXE}} coworkers --load <name>`.
+
+Once you've worked with them a while, run an appraisal. It supersedes the current
+appraisal and sets the trust level in one transaction; the text is the distilled
+feedback history (`coworkers --load <name>` shows it), at most 2000 characters:
+
+```bash
+{{EXE}} coworkers --appraise <name> --trust <level> --text "<distilled appraisal>"
+```

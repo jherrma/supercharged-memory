@@ -311,13 +311,12 @@ mod tests {
         assert_eq!(render("a {{ b }} {x}", &[]).unwrap(), "a {{ b }} {x}");
     }
 
-    /// The template still names the Python scripts through `{{BASE_PATH}}` and
-    /// `{{PY}}`, which a binary without a repository cannot fill. Until it names
-    /// the binary instead, rendering it must fail rather than install broken
-    /// paths. When the template changes, this test changes with it.
+    /// The embedded template names the binary only, so the binary can fill in
+    /// everything it holds: the rendered block has no placeholder and no
+    /// repository path left.
     #[test]
-    fn the_embedded_template_cannot_be_rendered_by_the_binary_yet() {
-        let err = render(
+    fn the_embedded_template_renders_from_the_binary_alone() {
+        let out = render(
             TEMPLATE,
             &[
                 ("EXE", "/opt/sm/supercharged-memory"),
@@ -325,9 +324,10 @@ mod tests {
                 ("EPISODIC_RULE", "rule"),
             ],
         )
-        .unwrap_err();
-        assert!(err.contains(&"{{BASE_PATH}}".to_string()), "{err:?}");
-        assert!(err.contains(&"{{PY}}".to_string()), "{err:?}");
+        .unwrap();
+        assert!(!out.contains("{{"), "{out}");
+        assert!(out.contains("/opt/sm/supercharged-memory status"), "{out}");
+        assert!(out.contains("`major-events`: rule"), "{out}");
     }
 
     #[test]

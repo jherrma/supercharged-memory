@@ -2,11 +2,10 @@
 //! with a scrubbed environment -- no PATH (so no tursodb), a home of its own (so
 //! no `~/.claude`), and an Ollama address that refuses at once.
 //!
-//! The embedded CLAUDE.md template still names the Python scripts, which a
-//! binary cannot fill in, so on a machine without the instructions `init`
-//! refuses outright; on a machine that has them (the legacy installer's block)
-//! it runs to the end. The rendering itself is unit-tested against a template
-//! the binary can fill.
+//! The embedded CLAUDE.md template names only the binary, so on a machine
+//! without the instructions `init` renders them; on a machine that has them
+//! (the legacy installer's block) it leaves them alone and prints the cutover
+//! note.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -111,17 +110,34 @@ fn stderr(o: &Output) -> String {
 }
 
 #[test]
-fn a_fresh_machine_is_refused_while_the_template_names_the_python_scripts() {
+fn a_fresh_machine_gets_a_block_that_names_only_binary_commands() {
     let m = Machine::new("fresh");
+
+    // The dry run writes nothing.
     let before = m.snapshot();
-    for args in [&["init"][..], &["init", "-y"]] {
-        let out = m.run(args);
-        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
-        let err = stderr(&out);
-        assert!(err.starts_with("refused: "), "{args:?}: {err}");
-        assert!(err.contains("{{BASE_PATH}}"), "{args:?}: {err}");
-        assert_eq!(m.snapshot(), before, "{args:?} wrote something");
+    let out = m.run(&["init"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(m.snapshot(), before, "the dry run wrote something");
+
+    let out = m.run(&["init", "-y"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let md = fs::read_to_string(m.claude_md()).unwrap();
+    let exe = m.exe.display().to_string();
+    assert!(md.contains(&format!("{exe} status")), "{md}");
+    assert!(md.contains(&format!("{exe} recall --baseline")), "{md}");
+    assert!(md.contains(&format!("{exe} runbook sleep")), "{md}");
+    for gone in [
+        "{{",
+        "python",
+        "scripts/",
+        "BASE_PATH",
+        ".py",
+        "settings.json",
+    ] {
+        assert!(!md.contains(gone), "the block still has {gone:?}:\n{md}");
     }
+    assert!(md.contains("rendered-by"), "{md}");
+    assert!(m.dotenv().exists());
 }
 
 #[test]

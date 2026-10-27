@@ -1,460 +1,242 @@
 # Supercharged Memory
 
-A bootstrap for **local, embedded, long-term memory for AI coding agents** (built for [Claude Code](https://claude.com/claude-code)).
+A **local, embedded, long-term memory for AI coding agents** (built for [Claude Code](https://claude.com/claude-code)), shipped as **one native binary**.
 
-Your agent's text is embedded with a local model and stored as a vector in a local [Turso](https://github.com/tursodatabase/turso) (SQLite-compatible) database, so it recalls memories by *meaning* — with an IDF-weighted keyword credit so exact ids and error strings still surface. Everything runs on your machine: no cloud, no API cost, no data leaving your laptop. The database is the single source of truth; a daily job backs it up locally, and a multiprocess flag lets several agent instances share it at once.
+Your agent's text is stored in a local [Turso](https://github.com/tursodatabase/turso) (SQLite-compatible) database and, when a local embedding model is available, embedded as a vector, so it recalls memories by *meaning* — with an IDF-weighted keyword credit so exact ids and error strings still surface. Everything runs on your machine: no cloud, no API cost, no data leaving your laptop. The database is the single source of truth; a daily job backs it up locally, and a multiprocess WAL lets several agent instances share it at once.
 
 ## Features
 
 - **Semantic recall** — hybrid vector + keyword search over everything the agent has learned.
 - **Two memory types** — timeless, revisable *semantic* facts and time-anchored, append-only *episodic* events.
+- **Instructions on demand** — directives you want followed when you say so ("use instruction X"), kept apart from memory and never loaded at session start.
 - **Configurable episodic policy** — pick, at setup, how aggressively events are logged (every prompt → only when you ask).
-- **Fully local & private** — a local embedding model (Ollama) and a local database; nothing is sent to a cloud service.
+- **Fully local & private** — an optional local embedding model (Ollama) and a local database; nothing is sent to a cloud service.
 - **Multi-instance safe** — several agent sessions can share one database concurrently.
-- **Graceful degradation** — if the embedding model is offline, recall falls back to keyword-only and the DB stays usable.
+- **Graceful degradation** — with no embedding model, recall falls back to keyword-only, new memories are stored without an embedding, and the DB stays fully usable; `embed --missing` catches up later.
 - **Sleep & deep sleep** — user-triggered consolidation: sift events into facts, then (deep) purge what you agree is dead, merge near-duplicates, and derive patterns and trends across the whole event log. All of it read by subagents, so the cost doesn't land in your session's context.
 - **Coworkers** — optional named AI personas with scoped memory and trust-gated autonomy.
-- **Backups built in** — validated, gzipped daily dumps with daily + weekly retention.
+- **Backups built in** — validated, gzipped dumps with daily + weekly retention, and a counted restore.
+
+## Install
+
+1. Download the one binary for your platform and put it in a permanent place under a stable name, for example `~/.local/bin/supercharged-memory`. The `.env` it uses is read from beside the binary, and the instructions it installs name its path.
+2. Start a Claude Code session and tell the agent to **set up the memory system**. It runs the binary's own runbook (`runbook setup`), which drives `init`:
+   - `init` with no flag is a dry run: it prints the plan (database path, `.env` values, the CLAUDE.md block, the state of the optional dependencies, a backup schedule) and writes nothing. The agent relays it, you confirm, and `init -y` applies it.
+   - It creates the database from the schema embedded in the binary (or adopts an existing one), writes the `.env`, and appends the memory instructions to `~/.claude/CLAUDE.md` between managed markers. It never overwrites a database or a differing `.env` value.
+
+Or by hand: `supercharged-memory init`, read the plan, `supercharged-memory init -y`, restart your session.
 
 ## Dependencies
 
-Neither dependency is bundled — install both before setup.
+**None of them is required.** The binary carries the database engine, the schema, the instructions and the runbooks. Two things are optional and recommended:
 
-### Turso (`tursodb`)
-
-Turso 0.7.0+ — the Rust rewrite of SQLite with native vector support. **0.7.2 is
-what this project targets**, and what the behaviour documented here was verified
-against; 0.7.0 remains the floor, not a tested version.
-
-```bash
-curl -sSL tur.so/install | sh
-```
-
-`tursodb` is always opened with `--experimental-multiprocess-wal`, and on Windows
-with `--vfs experimental_win_iocp` beside it (see
-[Concurrency](#concurrency--locking)).
-
-### Ollama + an embedding model
+### Ollama + an embedding model — recommended
 
 [Ollama](https://ollama.com) serves the embedding model locally.
 
 ```bash
-# macOS
-brew install ollama
-brew services start ollama
-
-# Pull the embedding model (multilingual, 1024-dim)
-ollama pull bge-m3
+brew install ollama && brew services start ollama   # macOS; see the runbook for Linux and Windows
+ollama pull bge-m3                                  # multilingual, 1024-dim
 ```
 
-By default it must be reachable at `http://localhost:11434`. **bge-m3** is the default model; one embedding model per database — the writer refuses to mix models in the same DB.
+By default it is expected at `http://localhost:11434`. **bge-m3** is the default model; one embedding model per database — the writer refuses to mix models in one DB.
 
-### Runtime
+Without it the system still works, and says what it skips: `status` reads `DEGRADED n` and gives the reason; recall is **keyword-only**; a new memory is stored **without an embedding** and the near-duplicate check is text-only (weaker); clustering for sleep's compaction and pattern mining, and the recall-quality harness, need vectors and refuse. When Ollama arrives, `embed --missing` fills in every row stored meanwhile, and switches `EMBEDDINGS=off` in the `.env` back on once nothing is left.
 
-Python 3 (standard library only — no `pip install` needed) and bash.
+### Turso (`tursodb`) — recommended, for ad-hoc reads
 
-## Setup
+Turso 0.7.0+ — **0.7.2 is what this project targets**. The binary never calls `tursodb`; it only helps you: registered as a Claude Code MCP server named `turso`, it gives the agent broad ad-hoc reads that the fixed commands (`recall`, `list`, `show`, `coworkers --load`, …) do not offer. Register it **read-only**, so writes can only go through the binary:
 
-### Guided (recommended)
+```bash
+claude mcp add turso --scope user -- <path to tursodb> <database path> --mcp --readonly --experimental-multiprocess-wal
+```
 
-`instructions/SETUP.md` is a runbook Claude Code can execute for you. In a session
-started in this repo, just say **"run SETUP.md"** — the agent verifies/installs the
-two dependencies (asking before each install), pulls the embedding model, asks
-**where to store the database** and **which episodic-memory policy** to use,
-activates the instructions, creates the DB, and finally offers to set up coworkers.
+`init` prints this command, filled in. On Windows add `--vfs experimental_win_iocp` beside the WAL flag (see [Concurrency](#concurrency--locking)). A read-write registration works, but then "writes go through the binary" is only a convention (advisory).
 
-### Manual
+## Configuration
 
-1. Install the dependencies above.
-2. Clone this repository somewhere local (not a cloud-synced folder — see below).
-3. Choose where the live database file lives and export it (keep it local; add the
-   export to your shell profile so every session and script agrees):
+Settings come from the real environment, then the `.env` beside the binary, then a built-in default — in that order of **precedence**. `supercharged-memory config` prints every setting, its value and where it came from; a real environment variable that overrides a differing `.env` value says so. A key the binary does not know in the `.env` is warned about, never fatal (a `.env` written by a newer binary must not brick an older one). Relative paths in the `.env` are refused.
 
-   ```bash
-   export SUPERCHARGED_MEMORY_TURSO_PATH="${XDG_DATA_HOME:-$HOME/.local/share}/turso/supercharged-memory.db"   # your choice
-   ```
-4. Register Turso as a Claude Code MCP server named `turso`, launched as
-   `tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --mcp --experimental-multiprocess-wal`
-   (on Windows append `--vfs experimental_win_iocp` — see
-   [Concurrency](#concurrency--locking); this applies to every `tursodb`
-   command below too).
-5. Activate the memory instructions in your agent, baking in your database path and
-   episodic policy:
-
-   ```bash
-   SUPERCHARGED_MEMORY_TURSO_PATH="$SUPERCHARGED_MEMORY_TURSO_PATH" EPISODIC_MODE=major-events bash scripts/install-claude-md.sh
-   ```
-
-   This renders `CLAUDE.md.template` into `~/.claude/CLAUDE.md` between managed
-   markers, substituting `BASE_PATH` and `EPISODIC_MODE`. Re-running replaces the
-   managed block and keeps everything outside it — and, because both of those values
-   are *rendered into* the block, a re-run reads them back out of it rather than
-   resetting them: a bare `bash scripts/install-claude-md.sh` preserves this machine's
-   episodic mode, and refuses outright if it would repoint the block at a different
-   `BASE_PATH` (see *Configuration*). Restart your session to pick it up.
-6. Create the database and check availability (the scripts refuse to
-   silently create an empty DB, so build the schema first):
-
-   ```bash
-   tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql   # +`--vfs experimental_win_iocp` on Windows
-   python3 scripts/recall.py --status     # MISSING | EMPTY | DEGRADED n | READY n
-   ```
-
-### Configuration
-
-Scripts read these environment variables (defaults in `scripts/memlib.py`):
-
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db` | The live DB. **Keep it local — never in a cloud-synced folder**; cloud sync corrupts live SQLite. |
-| `TURSO_BIN` | `~/.turso/tursodb` | Path to the `tursodb` binary. |
+| Key | Default | Notes |
+|-----|---------|-------|
+| `SUPERCHARGED_MEMORY_TURSO_PATH` | `${XDG_DATA_HOME:-~/.local/share}/turso/supercharged-memory.db` | The live DB. **Keep it local — never in a cloud-synced folder**; cloud sync corrupts live SQLite. Written by `init`. |
+| `BACKUP_DIR` | `${XDG_DATA_HOME:-~/.local/share}/supercharged-memory/backups` | Where `backup` writes its dumps. Written by `init`. |
+| `SUPERCHARGED_MEMORY_VERSION` | unset | The version that last ran `init`/`update`; `update` compares it with the binary's. |
+| `EMBEDDINGS` | `on` | `off` = never contact Ollama. `init` writes `off` when it finds none; `embed --missing` switches it back. |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint. |
 | `EMBED_MODEL` | `bge-m3` | Embedding model; one per DB. |
-| `RECALL_ALPHA` | `0.15` | Keyword weight in recall ranking. Corpus-calibrated — see below. |
-| `BACKUP_DIR` | `./backups` | Where daily dumps are written. |
-| `TURSO_VFS` | `experimental_win_iocp` on Windows, else unset | tursodb IO backend, paired with `--experimental-multiprocess-wal`. Set it to `none` (or empty) to drop `--vfs` entirely. See `instructions/SETUP.md`, *Windows*. |
-| `SUPERCHARGED_MEMORY_EVAL_DIR` | `<db parent>/eval` | Query-embedding cache for the eval harness. Derived data; the cases themselves live in the DB. |
+| `RECALL_ALPHA` | `0.15` | Keyword weight in recall ranking. Corpus-calibrated — see [Hybrid recall](#how-it-works). |
+| `TURSO_VFS` | `experimental_win_iocp` on Windows, else none | IO backend paired with the multiprocess WAL. Empty or `none` drops it. |
+| `TURSO_BIN` | `~/.turso/tursodb` | Only for the MCP registration `init` prints; the binary itself needs no `tursodb`. |
+| `SUPERCHARGED_MEMORY_EVAL_DIR` | `<db parent>/eval` | Query-embedding cache of the eval harness. Derived data; the cases themselves live in the DB. |
 
-`install-claude-md.sh` reads three more env vars. `bash scripts/install-claude-md.sh --help`
-is the authoritative copy of this list; the table below is the prose one.
-
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `EPISODIC_MODE` | `major-events`, **but recovered from the managed block being replaced** when there is one | Episodic-storage policy (see below), rendered into the block. Validated to one of the four keys. A block whose policy line can't be read is refused rather than silently defaulted. |
-| `BASE_PATH` | repo root (the parent of the folder holding the script) | Points at this repo; rendered into every path in the block. If the existing block was rendered from a *different* `BASE_PATH`, the run is refused — a stray run from a temporary clone or git worktree would otherwise repoint a live config at it. |
-| `ALLOW_BASE_PATH_CHANGE` | unset | Set to `1` to allow that repoint (the repo genuinely moved). |
-| `PYTHON_BIN` | `python3`, `python` on Windows | Interpreter rendered into the command prefix. Windows has no `python3` — the name is a Store alias stub that prints "Python was not found" and EXITS 0, so a rendered `python3` command reads as a successful empty result. Takes a command (`python`, `py -3`) or a path; a path with spaces (`C:/Program Files/Python314/python.exe`) is quoted for you, and whitespace that is neither is refused rather than rendered into a prefix that splits at the space. |
-| `TURSO_VFS` | unset; `experimental_win_iocp` on Windows | VFS passed to every `tursodb` open. Windows' default IO backend refuses `--experimental-multiprocess-wal` without it. Set `TURSO_VFS=none` to pass no `--vfs` at all, should a later release rename the backend. |
-
-`SUPERCHARGED_MEMORY_TURSO_PATH` is read too, and falls back to the value in
-`~/.claude/settings.json` before the XDG default, but the template stopped
-referencing it in 05b1967 — so today it is substituted into nothing and only shows
-up in the installer's closing report. The path that matters at runtime is the one in
-`~/.claude/settings.json` (see above).
-
-Every value's source — env, recovered from the block, or default — is named in that
-closing report, so a re-install is auditable after the fact.
+`CLAUDE_CONFIG_DIR` (the real environment only) moves Claude Code's own directory, which `init`, `update` and `find-existing-memory` honour.
 
 ### Episodic memory policy
 
-Chosen at setup and written into the agent's instructions, this controls how
-aggressively **episodic** events are logged (it does not affect semantic facts,
-gotchas, or corrections — those are always stored autonomously):
+Chosen at setup (`init --episodic-mode <mode>`) and written into the agent's instructions, this controls how aggressively **episodic** events are logged (it does not affect semantic facts, gotchas, or corrections — those are always stored autonomously):
 
-| `EPISODIC_MODE` | Behavior |
-|-----------------|----------|
+| Mode | Behavior |
+|------|----------|
 | `every-prompt` | Store an episodic note for every prompt / turn. |
 | `major-actions` | Store every substantive action; skip quick questions and clarifications. |
 | `major-events` | Store only major events — feature done, bug resolved, decision, milestone, incident. *(Default.)* |
 | `manual` | Store episodic memory only when you explicitly ask. |
 
-Change it later by re-running `install-claude-md.sh` with a different
-`EPISODIC_MODE`.
+Change it later by having the agent replace the managed block with `update --print-block --episodic-mode <mode>`.
 
 ## Migrating existing file-based memory
 
-If you were running Claude Code with ordinary file-based memory before installing
-this — a curated `~/.claude/CLAUDE.md`, a `~/.claude/memory/*.md` set,
-project-scoped `~/.claude/projects/<slug>/memory/*.md` — none of it is in the
-database, and the setup runbook's candidate check will not find it: that looks for
-a Turso DB or a backup dump, which is a different thing.
+If you were running Claude Code with ordinary file-based memory before installing this — a curated `~/.claude/CLAUDE.md`, a `~/.claude/memory/*.md` set, project-scoped `~/.claude/projects/<slug>/memory/*.md` — none of it is in the database, and `init`'s candidate check will not find it: that looks for a Turso DB or a backup dump, which is a different thing.
 
-`instructions/MIGRATE-EXISTING-MEMORY.md` imports those files as semantic memory
-and then runs the deep-sleep phases that apply (compaction, the required
-topic-index rebuild, the Verify pass — imported memory is old by definition).
-Setup Step 7 offers it; you can also ask for it later ("migrate my memory").
+The `migrate` runbook (`runbook migrate`) imports those files as semantic memory and then runs the deep-sleep phases that apply (compaction, the required topic-index rebuild, the Verify pass — imported memory is old by definition). Setup offers it; you can also ask for it later ("migrate my memory").
 
-- **`scripts/find-existing-memory.py`** — read-only scan, needs neither the
-  database nor Ollama. Reports what exists per file: `kind` (`memory` / `index` /
-  `claude` / `empty`), `scope` (`global` / `project`), char count. Counts of what
-  there is to import cover `kind: memory` only, so a plain `CLAUDE.md` is not
-  reported as memory to migrate. Everything it leaves out lands in a reported field
-  instead of vanishing — `over_max_text` (`{path, chars, reason}`, flagged against
-  the **1800-char effective budget**, not the raw 2000-char `MAX_TEXT`, because
-  `remember.py` appends `--keywords` into the same field the cap counts — so a
-  1900-char file is flagged here rather than refused mid-import), `empty` (nothing
-  to import; the writer refuses an empty `--text`), `unreadable` (unreadable file or
-  directory, broken symlink, symlink loop) and `excluded_dirs` (`.git`/`agents` at a
-  memory root, or a symlink pointing above it). `SETUP.md` Step 7 gates on the
-  computed `nothing_to_do` — no importable memory **and** nothing skipped — rather
-  than on `n_memory_files`, which is 0 for a config dir whose only memory file is
-  unreadable.
-- **Additive, not reversible.** No source file is deleted or edited, and every row
-  carries `source='migration'` plus a `file_reference` back to its file. There is
-  no bulk undo of the imported rows, though: the source files are always the way
-  back, a pre-import backup restores a database that already held rows, and on a
-  fresh (`EMPTY`) one — the common case — there is no pre-import dump because
-  there is nothing to lose, so the reset is a rebuild from `schema.sql`.
-- **Classification runs in subagents**, the same contract the sleep runbooks use;
-  the orchestrator never reads the corpus in bulk.
+- **`find-existing-memory`** — a read-only scan, needing neither the database nor Ollama. It reports per file its `kind` (`memory` / `index` / `claude` / `empty`), `scope` (`global` / `project`) and char count. Counts of what there is to import cover `kind: memory` only. Everything it leaves out lands in a reported field instead of vanishing — `over_max_text` (flagged against the **1800-char effective budget**, not the raw 2000-char cap, because `remember` appends `--keywords` into the same field the cap counts), `empty`, `unreadable` and `excluded_dirs`. The runbook gates on the computed `nothing_to_do`, not on `n_memory_files`.
+- **Additive, not reversible.** No source file is deleted or edited, and every row carries `source='migration'` plus a `file_reference` back to its file. There is no bulk undo of the imported rows: the source files are always the way back, and a pre-import backup restores a database that already held rows.
+- **Classification runs in subagents**, the same contract the sleep runbooks use; the orchestrator never reads the corpus in bulk.
 
 ## Staying up to date
 
-The runtime state lives *outside* this repo — the database, `~/.claude/CLAUDE.md`,
-`~/.claude/settings.json` — so pulling new commits does not update a machine on its
-own, and some commits need a manual step. `instructions/UPDATE.md` is the runbook
-that closes that gap. In a session:
+The runtime state lives *outside* the binary — the database, the `.env`, `~/.claude/CLAUDE.md` — so replacing the binary does not update a machine on its own, and some releases need a step. Replace the binary **in place** (same path, same name), then tell the agent to **update the memory system**: it runs `update`, relays what it prints, asks, and applies `update -y`. Nothing is applied without asking.
 
-> update the memory system
+`update` (a dry run) compares the version the `.env` records with the binary's and prints, in order: every **migration note** between the two versions; the **schema migrations** the database lacks (decided by asking the database, never by trusting the `.env`); and what to change in CLAUDE.md — a diff of the installed block against the one this binary would write, including any local hand-edit inside the markers that replacing the block would destroy. `update -y` backs up the database before the first migration, applies each migration in a transaction of its own, and records the new version in the `.env` only once all succeeded. It never writes CLAUDE.md: the agent replaces the managed block with `update --print-block` once you agree. It refuses a downgrade.
 
-It reads the sync stamp, pulls, applies any pending migration notes, shows you what
-changed in the instructions, and re-renders `~/.claude/CLAUDE.md`. Nothing is applied
-without asking.
+### The block's stamp
 
-### The sync stamp
-
-`install-claude-md.sh` writes the repo commit it rendered from as the first line
-inside the managed block:
+`init` writes the version that rendered the block as the first line inside the managed block:
 
 ```
-<!-- BEGIN agentic-memory (managed by install-claude-md.sh) -->
-<!-- supercharged-memory: synced-at 9f3c1ab… -->
+<!-- BEGIN agentic-memory (managed by supercharged-memory) -->
+<!-- supercharged-memory: rendered-by 0.1.0 -->
 ```
 
-That one line is the whole ledger — the repo's git history supplies the rest, so
-there is no separate state file to drift out of sync. `git log <stamp>..HEAD` yields
-both the template changes worth explaining and the migrations still pending. Two
-special values: a `-dirty` suffix means the install was rendered from an uncommitted
-working tree, and `unknown` means `BASE_PATH` was not a git work tree (a plain file
-copy). An install predating this feature has no stamp at all; UPDATE.md then lists
-every migration note and asks which ones already apply, rather than guessing a base
-commit.
+`update` does not trust the stamp alone: it renders the template again with this machine's own values (binary path, episodic mode) and compares the **content**, so a hand-edit or a moved binary shows up even when the version matches.
 
-### `migration-steps/` — breaking-change notes
+### `migrations/` — breaking-change notes
 
-Every change that breaks an existing install ships a note here: schema changes,
-script CLI changes, renamed env vars or paths, changed instruction contracts,
-anything needing a manual step. One file per change,
-`migration-steps/YYYY-MM-DD-<slug>.md`:
+Every release that breaks an existing install ships a note in `migrations/<version>/NOTE.md` (and, for a schema change, the SQL beside it). Each is **embedded in the binary** and printed by `update` for the versions between the installed one and the running one. A note has three parts: **What broke**, **How to resolve** (concrete steps, in order) and **Verification** (what to run afterwards and what output proves it worked). A new schema migration also gets an entry with a probe — a query the database answers when the migration is already applied — in the binary's table, and a test fails until both agree. Notes are keyed by version, so a note can land in the same commit as the change.
 
-| Part | Purpose |
-|------|---------|
-| `commit: <sha>` (first line) | The commit that **introduced** the break. UPDATE.md classifies notes with `git merge-base --is-ancestor`, so a missing or unreachable sha is reported as malformed instead of silently applied. |
-| **What broke** | Schema / CLI / instruction contract / on-disk runtime state. |
-| **How to resolve** | Concrete commands, in order. |
-| **Verification** | What to run afterwards, and what output proves it worked. |
-
-Because a commit cannot reference its own sha, **the note lands in the commit right
-after the breaking one** and points back at it — pushed together, so no `git pull`
-can leave a machine between the break and its instructions.
+The older `migration-steps/` directory is frozen history: sha-keyed notes written for the Python-script install, applied by machines still on that layout.
 
 ## Usage
 
-Memory operations go through the helper scripts in `scripts/` (a 1024-float
-vector is clumsy to inline into MCP calls). The Turso MCP server is for ad-hoc
-SQL and inspection only — revisions go through the scripts.
+The agent drives everything through the binary; you rarely type these yourself. Run `supercharged-memory --help` for the full list.
 
 ```bash
-# Recall (hybrid vector + keyword; add --coworker to scope to a persona)
-python3 scripts/recall.py "how do I run a single test?" [--table semantic|episodic|both] [--project <id>] [--k N]
-python3 scripts/recall.py --baseline            # always-apply rules, loaded every session
-python3 scripts/recall.py --status              # availability check
-python3 scripts/recall.py --candidates          # other memory DBs/backups found on this machine
+supercharged-memory status                       # MISSING | EMPTY | DEGRADED n | READY n (+ reason, + unembedded count)
+supercharged-memory recall "how do I run a single test?" [--table semantic|episodic|both] [--project <id>] [--k N] [--coworker <name>]
+supercharged-memory recall --baseline            # always-apply rules, loaded every session
+supercharged-memory recall --topics [word]       # which subjects have memory at all
+supercharged-memory recall --candidates          # other memory DBs/backups found on this machine
 
-# Store one memory (see the script docstrings for the full flag set)
-python3 scripts/remember.py --table semantic --topic <t> --category <c> \
+supercharged-memory remember --table semantic --topic <t> --category <c> \
     --keywords "id, error string, synonyms" --source <s> --model <your-model-id> --text "..."
-python3 scripts/remember.py --table semantic --supersedes <old-id> ...   # revise a fact
-python3 scripts/remember.py --table episodic --event-type bug_fix --importance notable ...
+supercharged-memory remember --table semantic --supersedes <old-id> ...   # revise a fact
+supercharged-memory remember --table episodic --event-type bug_fix --importance notable ...
 
-# Bulk import a directory as a fresh start (one file = one memory)
-python3 scripts/backfill.py --dir <path> [--glob '*.md'] [--category project]
+supercharged-memory list --table semantic --current --keywords    # metadata, never the text
+supercharged-memory show --table semantic 12,40                   # whole rows
+supercharged-memory instruct --topic <name> --text "..."          # store an instruction
+supercharged-memory instructions --get <name>                     # use instruction <name>
+supercharged-memory backfill --dir <path> [--glob '*.md'] [--category project]   # bulk import, one file = one memory
+supercharged-memory runbook [name]               # print a procedure; no name lists them
 ```
+
+The Python scripts under `scripts/` (and `investigations/eval-harness.py`) remain in the repository as the **reference implementation** of the first version, and as the legacy path for a machine installed from a checkout. Nothing the instructions or runbooks say points at them.
 
 ### Session start & availability
 
-On session start the agent runs `recall.py --status` first:
+On session start the agent runs `status` first:
 
 - **`MISSING`** — nothing at the configured path → **stop and ask the user** (see below).
-- **`EMPTY`** — DB exists but holds no memories → check `--candidates`, then offer to **backfill** from a directory.
-- **`DEGRADED n`** — Ollama down, DB fine → still load baseline and use keyword-only recall, but don't store new memories.
+- **`EMPTY`** — DB exists but holds no memories → check `recall --candidates`, then offer to **backfill** from a directory.
+- **`DEGRADED n`** — no embeddings (Ollama down, the model not pulled, or `EMBEDDINGS=off`; the next line says which) → still load baseline, recall is keyword-only, stores still work (saved without an embedding). `n` is as below.
 - **`ERROR`** — fall back to the agent's built-in memory store.
-- **`READY n`** — load baseline and proceed. `n` is a liveness signal, not a corpus size:
-  it counts *all* `semantic_memory` rows (superseded and retired included) plus *all*
-  `episodic_memory` rows. Never compare it against a current-rows count such as
-  `sleep.py --staleness`'s `n_current`, and never diff it across time — the DB is shared,
-  so it moves on its own.
+- **`READY n`** — load baseline and proceed. `n` is a liveness signal, not a corpus size: it counts *all* `semantic_memory` rows (superseded and retired included) plus *all* `episodic_memory` rows. Never compare it against a current-rows count such as `sleep --staleness`'s `n_current`, and never diff it across time — the DB is shared, so it moves on its own.
+
+An `unembedded: …` line under either state counts the active rows still waiting for `embed --missing`.
 
 ### Never lose a database by accident
 
-The most likely cause of `MISSING` is a **wrong path**, not lost data — and the two
-are indistinguishable unless you look. An agent that responds by creating a fresh DB
-silently strands the real one; an agent that restores a backup over a live DB loses
-everything since that backup. So nothing in this system ever creates, restores, or
-overwrites a database on its own:
+The most likely cause of `MISSING` is a **wrong path**, not lost data — and the two are indistinguishable unless you look. An agent that responds by creating a fresh DB silently strands the real one; an agent that restores a backup over a live DB loses everything since that backup. So nothing in this system ever creates, restores, or overwrites a database on its own:
 
-- `memlib.require_db()` refuses to let any script auto-create an empty DB.
-- `--status MISSING` prints the configured path, **where that path came from**
-  (env var vs. built-in default), and any other memory DB or backup it found —
-  each with its memory count.
-- `--candidates` runs that search on demand, at any time.
-- The agent instructions require it to work through *wrong path → candidate DB →
-  ask the user* before restore is even considered, and creating an empty DB is
-  the last resort with explicit confirmation.
+- No command creates a database except `init` (and `restore`, into a fresh file you name); every other one refuses a missing database rather than creating it.
+- `status` on `MISSING` prints the configured path, **where that path came from** (real environment vs `.env` vs built-in default), and any other memory DB or backup it found — each with its memory count.
+- `recall --candidates` runs that search on demand, at any time.
+- The agent instructions require it to work through *wrong path → candidate DB → ask the user* before restore is even considered, and creating an empty DB is the last resort with explicit confirmation.
+- `restore` never writes over the configured database, not even with `--force`.
 
-A path that silently defaults is the root of this whole failure mode, so note that
-**`SUPERCHARGED_MEMORY_TURSO_PATH` must be set where Claude Code can see it** —
-`~/.claude/settings.json` under `env`. A shell profile alone is not enough: the
-agent's Bash tool runs non-interactively and never sources `~/.zshrc` or `~/.bashrc`.
+A path that silently defaults is the root of this whole failure mode, so the path lives in the `.env` beside the binary, written by `init`, where every session — interactive or not — finds it. A path in a shell profile alone is not enough: the agent's shell never sources it.
 
 ## How it works
 
-`scripts/memlib.py` is the shared core every script imports: config, embedding
-(with a dimension assert), compact vector literals, SQL escaping, and a robust
-`tursodb` runner — a failure is a non-zero exit, an error on stderr, or a stdout
-that is nothing but a diagnostic, and the busy backoff fires on the unanchored
-phrase `database is busy|locked` in either stream (see
-[Concurrency](#concurrency--locking)). The rest are thin CLIs on top:
+One Rust binary; the commands are thin layers over a `Store` that owns every SQL statement.
 
-- **`remember.py`** — one memory = one row (no chunking). Folds `--keywords` into
-  the text, embeds it, inserts. Guards: baseline needs `--confirm-baseline`;
-  semantic refuses a near-duplicate (cosine < 0.10) unless `--force` (episodic is
-  exempt — events recur); `--supersedes <id>` inserts a revision and marks the old
-  row superseded in one call; refuses a DB embedded with a different model; refuses
-  an empty or malformed `--created-at` (`YYYY-MM-DD HH:MM:SS`, or a bare
-  `YYYY-MM-DD` normalised to midnight — anything else is kept verbatim by SQLite
-  and read as NULL by every date function), before paying for the embedding. Its
-  over-cap refusal splits the total into your `--text` and the appended keyword
-  line, since the cap counts both.
-- **`recall.py`** — hybrid search, scored `dist - RECALL_ALPHA * kw` (lower wins):
-  brute-force `vector_distance_cos` minus an IDF-weighted keyword credit, normalised
-  to 0..1. IDF is measured per query against the rows being ranked, so common words
-  demote themselves — there is no stopword list, and the 8 *rarest* query tokens are
-  the ones that count. Degrades to keyword-only if Ollama is down. Also `--baseline`,
-  `--status`, `--count`.
-- **`backfill.py`** — import a directory of files for a fresh start (skips files over the cap).
-- **`seed.py`** — scaffold for a one-time bootstrap load (empty by default).
-- **`sleep.py`** — the mechanical write primitives a sleep pass needs, no judgment of
-  its own: `--mark-processed`, `--retire`, `--rebuild-topics`, plus deep sleep's
-  `--purge` (guarded hard delete) and `--cluster` (read-only similarity grouping).
-- **`supercharged-memory-backup.sh`** — the daily backup (below).
-- **`restore.py`** — replay a dump into a fresh DB and *verify* it, splitting on real
-  statement boundaries because piping a dump into `tursodb` restores only a fraction
-  of the rows (below). Refuses an existing target; exits non-zero on any row mismatch.
-- **`install-claude-md.sh`** — render the template into `~/.claude/CLAUDE.md`, stamping
-  the repo commit it rendered from (see *Staying up to date*). Recovers the values
-  already in the block it is about to replace, and refuses a `BASE_PATH` repoint.
-- **`coworkers.py`** — manage AI personas (below).
+- **`remember`** — one memory = one row (no chunking). Folds `--keywords` into the text, embeds it when it can, inserts. Guards: baseline needs `--confirm-baseline`; semantic refuses a near-duplicate (cosine < 0.10 with embeddings, a normalised text match without) unless `--force` (episodic is exempt — events recur); `--supersedes <id>` inserts a revision and marks the old row superseded in one transaction; refuses a table already embedded with a different model; refuses an empty or malformed `--created-at` (`YYYY-MM-DD HH:MM:SS`, or a bare `YYYY-MM-DD` normalised to midnight — anything else is kept verbatim by SQLite and read as NULL by every date function); refuses text over the 2000-character cap, naming how much of it is the appended keyword line.
+- **`recall`** — hybrid search, scored `dist - RECALL_ALPHA * kw` (lower wins): brute-force `vector_distance_cos` minus an IDF-weighted keyword credit, normalised to 0..1. IDF is measured per query against the rows being ranked, so common words demote themselves — there is no stopword list, and the 8 *rarest* query tokens are the ones that count. With no embeddings it ranks by keywords alone and says why; rows stored without a vector are listed in a section of their own. Also `--baseline`, `--topics`, `--candidates`, `--count`. `RECALL_ALPHA` is corpus-calibrated, not universal: it trades cosine-distance units against keyword credit, so re-measure it (`eval --sweep`) after an embedding-model change or a large topic shift.
+- **`list` / `show`** — the read surface the runbooks need without a SQL client: filtered metadata, and whole rows (embedding never).
+- **`instruct` / `instructions`** — directives kept in a table of their own; never loaded at session start, never read by sleep.
+- **`embed --missing`** — embeds the active rows that have none, resumably, batch by batch.
+- **`sleep`** — the mechanical primitives a sleep pass needs, with no judgment of its own: `--mark-processed`, `--retire`, `--rebuild-topics`, plus deep sleep's `--purge` (guarded hard delete), `--cluster`, `--contradiction-candidates`, `--staleness` and `--verify-candidates` (read-only JSON).
+- **`eval`** — the recall-quality harness: validate the authored eval set, score the shipped ranking, sweep `RECALL_ALPHA`, author and repoint cases.
+- **`backup` / `restore`** — a verified dump and a counted restore (below).
+- **`init` / `update` / `config` / `runbook` / `find-existing-memory`** — the machine-level commands described above.
+- **`coworkers`** — manage AI personas (below).
 
 ## Database schema
 
-Two tables (see `schema.sql`), one row per memory. Both embed `memory_text` into
-`embedding` and search by brute-force `vector_distance_cos`. Hard caps are
-enforced via `CHECK` (SQLite ignores declared VARCHAR sizes): `memory_text` ≤
-2000; `project`/`topic`/`source`/`model`/`embed_model` ≤ 128. Enums are
-`CHECK`-enforced. **Keywords are not a column** — they live inside `memory_text`
-(appended by `remember.py --keywords`), so they're both embedded and searchable.
+Tables are in `schema.sql` (embedded in the binary; `init` creates them, and `update`'s migrations add what a later release introduced). `semantic_memory`, `episodic_memory` and `instructions` each hold one row per entry and embed `memory_text` into `embedding` for brute-force `vector_distance_cos` search. Hard caps are enforced via `CHECK` (SQLite ignores declared VARCHAR sizes): `memory_text` ≤ 2000; `project`/`topic`/`source`/`model`/`embed_model` ≤ 128. Enums are `CHECK`-enforced. **Keywords are not a column** — they live inside `memory_text` (appended by `remember --keywords`), so they're both embedded and searchable. An `embedding` of `NULL` is a row stored without one.
 
 ### `semantic_memory` — facts, timeless, revisable
 
-`id`, `created_at`, `updated_at`, `project` (NULL = global; a tracking-tool
-work-item id), `topic`, `category` ∈
-`baseline|user|feedback|project|reference|pattern`, `source`, `model`,
-`embed_model`, `memory_text`, `file_reference`, `embedding F32_BLOB(1024)`,
-`superseded_by` (current truth = `WHERE superseded_by IS NULL`), `retired_at`
-(soft-delete set by a sleep pass — current truth also requires
-`retired_at IS NULL`).
+`id`, `created_at`, `updated_at`, `project` (NULL = global; a tracking-tool work-item id), `topic`, `category` ∈ `baseline|user|feedback|project|reference|pattern`, `source`, `model`, `embed_model`, `memory_text`, `file_reference`, `embedding F32_BLOB(1024)`, `superseded_by` (current truth = `WHERE superseded_by IS NULL`), `retired_at` (soft-delete set by a sleep pass — current truth also requires `retired_at IS NULL`).
 
-`baseline` = must-always-apply rules, loaded every session start
-(`recall.py --baseline`), not by search. **Storing a baseline memory requires
-explicit user confirmation** (`--confirm-baseline`). None are seeded by default.
+`baseline` = must-always-apply rules, loaded every session start (`recall --baseline`), not by search. **Storing a baseline memory requires explicit user confirmation** (`--confirm-baseline`). None are seeded by default.
 
-`pattern` = **derived**, written only by a deep sleep pass: a recurrence or trend
-found across episodic events, carrying the episodic ids it came from so the claim
-can be re-checked rather than trusted. Revised through the normal supersede chain
-when the count changes.
+`pattern` = **derived**, written only by a deep sleep pass: a recurrence or trend found across episodic events, carrying the episodic ids it came from so the claim can be re-checked rather than trusted. Revised through the normal supersede chain when the count changes.
 
-A hard `DELETE` happens in exactly one place — deep sleep's purge gate, on rows
-the user selects, after a backup (see *Deep sleep* above). Everywhere else,
-obsolescence is `retired_at` or a supersede.
+A hard `DELETE` happens in exactly one place — deep sleep's purge gate, on rows the user selects, after a backup (see *Deep sleep*). Everywhere else, obsolescence is `retired_at` or a supersede.
 
 ### `episodic_memory` — events, time-anchored, append-only
 
-`id`, `created_at` (event time), `project`, `topic`, `event_type` ∈
-`project_start|bug_fix|feature_complete|decision|milestone|incident|note`,
-`importance` ∈ `routine|notable|major`, `source`, `model`, `embed_model`,
-`memory_text`, `file_reference`, `embedding F32_BLOB(1024)`, `processed_at`
-(set once a sleep pass has sifted this row; NULL = not yet processed).
+`id`, `created_at` (event time), `project`, `topic`, `event_type` ∈ `project_start|bug_fix|feature_complete|decision|milestone|incident|note`, `importance` ∈ `routine|notable|major`, `source`, `model`, `embed_model`, `memory_text`, `file_reference`, `embedding F32_BLOB(1024)`, `processed_at` (set once a sleep pass has sifted this row; NULL = not yet processed).
+
+### `instructions` — directives, on demand
+
+Same shape as a semantic row, with `retired_at` as the only lifecycle (`instruct --replaces <id>` retires the old row in the same transaction as the insert). Looked up with `instructions`, never loaded at session start.
 
 ## Coworkers
 
-Optional named AI personas with scoped memory and trust-gated autonomy — full
-design in `docs/2026-07-23-ai-coworkers-design.md`, and see `NEW-COWORKER.md`
-for how to construct a coherent personality. Three tables, no changes to
-`semantic_memory`/`episodic_memory`: `coworkers` (name/expertise/personality/
-trust_level/active), `memory_coworkers` (many-to-many — untagged = global,
-tagged = visible only when that coworker is loaded), `appraisals` (one current
-row per coworker, history via `superseded_by`).
+Optional named AI personas with scoped memory and trust-gated autonomy. The `new-coworker` runbook (`runbook new-coworker`) explains how to construct a coherent personality. Three tables, no changes to `semantic_memory`/`episodic_memory`: `coworkers` (name/expertise/personality/trust_level/active), `memory_coworkers` (many-to-many — untagged = global, tagged = visible only when that coworker is loaded), `appraisals` (one current row per coworker, history via `superseded_by`).
 
-- **`scripts/coworkers.py`** — writes only: `--add`, `--appraise`, `--set-trust`,
-  `--retire`/`--reactivate`. Reads (list coworkers, load a coworker's state) are
-  ad-hoc SQL via the Turso MCP — no embedding involved.
-- **`remember.py --coworker name[,name...]`** — tag a memory to one or more
-  coworkers instead of leaving it global; dedup scopes to that coworker's visible set.
-- **`recall.py --coworker name`** — scope a semantic search to memories visible to
-  that coworker (untagged ∪ tagged-to-them).
-- `trust_level` (`supervised|trusted|autonomous`) never loosens a global baseline
-  rule — it's a hard floor regardless of which coworker is active.
+- **`coworkers`** — `--add`, `--appraise`, `--set-trust`, `--retire`/`--reactivate`, and the reads: `--list` and `--load <name>` (the coworker, its current appraisal and the current feedback tagged to it since).
+- **`remember --coworker name[,name...]`** — tag a memory to one or more coworkers instead of leaving it global; dedup scopes to that coworker's visible set.
+- **`recall --coworker name`** — scope a semantic search to memories visible to that coworker (untagged ∪ tagged-to-them).
+- `trust_level` (`supervised|trusted|autonomous`) never loosens a global baseline rule — it's a hard floor regardless of which coworker is active.
 
 ## Sleep cycle
 
-A user-triggered ("sleep" / "go to sleep") consolidation pass — never
-scheduled automatically. Full procedure in `instructions/SLEEP.md`; no new
-memory tables, just three additions.
+A user-triggered ("sleep" / "go to sleep") consolidation pass — never scheduled automatically. The procedure is the `sleep` runbook (`runbook sleep`); no new memory tables, just three additions.
 
-`CLAUDE.md.template` deliberately carries only a **one-line pointer** to that
-file, not a summary of the procedure — sleep happens rarely, so its steps are
-read on demand and cost nothing in the sessions that never sleep. The pointer is
-an absolute path baked in at install time (`{{BASE_PATH}}`), so it resolves
-without the agent hunting for the repo. Same reasoning for backups (below).
-Keep the *policy* in the template (user-triggered only) and the *procedure* here.
+The instructions deliberately carry only a **one-line pointer** to that runbook, not a summary of the procedure — sleep happens rarely, so its steps are read on demand and cost nothing in the sessions that never sleep. Same reasoning for backups. Keep the *policy* in the template (user-triggered only) and the *procedure* in the runbook.
 
-- `episodic_memory.processed_at` — sleep sifts unprocessed rows, keeping only
-  ones where something was actually learned (discarding bare event sequences
-  like "x happened, then y happened"), promotes the kept ones into
-  `semantic_memory` (via `remember.py`, same as any other store/supersede),
-  then stamps `processed_at` on every row it looked at — kept or discarded —
-  so nothing gets re-sifted forever.
-- `semantic_memory.retired_at` — sleep also sweeps current semantic memory for
-  near-duplicates to consolidate (`remember.py --supersedes`) and obsolete
-  facts to retire. Retirement is **soft-delete only** (`scripts/sleep.py
-  --retire`, sets `retired_at`) — same never-hard-delete philosophy as
-  coworkers' `active=0`. "Obsolete" has no fixed rule; ask the user when it's
-  not clear-cut.
-- `topic_keywords` (new table, see schema below) — a curated topic → keywords
-  index, rebuilt wholesale each sleep (`scripts/sleep.py --rebuild-topics`:
-  full DELETE + re-INSERT, never accumulated). **Loaded in full at every
-  session start** (`recall.py --topics`, same slot as `--baseline`) so a
-  session knows *what topics have memory* without having to guess a search
-  term first. This puts pressure back on sleep's consolidation step to keep
-  the topic count bounded — `recall.py --topics` warns past 50 topics as a
-  nudge to merge harder next sleep, since that many would cost real context
-  budget every session.
+- `episodic_memory.processed_at` — sleep sifts unprocessed rows, keeping only ones where something was actually learned (discarding bare event sequences like "x happened, then y happened"), promotes the kept ones into `semantic_memory` (via `remember`, same as any other store/supersede), then stamps `processed_at` on every row it looked at — kept or discarded — so nothing gets re-sifted forever.
+- `semantic_memory.retired_at` — sleep also sweeps current semantic memory for near-duplicates to consolidate (`remember --supersedes`) and obsolete facts to retire. Retirement is **soft-delete only** (`sleep --retire`, sets `retired_at`) — same never-hard-delete philosophy as coworkers' `active=0`. "Obsolete" has no fixed rule; ask the user when it's not clear-cut.
+- `topic_keywords` — a curated topic → keywords index, rebuilt wholesale each sleep (`sleep --rebuild-topics`: full DELETE + re-INSERT, never accumulated). **Loaded in full at every session start** (`recall --topics`, same slot as `--baseline`) so a session knows *what topics have memory* without having to guess a search term first. This puts pressure back on sleep's consolidation step to keep the topic count bounded — `recall --topics` warns past 50 topics as a nudge to merge harder next sleep, since that many would cost real context budget every session.
 
 ### Where the reading happens: subagents
 
-Both sleep runbooks push all bulk reading into **subagents**. The orchestrating
-agent queries skinny metadata (ids, topics, dates) and never holds `memory_text`
-in bulk — that cost scales with the corpus, which is precisely what a memory
-system is supposed to grow. Workers get self-contained prompts (their ids, the
-read command, the judgment rule, the exact `remember.py` call) and report one line
-per row.
+Both sleep runbooks push all bulk reading into **subagents**. The orchestrating agent queries skinny metadata (`list`: ids, topics, dates) and never holds `memory_text` in bulk — that cost scales with the corpus, which is precisely what a memory system is supposed to grow. Workers get self-contained prompts (their ids, the `show` command, the judgment rule, the exact `remember` call) and report one line per row.
 
-Who may write is split on risk: episodic-sift workers write via `remember.py`
-themselves (high volume, low stakes), while compaction and pattern workers only
-*propose* and the user approves in one batch. `--mark-processed` stays with the
-orchestrator and covers only ids a worker actually reported back — a worker that
-dies leaves its rows unprocessed, which is the recoverable state.
+Who may write is split on risk: episodic-sift workers write via `remember` themselves (high volume, low stakes), while compaction and pattern workers only *propose* and the user approves in one batch. `--mark-processed` stays with the orchestrator and covers only ids a worker actually reported back — a worker that dies leaves its rows unprocessed, which is the recoverable state.
 
 ## Deep sleep
 
-A second, deeper pass — `instructions/DEEP-SLEEP.md`, reached by saying "deep
-sleep" or by answering yes to the offer at the end of a normal sleep. Also
-user-triggered only. It does the three things a normal pass deliberately doesn't:
+A second, deeper pass — the `deep-sleep` runbook, reached by saying "deep sleep" or by answering yes to the offer at the end of a normal sleep. Also user-triggered only. It does the three things a normal pass deliberately doesn't:
 
 | Phase | What it does |
 |-------|--------------|
-| D0 | Normal sleep (prerequisite) + `recall.py --status`; stops on `DEGRADED` — nothing can be embedded with Ollama down. |
+| D0 | Normal sleep (prerequisite) + `status`. `DEGRADED` does not stop it: the phases that need stored vectors (D3, D4's map stage, D6 scoring) are skipped, and the report says so, unless `embed --missing` can run first. |
 | D1 | Backup. Mandatory: D2 is the only operation in this system that destroys a memory. |
 | D2 | **Purge gate.** Lists every superseded/retired semantic row and hard-deletes *the ones the user selects*. No default policy — asked every run. |
 | D3 | **Compaction.** Clusters all current semantic memory and merges same-topic near-duplicates. |
@@ -462,182 +244,51 @@ user-triggered only. It does the three things a normal pass deliberately doesn't
 | D5 | Rebuild `topic_keywords`, report. |
 | D6 | **Recall check.** Validate `eval_cases`, report `recall@1/@5/MRR` vs the last `eval_runs` row, propose up to 3 new cases, and — only on a flagged regression — sweep `RECALL_ALPHA` and *ask* whether to change it. |
 | D6.5 | **Memory-quality metrics.** Age profile of current rows plus an adjudicated contradiction rate — the two numbers ranking metrics cannot express. Reported, never persisted. |
-| D7 | **Verify.** Lists current rows quoting a checkable artifact and has workers check each one against the repo as it stands. Staleness is invisible to retrieval metrics. |
+| D7 | **Verify.** Lists current rows quoting a checkable artifact (a path, a command and its flags, an env var or `.env` key, a version) and has workers check each one against the machine as it stands. Staleness is invisible to retrieval metrics. |
 
-D6 runs after D2 and D3 for a reason: those two are what break an eval set. A purged
-row is gone and a merged row is superseded, so a case pointing at either looks exactly
-like a ranking regression while being nothing of the sort — validation has to happen
-after them, not before. D7 is the one phase that follows D6, and only because it
-must: it is the sole remaining phase that can retire a row, so putting it earlier
-would reintroduce the very problem D6's placement solves. The price is that a
-retirement in D7 has to be followed by re-running `eval-harness.py --validate` by
-hand.
+D6 runs after D2 and D3 for a reason: those two are what break an eval set. A purged row is gone and a merged row is superseded, so a case pointing at either looks exactly like a ranking regression while being nothing of the sort — validation has to happen after them, not before. D7 is the one phase that follows D6, and only because it must: it is the sole remaining phase that can retire a row, so putting it earlier would reintroduce the very problem D6's placement solves. The price is that a retirement in D7 has to be followed by re-running `eval --validate`.
 
-Two things a consolidation pass structurally cannot do are split out into their own
-phases. **D6.5** reports the memory-quality metrics that ranking cannot express: the
-age profile of current rows (`sleep.py --staleness`) and a contradiction rate
-adjudicated by workers over a mechanically-built shortlist
-(`sleep.py --contradiction-candidates`, which reuses the `--cluster` grouping at a
-tighter 0.15 threshold — just above `remember.py`'s own 0.10 dedup cutoff, because
-two rows that disagree about the same subject are near-identical in vector space
-without being duplicates). **D7** is the Verify stage: staleness of a stored fact is
-invisible to retrieval metrics, since a row can rank first and still name a renamed
-flag, so `sleep.py --verify-candidates` lists current rows quoting a checkable
-artifact — a script path, a CLI flag, an env var, a version — oldest first with
-artifact-class count as tiebreak, and workers check each artifact against the repo as
-it stands. Both primitives are read-only and decide nothing; retiring or superseding
-stays a user call, exactly as in D2 and D3. The patterns are deliberately narrow:
-measured on the live corpus, loose first drafts flagged 502 of 561 rows (89%), which
-makes the tiebreak meaningless — tightened, 236 of 561 (42%).
+Two things a consolidation pass structurally cannot do are split out into their own phases. **D6.5** reports the memory-quality metrics that ranking cannot express: the age profile of current rows (`sleep --staleness`) and a contradiction rate adjudicated by workers over a mechanically-built shortlist (`sleep --contradiction-candidates`, which reuses the `--cluster` grouping at a tighter 0.15 threshold — just above `remember`'s own 0.10 dedup cutoff, because two rows that disagree about the same subject are near-identical in vector space without being duplicates). **D7** is the Verify stage: staleness of a stored fact is invisible to retrieval metrics, since a row can rank first and still name a renamed flag, so `sleep --verify-candidates` lists current rows quoting a checkable artifact, oldest first with artifact-class count as tiebreak, and workers check each artifact against the machine. Both primitives are read-only and decide nothing; retiring or superseding stays a user call, exactly as in D2 and D3.
 
-Ordering candidates by how *often* a row is actually recalled would be the better
-signal — a frequently-retrieved stale row is the worst case — but the only way to
-know that is to increment a counter on every search, which makes `recall.py` a writer
-on the read path. Keeping recall a pure reader won that trade; age plus artifact
-density is the accepted proxy.
+Ordering candidates by how *often* a row is actually recalled would be the better signal — a frequently-retrieved stale row is the worst case — but the only way to know that is to increment a counter on every search, which makes `recall` a writer on the read path. Keeping recall a pure reader won that trade; age plus artifact density is the accepted proxy.
 
-The eval set is **runtime state, not repo content** — its `expect` values are live row
-ids — so it lives in the DB, in `eval_cases` (authored cases, soft-deleted via
-`retired_at`) and `eval_runs` (one row per run). That puts it inside the `.sql` dump,
-which is deliberate: cases are authored and cannot be regenerated from the corpus, and
-a past corpus cannot be re-measured. The only file left on disk is the query-embedding
-cache `<db parent>/eval/qvec.json` (`SUPERCHARGED_MEMORY_EVAL_DIR` overrides) — pure
-derived data, excluded on purpose. There is no auto-generated eval set: an LLM writing a
-query while looking at the row it should retrieve produces lexical overlap a real user
-never produces, which would bias every future alpha upward. Cases are drafted from a
-row's `topic` and `keywords` only, never its text, and the user approves each one.
+The eval set is **runtime state, not repo content** — its `expect` values are live row ids — so it lives in the DB, in `eval_cases` (authored cases, soft-deleted via `retired_at`) and `eval_runs` (one row per run). That puts it inside the dump, which is deliberate: cases are authored and cannot be regenerated from the corpus, and a past corpus cannot be re-measured. The only file left on disk is the query-embedding cache `<db parent>/eval/qvec-<model>.json` — pure derived data. There is no auto-generated eval set: an LLM writing a query while looking at the row it should retrieve produces lexical overlap a real user never produces, which would bias every future alpha upward. Cases are drafted from a row's `topic` and `keywords` only, never its text, and the user approves each one. The schema stores each target's `created_at` at authoring time (`expect_stamps`), because row ids are reused after a purge and the stamp is the only thing that catches a case silently re-pointing at an unrelated memory.
 
-`RECALL_ALPHA` is never changed unattended. The harness reports the recall@5 plateau
-and whether the configured value still sits inside it; if it doesn't, the agent asks.
-Per-machine calibration belongs in `env` in `~/.claude/settings.json`, not in the
-repo default.
+`RECALL_ALPHA` is never changed unattended. The harness reports the recall@5 plateau and whether the configured value still sits inside it; if it doesn't, the agent asks, and a change goes into the `.env`.
 
-**Purge** (`sleep.py --purge <ids> --confirm-purge`) is the sole exception to the
-never-hard-delete rule, and it is fenced: it refuses a current row, an unknown id,
-a missing `--confirm-purge`, any id whose deletion would strand a surviving row
-that points at it, and any run where the newest backup is older than the DB file.
-It also clears the rows' `memory_coworkers` entries — that table has no FK on
-`memory_id`, so an orphan would silently re-scope a future memory that reuses the
-id. Episodic memory is never purged. Pass all ids in **one** call: a purge is
-itself a write, so a second call in the same pass fails the backup gate.
+**Purge** (`sleep --purge <ids> --confirm-purge`) is the sole exception to the never-hard-delete rule, and it is fenced: it refuses a current row, an unknown id, a missing `--confirm-purge`, any id whose deletion would strand a surviving row that points at it, and any run where the newest backup is not strictly newer than the database's last write (and does not decompress to its end). It also clears the rows' `memory_coworkers` entries — that table has no FK on `memory_id`, so an orphan would silently re-scope a future memory that reuses the id. Episodic memory is never purged, and the `instructions` table is outside sleep entirely. Pass all ids in **one** call: a purge is itself a write, so a second call in the same pass fails the backup gate.
 
-**Clustering** (`sleep.py --cluster [--table semantic|episodic] [--threshold N]`)
-is mechanical — no LLM, no new embeddings. It runs pairwise
-`vector_distance_cos` over the vectors already stored and emits connected
-components as JSON, plus any rows with no embedding, listed separately rather than
-silently skipped. Semantic defaults to `0.22`, episodic to `0.25` — both measured
-against a real ~230-row corpus, not guessed. The useful range is much tighter than
-intuition suggests, because connected components **chain**: if a–b are close and
-b–c are close, a and c land in the same cluster even when they have nothing to do
-with each other. On this corpus `0.22` yields ~11 pairs and triples, `0.30`
-already produces a 33-row blob, and `0.35` collapses 154 of ~200 rows into one
-"cluster". The script therefore refuses to present that as a finding: when the
-largest cluster exceeds 12 rows *and* a quarter of all clustered rows, the JSON
-carries a `warning` telling you to lower the threshold. Merges then apply via
-`remember.py --supersedes <id1,id2,id3>` — one insert, all listed rows pointed at
-it, one transaction.
+**Clustering** (`sleep --cluster [--table semantic|episodic] [--threshold N]`) is mechanical — no LLM, no new embeddings. It runs pairwise `vector_distance_cos` over the vectors already stored and emits connected components as JSON, plus any rows with no embedding, listed separately rather than silently skipped (and a refusal when none has one). Semantic defaults to `0.22`, episodic to `0.25` — both measured against a real ~230-row corpus, not guessed. The useful range is much tighter than intuition suggests, because connected components **chain**: if a–b are close and b–c are close, a and c land in the same cluster even when they have nothing to do with each other. On that corpus `0.22` yields ~11 pairs and triples, `0.30` already produces a 33-row blob, and `0.35` collapses 154 of ~200 rows into one "cluster". The command therefore refuses to present that as a finding: when the largest cluster exceeds 12 rows *and* a quarter of all clustered rows, the JSON carries a `warning` telling you to lower the threshold. Merges then apply via `remember --supersedes <id1,id2,id3>` — one insert, all listed rows pointed at it, one transaction.
 
-**Pattern mining** is two-stage, because there are two kinds of pattern and no
-single worker can see both. A map stage partitioned by *episodic embedding
-cluster* — not by exact `topic`, since episodic topics are near-unique per ticket
-and exact grouping would yield all singletons — catches within-topic recurrence
-("that service restarted four times"). Then one reduce worker reads only the tiny
-per-row digests and catches cross-topic shapes ("a whole class of bug keeps coming
-back") that a topic-scoped worker structurally cannot see. A pattern needs ≥3
-supporting events, a *trend* claim also ≥2 distinct calendar months, and its
-`evidence_ids` go into the memory text so a later session can verify the claim
-instead of trusting it.
+**Pattern mining** is two-stage, because there are two kinds of pattern and no single worker can see both. A map stage partitioned by *episodic embedding cluster* — not by exact `topic`, since episodic topics are near-unique per ticket and exact grouping would yield all singletons — catches within-topic recurrence ("that service restarted four times"). Then one reduce worker reads only the tiny per-row digests and catches cross-topic shapes ("a whole class of bug keeps coming back") that a topic-scoped worker structurally cannot see. A pattern needs ≥3 supporting events, a *trend* claim also ≥2 distinct calendar months, and its `evidence_ids` go into the memory text so a later session can verify the claim instead of trusting it.
 
 ### `topic_keywords` — curated topic index, derived (not a source of truth)
 
-`topic` (primary key), `keywords`, `updated_at`. Deliberately unlinked to
-`semantic_memory`/`episodic_memory` — no FK, no embedding, substring-searched
-via plain `LIKE`.
+`topic` (primary key), `keywords`, `updated_at`. Deliberately unlinked to `semantic_memory`/`episodic_memory` — no FK, no embedding, filtered by `recall --topics <word>`.
 
 ## Concurrency & locking
 
-`tursodb` takes an **exclusive** file lock — a second process can't even read —
-**unless every opener passes `--experimental-multiprocess-wal`**. With the flag
-on all openers (MCP, scripts, backup): multiple agent instances share the DB,
-reads run concurrently, and writes serialize (a clash returns `database is busy`;
-scripts retry with backoff). A process without the flag is refused. The flag is
-**experimental** — that's the trade for concurrency.
+`tursodb` takes an **exclusive** file lock — a second process can't even read — **unless every opener enables the multiprocess WAL**. The binary opens the database that way on every command, and the recommended MCP registration passes `--experimental-multiprocess-wal`: multiple agent instances share the DB, reads run concurrently, and writes serialize. A process that opens it without the setting is refused. The setting is **experimental** — that's the trade for concurrency.
 
-On Windows the flag needs `--vfs experimental_win_iocp` alongside it, or the open
-fails with `experimental multiprocess WAL is not supported by the active IO
-backend`. The scripts add it themselves (`TURSO_VFS`, see the table above); every
-`tursodb` command you type by hand needs both flags. Dropping the WAL flag is not
-an alternative — that is what re-introduces the exclusive lock.
-
-How `exec_sql` decides what failed and what to retry. A **failure** is a non-zero
-exit, an error on stderr, or a stdout that carries a tursodb diagnostic and
-nothing else — SQL-level errors go to stdout with an empty stderr, so stdout has
-to count, but only structurally: this corpus stores tursodb's own error messages
-as memories, so a successful `SELECT memory_text` can print lines byte-identical
-to a diagnostic, and what tells them apart is that a real failure prints no rows
-around them (a successful write prints nothing; a successful read always prints at
-least one non-diagnostic line). Only a failure then retries, and only when the
-phrase `database is busy|locked` appears anywhere in stderr or stdout.
-That search is **unanchored on purpose** — deliberately *not* restricted to
-diagnostic-shaped lines (`  × …`, `  x …` under miette's ASCII theme on a legacy
-Windows codepage, a wrapped `  │ …` continuation, a line-initial `Error:`),
-because contention is the one error that carries no prefix at all: a contended
-write prints exactly `database is busy`, so the prefix gate meant the backoff
-never fired. Reading all of stdout is safe because it is read only once the run
-has already failed — nothing landed, so a retry cannot duplicate a write, and a
-row body that merely quotes the phrase costs a few seconds of pointless backoff
-before the same exception.
+On Windows the WAL needs a VFS beside it (`--vfs experimental_win_iocp`), or the open fails with `experimental multiprocess WAL is not supported by the active IO backend`. The binary pairs them itself (`TURSO_VFS`, see the table above); a `tursodb` command you type by hand, and the MCP registration, need both flags. Dropping the WAL flag is not an alternative — that is what re-introduces the exclusive lock.
 
 ## Backup & restore
 
-- **Daily backup** — schedule `scripts/supercharged-memory-backup.sh` (e.g. a
-  launchd/cron job) to produce a **validated** gzipped SQL dump
-  `YYYY-MM-DD-supercharged-memory.sql.gz` in `backups/` (concurrent-safe reader;
-  checks non-empty + has INSERTs + gzip intact). Retains **3 daily + 4 weekly**
-  (Monday) copies, and runs even while a session is open.
-- **Manual backup:** `bash scripts/supercharged-memory-backup.sh` — this is also what
-  the agent runs when the user asks for a backup (`CLAUDE.md.template` points at
-  the script by absolute path). Dumps always land in this repo's `backups/`, the
-  `BACKUP_DIR` default; `recall.py --candidates` looks there for restorable dumps,
-  so keep them together rather than scattering them per-machine. Taking a backup is
-  additive and non-destructive; **restoring is neither** — never restore without the
-  user's explicit ok.
-- **Restore** — `scripts/restore.py`, into a fresh DB file:
+- **Backup** — `backup` writes a **verified**, gzipped SQL dump `YYYY-MM-DD-supercharged-memory.sql.gz` into `BACKUP_DIR` from one read snapshot (writers are never blocked, so it runs while a session is open) and prints its path on stdout. Verification re-counts every table against the rows written and decompresses the gzip it wrote, in-process; nothing replaces an older dump until the new one passed. Retains **3 daily + 4 weekly** (Monday) copies. It needs no `tursodb`. It refuses a missing, empty or non-database file, so a bad path cannot rotate the real dumps out.
+- **Scheduling** — `init` prints the schedule for your platform (a systemd user timer, launchd, Task Scheduler or cron) that runs `<binary> backup` daily; it never installs one. A scheduled run uses the same `.env` as every other command.
+- **Restore** — into a fresh DB file, counted:
   ```bash
-  python3 scripts/restore.py --out /path/to/new.db        # newest backup by default
-  python3 scripts/restore.py --dump backups/<file>.sql.gz --out /path/to/new.db
+  supercharged-memory restore --out /path/to/new.db            # newest dump in BACKUP_DIR by default
+  supercharged-memory restore --dump <file>.sql.gz --out /path/to/new.db
   ```
-  It refuses a target that already exists (pass `--force` to override), reads `.sql`
-  and `.sql.gz` alike, and prints a per-table `in dump` vs `restored` comparison,
-  exiting non-zero if any row is missing. **A restore that was not counted is not a
-  restore.**
+  It reads this binary's dumps and tursodb's own `.dump`, `.sql` and `.sql.gz` alike, splits them with the engine's own parser, and prints a per-table `in dump` vs `restored` comparison; any mismatch, rejected statement or cut-off dump exits non-zero and leaves nothing at `--out`. It refuses a target that exists (`--force` replaces one, only after the restore is verified) and never the configured database or its sidecar files. **A restore that was not counted is not a restore.** Restoring is never done without the user's explicit ok, and switching to the restored file is a separate step (`SUPERCHARGED_MEMORY_TURSO_PATH` in the `.env`).
 
-  **Do not pipe a dump into `tursodb`**, and do not use its `.read`. The CLI splits
-  its input on **line** boundaries, but `memory_text` contains newlines, so most of a
-  dump's lines are continuations *inside string literals* — in one measured dump, 4378
-  of 5034. The first multi-line `INSERT` ends its statement mid-value and everything
-  after it is parsed as garbage until something happens to parse again. The result is
-  an arbitrary **fraction** of the rows (98 of 389 in the observed case) together with
-  a misleading `Parse error: table 'eval_cases' does not exist` — a partial restore
-  that looks like it mostly worked. The dumps themselves are fine; only the replay was
-  broken.
-- **Rebuild empty schema** — **pipe** the file; don't pass it as a SQL argument
-  (`tursodb "$(cat schema.sql)"` fails: the leading `--` comment parses as a CLI flag):
-  ```bash
-  tursodb "$SUPERCHARGED_MEMORY_TURSO_PATH" --experimental-multiprocess-wal < schema.sql   # +`--vfs experimental_win_iocp` on Windows
-  python3 scripts/seed.py    # empty by default — add entries first if you want a seeded start
-  ```
-- **New machine:** run `instructions/SETUP.md` (or manually: install `tursodb` +
-  Ollama, `ollama pull bge-m3`, choose/export `SUPERCHARGED_MEMORY_TURSO_PATH`, restore the latest dump,
-  register the MCP with the flag, and re-run `install-claude-md.sh` with your
-  `SUPERCHARGED_MEMORY_TURSO_PATH` and `EPISODIC_MODE`).
+  **Do not pipe a dump into `tursodb`**, and do not use its `.read`. The CLI splits its input on **line** boundaries, but `memory_text` contains newlines, so most of a dump's lines are continuations *inside string literals* — in one measured dump, 4378 of 5034. The first multi-line `INSERT` ends its statement mid-value and everything after it is parsed as garbage until something happens to parse again. The result is an arbitrary **fraction** of the rows (98 of 389 in the observed case) together with a misleading `Parse error: table 'eval_cases' does not exist` — a partial restore that looks like it mostly worked.
+- **New machine:** install the binary, `restore` the latest dump into a fresh file, then `init --db-path <that file>` adopts it and writes the `.env` and the instructions.
 
 ## Data protection
 
-**Never store PII — anywhere.** Anonymize before calling
-`remember.py`/`backfill.py`. Store pointers (ticket/case ids, role labels)
-instead of personal data. This applies to the memory text *and* anything sent to
-Ollama to embed.
+**Never store PII — anywhere.** Anonymize before calling `remember`/`backfill`. Store pointers (ticket/case ids, role labels) instead of personal data. This applies to the memory text *and* anything sent to Ollama to embed.
 
 ## License
 

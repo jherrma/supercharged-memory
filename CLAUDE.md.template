@@ -1,25 +1,25 @@
 # Long-term memory — Turso vector DB (supercharged-memory)
 
-ALL cross-session memory goes here, through the scripts (not raw MCP calls). DO NOT USE THE BUILT IN MEMORY MECHANISMS USING MARKDOWN FILES!
-Details: `{{BASE_PATH}}/README.md`. Commands below omit their prefix — always run
-them as `{{PY}} "{{BASE_PATH}}/scripts/<cmd>"`.
+ALL cross-session memory goes here, through the binary (not raw SQL or MCP writes). DO NOT USE THE BUILT IN MEMORY MECHANISMS USING MARKDOWN FILES!
+Details: `{{EXE}} runbook` lists the procedures. Commands below omit their prefix — always run
+them as `{{EXE}} <cmd>`.
 
 ## Session start (before anything else)
-1. `recall.py --status`
+1. `{{EXE}} status`
    - `READY n` → proceed. `ERROR …` → fall back to `~/.claude/projects/<hash>/memory/` for
      this session; tell the user.
-   - `DEGRADED n` — Ollama down, DB fine. Still do steps 2–3, and recall works (keyword-only),
-     but you CANNOT store this session: say so, and put the memory text in your reply instead.
+   - `DEGRADED n` — no embeddings (the next line says why), DB fine. Do steps 2–3: recall is keyword-only,
+     stores still work (saved unembedded, text-only dedup). Say so once; `{{EXE}} embed --missing` catches up.
    - `MISSING` — almost always a wrong path, not lost data. NEVER create, restore, or
-     overwrite a database on your own; show what `--status` found and ask.
-   - `EMPTY` — if you didn't just create it, run `recall.py --candidates` in case the real DB
-     is elsewhere; otherwise ask whether to `backfill.py --dir "<path>"`.
-2. `recall.py --baseline` — must-always-apply rules; follow them the whole session.
-3. `recall.py --topics` — index of which subjects have memory at all. Skim it; if the
-   conversation touches one, dig in with `recall.py` even if it's not an obvious search term.
+     overwrite a database on your own; show what `status` found and ask.
+   - `EMPTY` — if you didn't just create it, run `{{EXE}} recall --candidates` in case the real DB
+     is elsewhere; otherwise ask whether to `{{EXE}} backfill --dir "<path>"`.
+2. `{{EXE}} recall --baseline` — must-always-apply rules; follow them the whole session.
+3. `{{EXE}} recall --topics` — index of which subjects have memory at all. Skim it; if the
+   conversation touches one, dig in with `{{EXE}} recall "<query>"` even if it's not an obvious search term.
 
 ## Recall
-`recall.py "<query>" [--table semantic|episodic|both] [--project <id>] [--k N]`
+`{{EXE}} recall "<query>" [--table semantic|episodic|both] [--project <id>] [--k N]`
 
 Read memory at the start of a task that may depend on prior context, whenever the user cites
 a past decision, BEFORE non-trivial debugging (a past session may have hit the same gotcha),
@@ -27,14 +27,14 @@ and BEFORE storing (dedup / supersede check). Ranking is hybrid — cosine dista
 IDF-weighted keyword credit, so a rare token (an id, an error string) pulls its row up
 while common words barely move it. The topic index is the
 "don't know what to search for" tool; it goes stale between sleeps, so re-run `--topics` or
-query directly: `SELECT topic, keywords FROM topic_keywords WHERE topic LIKE '%x%';`
+filter it: `{{EXE}} recall --topics <word>`.
 
 ## Store — AUTONOMOUS. Building this knowledge base is YOUR job.
 The user never asks you to remember; you notice and store. Store the moment an insight is
 CONFIRMED (fix verified, decision made) — sessions die without warning. Never ask permission
 (sole exception: `baseline`). Report in one line: `memorized: <topic>`, then continue.
 
-`remember.py --table <t> --topic <topic> --keywords "<k1, k2, …>" --source <src> --model <your-model-id> --text "<memory>" [--project <id>] (--category <c> | --event-type <e> --importance <i>)`
+`{{EXE}} remember --table <t> --topic <topic> --keywords "<k1, k2, …>" --source <src> --model <your-model-id> --text "<memory>" [--project <id>] (--category <c> | --event-type <e> --importance <i>)`
 
 `--project` = tracking-tool work-item id (ClickUp/Jira, e.g. `869e7xzp6`); omit if not
 ticket-bound. `--model` = your own exact model id.
@@ -75,7 +75,7 @@ code/git/tickets, session-local state, and generic best practices.
 - `--keywords` are appended into the text itself: ids, exact error strings, library + version,
   synonyms, EN *and* DE phrasings someone would search by. They sharpen both search modes.
 - Recall first. Covered but now wrong/incomplete → `--supersedes <id>` (inserts + supersedes in
-  one call; never hand-edit `superseded_by`). Still correct → don't duplicate. The script
+  one call; never hand-edit `superseded_by`). Still correct → don't duplicate. `remember`
   refuses near-duplicates; `--force` only if genuinely distinct.
 
 ### Kinds
@@ -90,32 +90,33 @@ code/git/tickets, session-local state, and generic best practices.
 - NEVER store PII — anonymize; store pointers (ticket/case ids, role labels). Applies to the
   text AND anything sent to Ollama to embed.
 - One embedding model per DB (bge-m3) — never change `EMBED_MODEL`.
-- `database is busy` → the script retries; if it still fails, run it again.
+- `database is busy` → run it again.
+- A registered `turso` MCP should be read-only; if it can write, "writes go through the binary"
+  is advisory — nothing enforces it, so keep to it.
 
 ## Coworkers (named personas)
-Answer coworker questions from the DB directly — don't read files first. Reads are ad-hoc SQL
-via the turso MCP; writes go through `coworkers.py` / `remember.py --coworker`.
-
-- **List**: `SELECT id, name, expertise, trust_level, active FROM coworkers;`
-- **Load** ("load jeff"): his `coworkers` row + current `appraisals` row + `semantic_memory`
-  tagged to him with `category='feedback'` newer than that appraisal (or than his `created_at`
-  if he has none). Say what you loaded, then adopt his personality/expertise/trust_level for
-  the session. Baseline rules stay a hard floor — no trust level loosens them. If `active=0`,
-  say so before proceeding.
-- **Feedback while loaded**: `remember.py --coworker <name> …` — your corrections/praise
+- **List** (answer coworker questions through the binary, not files): `{{EXE}} coworkers --list`
+- **Load** ("load jeff"): `{{EXE}} coworkers --load jeff` prints his row, his current appraisal and
+  the current feedback tagged to him since. Say what you loaded, then adopt his
+  personality/expertise/trust_level for the session. Baseline rules stay a hard floor — no
+  trust level loosens them. If it says he is retired, say so before proceeding.
+- **Feedback while loaded**: `remember --coworker <name> …` — your corrections/praise
   `--source user-stated`, his own noticed learnings `--source self-observed`. Self-observed is
   trust-gated: `supervised` → propose the text and wait for an ok; `trusted`/`autonomous` →
   store directly, mention it in passing.
-- **Appraisal review** (only when you trigger it, never scheduled): pull that same feedback
-  history, discuss it, then `coworkers.py --appraise <name> --trust <level> --text "<distilled>"`.
+- **Appraisal review** (only when you trigger it, never scheduled): `coworkers --load <name>` for that
+  feedback, discuss it, then `{{EXE}} coworkers --appraise <name> --trust <level> --text "<distilled>"`.
 
 ## On user request only — never scheduled, never proactive
-- "sleep" / "go to sleep" → follow `{{BASE_PATH}}/instructions/SLEEP.md` step by step.
-- "deep sleep" → follow `{{BASE_PATH}}/instructions/DEEP-SLEEP.md` (normal sleep first, then it
-  purges memories the user picks, compacts, and mines patterns). Both sleeps run their reading in
-  subagents — never read the whole corpus into your own context.
-- "backup" → `bash "{{BASE_PATH}}/scripts/supercharged-memory-backup.sh"` (writes `{{BASE_PATH}}/backups/`).
-- "update" (sync this machine with the repo) → follow `{{BASE_PATH}}/instructions/UPDATE.md` step by step.
+- "sleep" / "go to sleep" → `{{EXE}} runbook sleep`, follow it step by step.
+- "deep sleep" → `{{EXE}} runbook deep-sleep` (normal sleep first, then it purges memories the
+  user picks, compacts, and mines patterns). Both sleeps run their reading in subagents —
+  never read the whole corpus into your own context.
+- "backup" → `{{EXE}} backup` (a verified dump into `BACKUP_DIR`; prints its path).
+- "update" (after the user replaced the binary) → `{{EXE}} update`, relay what it prints, ask,
+  then `{{EXE}} update -y`; `{{EXE}} runbook update` has the rest.
 - "migrate my memory" / "import my old memories" (file-based Claude memory that predates this
-  system) → follow `{{BASE_PATH}}/instructions/MIGRATE-EXISTING-MEMORY.md`. Additive: it never
-  deletes or edits a source file, so the sources are the way back. No bulk undo of imported rows.
+  system) → `{{EXE}} runbook migrate`. Additive: it never deletes or edits a source file, so the
+  sources are the way back. No bulk undo of imported rows.
+- "use instruction X" → `{{EXE}} instructions --get X` (else `{{EXE}} instructions "X"`). Store one
+  only when the user asks: `{{EXE}} instruct --topic X --text "…"`. Never loaded at session start.
