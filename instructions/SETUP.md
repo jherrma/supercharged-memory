@@ -86,7 +86,8 @@ stops at a database that is not a memory database.
   a per-table `in dump` vs `restored` count — read it, and treat a mismatch as a
   failed restore. Then run `init --db-path "<new database path>"`.
 - **A CLAUDE.md that already has a block written by the legacy installer** →
-  `init` leaves it untouched and prints the cutover note; follow it.
+  `init` leaves it untouched and prints a notice naming `MIGRATING-FROM-PYTHON.md`
+  (repository root); follow that file step by step.
 
 ## Step 3 — Ollama and the embedding model (optional, recommended)
 

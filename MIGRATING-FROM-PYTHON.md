@@ -55,9 +55,12 @@ Commands are written as you would type them, with `supercharged-memory` on your
    ```
 
    It prints `[backup] ok: <file>`. The dump is the only undo for the database. The
-   executable names its dumps exactly like the script (`<date>-supercharged-memory.sql.gz`),
-   so a dump it takes later the same day replaces this file. Copy the one the script
-   just wrote somewhere outside the backup directory.
+   executable names its dumps `<date>-supercharged-memory-native.sql.gz` (weekly:
+   `<date>-supercharged-memory-native-weekly.sql.gz`), so they never replace the script's
+   `<date>-supercharged-memory.sql.gz`, and its retention (3 daily, 4 weekly) never
+   deletes the script's dumps. The script's own retention likewise leaves the native
+   ones alone. Still copy the dump the script just wrote somewhere outside the backup
+   directory: it is the one you restore from if you roll back.
 2. **Copy `~/.claude/CLAUDE.md` and `~/.claude/settings.json` aside.** You edit both.
 3. **Write down five values.** You need them in step 2 and to verify:
    - the database path: the `SUPERCHARGED_MEMORY_TURSO_PATH` entry under `env` in
@@ -196,8 +199,8 @@ step makes the agent use the executable.
 ### 6. Move the scheduled backup
 
 Disable the old job: the launchd job (macOS) or the crontab entry (Linux) that runs
-`scripts/supercharged-memory-backup.sh`. Two jobs would write the same file names into
-the same directory. Then run `init` again without `-y`; it changes nothing and prints a
+`scripts/supercharged-memory-backup.sh`. Two jobs would write into the same directory
+on the same schedule. Then run `init` again without `-y`; it changes nothing and prints a
 backup schedule for your system under `Backup schedule`: a systemd user timer, a launchd
 plist, a scheduled task or a cron line, each running `supercharged-memory backup`. Install the one that fits.
 
@@ -208,7 +211,7 @@ supercharged-memory backup
 
 `backup` prints the dump's path and a per-table count and ends with
 `backup: gzip verified, <n> bytes of SQL inside`. It keeps the 3 newest daily and 4
-newest weekly dumps, as the script did.
+newest weekly dumps of its own (`-native`) names, as the script did for its names.
 
 ## How to verify
 

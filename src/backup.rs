@@ -35,8 +35,8 @@ pub enum Tier {
 impl Tier {
     pub fn suffix(self) -> &'static str {
         match self {
-            Tier::Daily => "-supercharged-memory.sql.gz",
-            Tier::Weekly => "-supercharged-memory-weekly.sql.gz",
+            Tier::Daily => "-supercharged-memory-native.sql.gz",
+            Tier::Weekly => "-supercharged-memory-native-weekly.sql.gz",
         }
     }
 
@@ -49,9 +49,11 @@ impl Tier {
     }
 }
 
-/// `YYYY-MM-DD-supercharged-memory.sql.gz`, and the weekly variant. The
-/// candidate scan finds dumps by the project name in it, so the two stay
-/// coupled.
+/// `YYYY-MM-DD-supercharged-memory-native.sql.gz`, and the weekly variant.
+/// The `-native` marker keeps these names apart from the Python script's
+/// (`<date>-supercharged-memory.sql.gz`), which share BACKUP_DIR on a migrated
+/// machine: neither tool replaces or prunes the other's dumps. The candidate
+/// scan finds dumps by the project name and `.sql.gz`, which both match.
 pub fn file_name(date: NaiveDate, tier: Tier) -> String {
     format!("{}{}", date.format("%Y-%m-%d"), tier.suffix())
 }
@@ -477,19 +479,47 @@ mod tests {
     // ---- names and retention -----------------------------------------------
 
     #[test]
-    fn file_names_follow_the_shell_script() {
+    fn file_names_cannot_collide_with_the_python_script() {
         assert_eq!(
             file_name(day(MONDAY), Tier::Daily),
-            "2026-10-26-supercharged-memory.sql.gz"
+            "2026-10-26-supercharged-memory-native.sql.gz"
         );
         assert_eq!(
             file_name(day(MONDAY), Tier::Weekly),
-            "2026-10-26-supercharged-memory-weekly.sql.gz"
+            "2026-10-26-supercharged-memory-native-weekly.sql.gz"
         );
         assert_eq!(
             file_name(day("2026-01-05"), Tier::Daily),
-            "2026-01-05-supercharged-memory.sql.gz"
+            "2026-01-05-supercharged-memory-native.sql.gz"
         );
+        for tier in [Tier::Daily, Tier::Weekly] {
+            let native = file_name(day(MONDAY), tier);
+            assert!(native.ends_with(".sql.gz"), "{native}");
+            let python = match tier {
+                Tier::Daily => "2026-10-26-supercharged-memory.sql.gz",
+                Tier::Weekly => "2026-10-26-supercharged-memory-weekly.sql.gz",
+            };
+            assert_ne!(native, python);
+        }
+    }
+
+    /// Retention only ever sees the dumps this binary wrote: the Python
+    /// script's dumps, however many, are neither pruned nor counted against
+    /// the native keep limits.
+    #[test]
+    fn retention_leaves_the_python_scripts_dumps_alone() {
+        let mut fixtures = Vec::new();
+        let mut names = Vec::new();
+        for i in 1..=9 {
+            names.push(format!("2026-10-0{i}-supercharged-memory.sql.gz"));
+            names.push(format!("2026-09-0{i}-supercharged-memory-weekly.sql.gz"));
+        }
+        for (i, n) in names.iter().enumerate() {
+            fixtures.push((n.as_str(), at(i as u64)));
+        }
+        let e = entries(&fixtures);
+        assert!(to_prune(&e, Tier::Daily, None).is_empty());
+        assert!(to_prune(&e, Tier::Weekly, None).is_empty());
     }
 
     fn at(secs: u64) -> SystemTime {
@@ -500,24 +530,24 @@ mod tests {
     /// names, with a tie, an empty prefix, and the names the globs never match.
     fn dated_fixtures() -> Vec<(&'static str, SystemTime)> {
         vec![
-            ("2026-10-20-supercharged-memory.sql.gz", at(1)),
-            ("2026-10-21-supercharged-memory.sql.gz", at(2)),
-            ("2026-10-22-supercharged-memory.sql.gz", at(3)),
-            ("2026-10-23-supercharged-memory.sql.gz", at(3)),
-            ("2026-01-01-supercharged-memory.sql.gz", at(9)),
-            ("-supercharged-memory.sql.gz", at(0)),
-            (".2026-10-19-supercharged-memory.sql.gz", at(0)),
-            ("2026-10-18-SUPERCHARGED-MEMORY.SQL.GZ", at(0)),
+            ("2026-10-20-supercharged-memory-native.sql.gz", at(1)),
+            ("2026-10-21-supercharged-memory-native.sql.gz", at(2)),
+            ("2026-10-22-supercharged-memory-native.sql.gz", at(3)),
+            ("2026-10-23-supercharged-memory-native.sql.gz", at(3)),
+            ("2026-01-01-supercharged-memory-native.sql.gz", at(9)),
+            ("-supercharged-memory-native.sql.gz", at(0)),
+            (".2026-10-19-supercharged-memory-native.sql.gz", at(0)),
+            ("2026-10-18-SUPERCHARGED-MEMORY-NATIVE.SQL.GZ", at(0)),
             ("2026-10-24-supercharged-memory.sql", at(0)),
-            ("2026-10-24-supercharged-memory.sql.gz.bak", at(0)),
+            ("2026-10-24-supercharged-memory-native.sql.gz.bak", at(0)),
             ("notes.txt", at(0)),
             (".backup-1234.partial", at(0)),
-            ("2026-09-07-supercharged-memory-weekly.sql.gz", at(1)),
-            ("2026-09-14-supercharged-memory-weekly.sql.gz", at(2)),
-            ("2026-09-21-supercharged-memory-weekly.sql.gz", at(3)),
-            ("2026-09-28-supercharged-memory-weekly.sql.gz", at(4)),
-            ("2026-10-05-supercharged-memory-weekly.sql.gz", at(5)),
-            ("2026-10-12-supercharged-memory-weekly.sql.gz", at(6)),
+            ("2026-09-07-supercharged-memory-native-weekly.sql.gz", at(1)),
+            ("2026-09-14-supercharged-memory-native-weekly.sql.gz", at(2)),
+            ("2026-09-21-supercharged-memory-native-weekly.sql.gz", at(3)),
+            ("2026-09-28-supercharged-memory-native-weekly.sql.gz", at(4)),
+            ("2026-10-05-supercharged-memory-native-weekly.sql.gz", at(5)),
+            ("2026-10-12-supercharged-memory-native-weekly.sql.gz", at(6)),
         ]
     }
 
@@ -546,26 +576,27 @@ mod tests {
         assert_eq!(
             strings(to_prune(&e, Tier::Daily, None)),
             vec![
-                "2026-10-21-supercharged-memory.sql.gz",
-                "2026-10-20-supercharged-memory.sql.gz",
-                "-supercharged-memory.sql.gz",
+                "2026-10-21-supercharged-memory-native.sql.gz",
+                "2026-10-20-supercharged-memory-native.sql.gz",
+                "-supercharged-memory-native.sql.gz",
             ]
         );
         assert_eq!(
             strings(to_prune(&e, Tier::Weekly, None)),
             vec![
-                "2026-09-14-supercharged-memory-weekly.sql.gz",
-                "2026-09-07-supercharged-memory-weekly.sql.gz",
+                "2026-09-14-supercharged-memory-native-weekly.sql.gz",
+                "2026-09-07-supercharged-memory-native-weekly.sql.gz",
             ]
         );
     }
 
-    /// The survivors after this module's retention and after the shell
-    /// script's own two prune lines, run by bash on a copy of the same
-    /// directory, are the same files.
+    /// The Python script and this module share BACKUP_DIR without touching
+    /// each other's dumps: on one directory holding both name families, the
+    /// script's own prune lines (run by bash) remove only Python-named files and
+    /// this module's retention removes only native-named ones.
     #[cfg(unix)]
     #[test]
-    fn retention_matches_the_shell_script_on_the_same_directory() {
+    fn retention_and_the_shell_script_each_prune_only_their_own_dumps() {
         let script = fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/scripts/supercharged-memory-backup.sh"
@@ -577,43 +608,58 @@ mod tests {
             .collect();
         assert_eq!(prune_lines.len(), 2, "{prune_lines:?}");
 
+        let native = dated_fixtures();
+        let python: Vec<(String, SystemTime)> = native
+            .iter()
+            .map(|(n, t)| {
+                (
+                    n.replace("-supercharged-memory-native", "-supercharged-memory"),
+                    *t,
+                )
+            })
+            .collect();
         let base = scratch("backup-parity").db_path.with_file_name("parity");
-        let (shell_dir, ours) = (base.join("shell"), base.join("ours"));
-        for dir in [&shell_dir, &ours] {
-            fs::create_dir_all(dir).unwrap();
-            for (name, t) in dated_fixtures() {
-                let f = fs::File::create(dir.join(name)).unwrap();
-                f.set_modified(t).unwrap();
-            }
+        let dir = base.join("mixed");
+        fs::create_dir_all(&dir).unwrap();
+        for (name, t) in native
+            .iter()
+            .map(|(n, t)| (n.to_string(), *t))
+            .chain(python.iter().cloned())
+        {
+            let f = fs::File::create(dir.join(name)).unwrap();
+            f.set_modified(t).unwrap();
         }
+        let before = names(&dir);
+
+        prune(&dir, Tier::Daily, None);
+        prune(&dir, Tier::Weekly, None);
+        let after_ours = names(&dir);
+        let removed_by_us: Vec<&String> =
+            before.iter().filter(|n| !after_ours.contains(n)).collect();
+        assert!(!removed_by_us.is_empty());
+        assert!(
+            removed_by_us.iter().all(|n| n.contains("-native")),
+            "{removed_by_us:?}"
+        );
+
         let status = std::process::Command::new("bash")
             .arg("-c")
             .arg(prune_lines.join("\n"))
-            .env("DEST", &shell_dir)
+            .env("DEST", &dir)
             .env("LC_ALL", "C")
             .status()
             .unwrap();
         assert!(status.success());
-        prune(&ours, Tier::Daily, None);
-        prune(&ours, Tier::Weekly, None);
-
-        assert_eq!(names(&ours), names(&shell_dir));
-        let mut want: Vec<String> = dated_fixtures()
+        let after_both = names(&dir);
+        let removed_by_script: Vec<&String> = after_ours
             .iter()
-            .map(|(n, _)| n.to_string())
-            .filter(|n| {
-                ![
-                    "2026-10-21-supercharged-memory.sql.gz",
-                    "2026-10-20-supercharged-memory.sql.gz",
-                    "-supercharged-memory.sql.gz",
-                    "2026-09-14-supercharged-memory-weekly.sql.gz",
-                    "2026-09-07-supercharged-memory-weekly.sql.gz",
-                ]
-                .contains(&n.as_str())
-            })
+            .filter(|n| !after_both.contains(n))
             .collect();
-        want.sort();
-        assert_eq!(names(&ours), want);
+        assert!(!removed_by_script.is_empty());
+        assert!(
+            removed_by_script.iter().all(|n| !n.contains("-native")),
+            "{removed_by_script:?}"
+        );
     }
 
     /// A dump with an older modification time than three others -- a clock
@@ -622,18 +668,18 @@ mod tests {
     #[test]
     fn the_dump_just_written_is_never_pruned() {
         let e = entries(&[
-            ("2026-10-27-supercharged-memory.sql.gz", at(1)),
-            ("2027-01-01-supercharged-memory.sql.gz", at(10)),
-            ("2027-01-02-supercharged-memory.sql.gz", at(11)),
-            ("2027-01-03-supercharged-memory.sql.gz", at(12)),
+            ("2026-10-27-supercharged-memory-native.sql.gz", at(1)),
+            ("2027-01-01-supercharged-memory-native.sql.gz", at(10)),
+            ("2027-01-02-supercharged-memory-native.sql.gz", at(11)),
+            ("2027-01-03-supercharged-memory-native.sql.gz", at(12)),
         ]);
         assert_eq!(
             strings(to_prune(
                 &e,
                 Tier::Daily,
-                Some(OsStr::new("2026-10-27-supercharged-memory.sql.gz"))
+                Some(OsStr::new("2026-10-27-supercharged-memory-native.sql.gz"))
             )),
-            vec!["2027-01-01-supercharged-memory.sql.gz"]
+            vec!["2027-01-01-supercharged-memory-native.sql.gz"]
         );
     }
 
@@ -648,8 +694,10 @@ mod tests {
             .with_file_name("backups");
         fs::create_dir_all(&dir).unwrap();
         for i in 1..=5 {
-            let f = fs::File::create(dir.join(format!("2026-10-2{i}-supercharged-memory.sql.gz")))
-                .unwrap();
+            let f = fs::File::create(
+                dir.join(format!("2026-10-2{i}-supercharged-memory-native.sql.gz")),
+            )
+            .unwrap();
             f.set_modified(at(i)).unwrap();
         }
         let before = names(&dir);
@@ -676,13 +724,14 @@ mod tests {
         let done = create(&cfg, day(TUESDAY)).unwrap();
         assert_eq!(
             done.path,
-            cfg.backup_dir.join("2026-10-27-supercharged-memory.sql.gz")
+            cfg.backup_dir
+                .join("2026-10-27-supercharged-memory-native.sql.gz")
         );
         assert!(done.path.is_absolute());
         assert_eq!(done.weekly, None);
         assert_eq!(
             names(&cfg.backup_dir),
-            vec!["2026-10-27-supercharged-memory.sql.gz"]
+            vec!["2026-10-27-supercharged-memory-native.sql.gz"]
         );
         let sql = gunzip(&done.path);
         assert_eq!(done.sql_bytes, sql.len() as u64);
@@ -701,7 +750,7 @@ mod tests {
         assert_eq!(
             weekly,
             cfg.backup_dir
-                .join("2026-10-26-supercharged-memory-weekly.sql.gz")
+                .join("2026-10-26-supercharged-memory-native-weekly.sql.gz")
         );
         assert_eq!(fs::read(&weekly).unwrap(), fs::read(&done.path).unwrap());
 
@@ -710,9 +759,9 @@ mod tests {
         assert_eq!(
             names(&cfg.backup_dir),
             vec![
-                "2026-10-26-supercharged-memory-weekly.sql.gz",
-                "2026-10-26-supercharged-memory.sql.gz",
-                "2026-10-27-supercharged-memory.sql.gz",
+                "2026-10-26-supercharged-memory-native-weekly.sql.gz",
+                "2026-10-26-supercharged-memory-native.sql.gz",
+                "2026-10-27-supercharged-memory-native.sql.gz",
             ]
         );
     }
@@ -752,7 +801,7 @@ mod tests {
         assert!(gunzip(&done.path).contains("after the first backup"));
         assert_eq!(
             names(&cfg.backup_dir),
-            vec!["2026-10-27-supercharged-memory.sql.gz"]
+            vec!["2026-10-27-supercharged-memory-native.sql.gz"]
         );
     }
 
@@ -838,7 +887,9 @@ mod tests {
                 .unwrap();
         });
         fs::create_dir_all(&cfg.backup_dir).unwrap();
-        let previous = cfg.backup_dir.join("2026-10-27-supercharged-memory.sql.gz");
+        let previous = cfg
+            .backup_dir
+            .join("2026-10-27-supercharged-memory-native.sql.gz");
         fs::write(&previous, b"yesterday's good dump").unwrap();
 
         let err = create(&cfg, day(TUESDAY)).unwrap_err();
@@ -847,7 +898,7 @@ mod tests {
         assert_eq!(fs::read(&previous).unwrap(), b"yesterday's good dump");
         assert_eq!(
             names(&cfg.backup_dir),
-            vec!["2026-10-27-supercharged-memory.sql.gz"],
+            vec!["2026-10-27-supercharged-memory-native.sql.gz"],
             "no partial file left behind"
         );
     }
@@ -942,7 +993,9 @@ mod tests {
         let cfg = fixture("backup-stdout");
         let (mut out, mut err) = (Vec::new(), Vec::new());
         run_to(&cfg, day(MONDAY), &mut out, &mut err).unwrap();
-        let path = cfg.backup_dir.join("2026-10-26-supercharged-memory.sql.gz");
+        let path = cfg
+            .backup_dir
+            .join("2026-10-26-supercharged-memory-native.sql.gz");
         assert_eq!(
             String::from_utf8(out).unwrap(),
             format!("{}\n", path.display())
@@ -962,9 +1015,9 @@ mod tests {
     fn the_diagnostics_name_the_tables_the_copy_and_each_pruned_file() {
         let cfg = scratch("backup-lines");
         let done = Done {
-            path: PathBuf::from("/b/2026-10-26-supercharged-memory.sql.gz"),
+            path: PathBuf::from("/b/2026-10-26-supercharged-memory-native.sql.gz"),
             weekly: Some(PathBuf::from(
-                "/b/2026-10-26-supercharged-memory-weekly.sql.gz",
+                "/b/2026-10-26-supercharged-memory-native-weekly.sql.gz",
             )),
             dumped: Dumped {
                 tables: vec![
@@ -973,19 +1026,21 @@ mod tests {
                 ],
             },
             sql_bytes: 4096,
-            pruned: vec![PathBuf::from("/b/2026-10-20-supercharged-memory.sql.gz")],
+            pruned: vec![PathBuf::from(
+                "/b/2026-10-20-supercharged-memory-native.sql.gz",
+            )],
             warnings: vec!["could not remove /b/x: denied".into()],
         };
         let text = done.lines(&cfg).join("\n");
         for want in [
             cfg.db_path.display().to_string(),
             // Named on stderr too, for a run whose stdout goes nowhere.
-            "/b/2026-10-26-supercharged-memory.sql.gz".into(),
+            "/b/2026-10-26-supercharged-memory-native.sql.gz".into(),
             "15 rows".into(),
             "semantic_memory 12".into(),
             "episodic_memory 3".into(),
-            "/b/2026-10-26-supercharged-memory-weekly.sql.gz".into(),
-            "pruned /b/2026-10-20-supercharged-memory.sql.gz".into(),
+            "/b/2026-10-26-supercharged-memory-native-weekly.sql.gz".into(),
+            "pruned /b/2026-10-20-supercharged-memory-native.sql.gz".into(),
             "warning: could not remove /b/x: denied".into(),
         ] {
             assert!(text.contains(&want), "{want:?} not in:\n{text}");

@@ -334,3 +334,24 @@ fn a_hand_edited_block_is_reported_with_its_diff() {
     assert!(text.contains("a local hand-edit"), "{text}");
     assert!(!text.contains("instructions current"), "{text}");
 }
+
+/// `update --print-block | head`: the reader has gone by the time the block is
+/// written. That is the reader's choice, not a failure to report -- no panic
+/// message, no abort.
+#[test]
+fn a_closed_stdout_pipe_ends_quietly() {
+    let m = Machine::installed("broken-pipe", VERSION);
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = Command::new(&m.exe)
+        .env_clear()
+        .env("HOME", m.root.join("home"))
+        .env("OLLAMA_URL", "http://127.0.0.1:9")
+        .args(["update", "--print-block"])
+        .stdout(writer)
+        .output()
+        .unwrap();
+    let err = stderr(&out);
+    assert_eq!(err, "", "stderr must stay empty");
+    assert!(out.status.success(), "{:?}", out.status);
+}

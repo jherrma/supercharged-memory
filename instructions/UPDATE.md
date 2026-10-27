@@ -113,19 +113,22 @@ the managed block in CLAUDE.md:
 
 and by commands that start with an interpreter and a path into the checkout. The
 binary does **not** rewrite that block: `init` and `update` find it, leave it
-untouched, and print the cutover note instead (`update -y` refuses). Relay that
-note and follow it step by step with the user; in short it:
+untouched, and print a short notice that names `MIGRATING-FROM-PYTHON.md` (`update -y`
+refuses until `init` has written the `.env`). That file, in the repository root, is
+the reference for the move: relay it and follow it step by step with the user. If
+this runbook and that file ever differ, the file wins. In short its steps are:
 
-1. keeps the binary in a permanent place under a stable name;
-2. runs `init` with `--db-path` pointing at the **existing** database, `--backup-dir`
+1. keep the binary in a permanent place under a stable name;
+2. run `init` with `--db-path` pointing at the **existing** database, `--backup-dir`
    at the existing dumps and `--episodic-mode` as the block has it, so the database
    is adopted and the `.env` written, and the old block is left alone;
-3. removes the environment variables the old setup put into Claude Code's
+3. remove the environment variables the old setup put into Claude Code's
    settings, because a real environment variable overrides the `.env` on every
-   run, and checks with `{{EXE}} config` that every value now comes from the `.env`;
-4. replaces the old block with what `{{EXE}} update --print-block` prints;
-5. runs `{{EXE}} update -y` for the schema migration;
-6. points the scheduled backup job at `{{EXE}} backup`.
+   run, and check with `{{EXE}} config` that every value now comes from the `.env`;
+4. run `{{EXE}} update` (a dry run) and then `{{EXE}} update -y` for the schema
+   migration, which backs the database up first;
+5. replace the old block with what `{{EXE}} update --print-block` prints;
+6. point the scheduled backup job at `{{EXE}} backup`.
 
 The Python scripts may stay in the checkout; nothing the instructions say points
 at them any more.

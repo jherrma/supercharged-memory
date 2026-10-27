@@ -116,7 +116,7 @@ The runtime state lives *outside* the binary — the database, the `.env`, `~/.c
 
 Every release that breaks an existing install ships a note in `migrations/<version>/NOTE.md` (and, for a schema change, the SQL beside it). Each is **embedded in the binary** and printed by `update` for the versions between the installed one and the running one. A note has three parts: **What broke**, **How to resolve** (concrete steps, in order) and **Verification** (what to run afterwards and what output proves it worked). A new schema migration also gets an entry with a probe — a query the database answers when the migration is already applied — in the binary's table, and a test fails until both agree. Notes are keyed by version, so a note can land in the same commit as the change.
 
-The older `migration-steps/` directory is frozen history: sha-keyed notes written for the Python-script install, applied by machines still on that layout.
+The older `migration-steps/` directory is frozen history: sha-keyed notes written for the Python-script install. A machine still on that layout does not apply them for 2.0: it follows [MIGRATING-FROM-PYTHON.md](MIGRATING-FROM-PYTHON.md).
 
 ## Usage
 

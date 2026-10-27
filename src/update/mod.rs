@@ -1022,6 +1022,83 @@ mod tests {
         assert!(last(&out).starts_with("Up to date"), "{}", text(&out));
     }
 
+    // ---- version 2.0.0 against the embedded 0.1.0 migration ------------------------
+
+    /// This binary's embedded notes and migrations, as a 2.0.0 release.
+    fn as_2_0_0() -> Release<'static> {
+        Release {
+            version: "2.0.0",
+            ..real()
+        }
+    }
+
+    /// The schema migration is keyed by version only for ordering and for its
+    /// note; whether it is applied is the probe's answer. A machine that
+    /// already records 2.0.0 and holds a database from before the table is
+    /// still migrated, never read as "applied" because 0.1.0 < 2.0.0.
+    #[test]
+    fn a_2_0_0_machine_with_an_old_database_still_gets_the_0_1_0_migration() {
+        let f = Fixture::installed("v2-old-db", "2.0.0");
+        let out = update(&f.cfg(), &Args::default(), &as_2_0_0()).unwrap();
+        let shown = text(&out);
+        assert!(shown.contains("instructions (0.1.0)"), "{shown}");
+        assert!(shown.contains("1 schema migration(s) pending"), "{shown}");
+        assert_eq!(last(&out), "Ask the user to confirm", "{shown}");
+
+        update(&f.cfg(), &yes(), &as_2_0_0()).unwrap();
+        assert!(f.holds(real().migrations[0].probe.query));
+        assert_eq!(f.dotenv_version().as_deref(), Some("2.0.0"));
+        let again = update(&f.cfg(), &Args::default(), &as_2_0_0()).unwrap();
+        assert!(last(&again).starts_with("Up to date"), "{}", text(&again));
+    }
+
+    /// A database that holds the table is not offered it again, and a version
+    /// of 2.0.0 on both sides is not "a newer schema": nothing is pending.
+    #[test]
+    fn a_2_0_0_machine_with_the_table_has_nothing_pending() {
+        let f = Fixture::installed("v2-new-db", "2.0.0");
+        update(&f.cfg(), &yes(), &as_2_0_0()).unwrap();
+        let before = f.snapshot();
+        let out = update(&f.cfg(), &yes(), &as_2_0_0()).unwrap();
+        assert!(last(&out).starts_with("Up to date"), "{}", text(&out));
+        assert_eq!(f.snapshot(), before);
+    }
+
+    /// A machine that recorded 0.1.0 (a pre-release build) moves to 2.0.0
+    /// with the migration applied and the version recorded; the 0.1.0 note
+    /// is one it has already been given. One that predates 0.1.0 is shown it.
+    #[test]
+    fn the_0_1_0_note_is_shown_only_to_a_machine_older_than_0_1_0() {
+        let f = Fixture::installed("v2-from-0-1-0", "0.1.0");
+        let shown = text(&update(&f.cfg(), &Args::default(), &as_2_0_0()).unwrap());
+        assert!(
+            shown.contains("Migration notes: none between 0.1.0 and 2.0.0"),
+            "{shown}"
+        );
+        assert!(shown.contains("instructions (0.1.0)"), "{shown}");
+        update(&f.cfg(), &yes(), &as_2_0_0()).unwrap();
+        assert_eq!(f.dotenv_version().as_deref(), Some("2.0.0"));
+
+        let older = Fixture::installed("v2-from-0-0-1", "0.0.1");
+        let shown = text(&update(&older.cfg(), &Args::default(), &as_2_0_0()).unwrap());
+        assert!(shown.contains("=== 0.1.0: "), "{shown}");
+    }
+
+    /// No embedded note or migration is keyed above this binary's own
+    /// version: `update` prints notes up to and including it, so one above
+    /// would never be shown or applied.
+    #[test]
+    fn no_embedded_release_is_newer_than_this_binary() {
+        let own = Version::parse(crate::version::VERSION).unwrap();
+        for v in migrations::NOTES
+            .iter()
+            .map(|n| n.version)
+            .chain(migrations::MIGRATIONS.iter().map(|m| m.version))
+        {
+            assert!(Version::parse(v).unwrap() <= own, "{v} > {own}");
+        }
+    }
+
     // ---- nothing to do, or only CLAUDE.md --------------------------------------
 
     /// A real environment variable overrides the `.env` for every other reader,

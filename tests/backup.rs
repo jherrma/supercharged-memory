@@ -117,7 +117,7 @@ fn daily_dumps(dir: &Path) -> Vec<PathBuf> {
             p.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .ends_with("-supercharged-memory.sql.gz")
+                .ends_with("-supercharged-memory-native.sql.gz")
         })
         .collect()
 }

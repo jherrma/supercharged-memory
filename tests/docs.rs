@@ -129,3 +129,45 @@ fn the_contributor_guide_states_each_changed_invariant() {
         ],
     );
 }
+
+#[test]
+fn the_python_layout_is_sent_to_the_migration_notice() {
+    has(
+        "README.md",
+        &read("README.md"),
+        &["(MIGRATING-FROM-PYTHON.md)"],
+    );
+    lacks(
+        "README.md",
+        &read("README.md"),
+        &["applied by machines still on that layout"],
+    );
+    for doc in ["instructions/UPDATE.md", "instructions/SETUP.md"] {
+        let t = read(doc);
+        has(doc, &t, &["MIGRATING-FROM-PYTHON.md"]);
+        lacks(doc, &t, &["cutover note"]);
+    }
+}
+
+/// The legacy section of UPDATE.md lists the steps in the notice's order: the
+/// schema migration (`update -y`) comes before the block is replaced.
+#[test]
+fn the_update_runbook_lists_the_legacy_steps_in_the_notices_order() {
+    let t = read("instructions/UPDATE.md");
+    let legacy = &t[t.find("(legacy)").expect("legacy section")..];
+    let at = |needle: &str| {
+        legacy
+            .find(needle)
+            .unwrap_or_else(|| panic!("legacy section lacks {needle:?}"))
+    };
+    let order = [
+        "keep the binary",
+        "run `init`",
+        "remove the environment variables",
+        "{{EXE}} update -y",
+        "{{EXE}} update --print-block",
+        "scheduled backup",
+    ];
+    let positions: Vec<usize> = order.iter().map(|n| at(n)).collect();
+    assert!(positions.windows(2).all(|w| w[0] < w[1]), "{positions:?}");
+}
