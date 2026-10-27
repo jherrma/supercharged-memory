@@ -39,9 +39,9 @@ name = "bench-measure"
 path = "bench/measure.rs"
 
 [profile.release]
-# One self-contained binary is the whole point (see stories/17-go-rewrite).
-# Strip symbols and optimise for size; a memory CLI is not throughput-bound.
-opt-level = "z"
+# One self-contained binary, optimised for speed: recall runs the Turso engine
+# over every memory, and opt-level "z" made that path roughly twice as slow.
+opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
