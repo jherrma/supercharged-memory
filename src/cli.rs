@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 
 use crate::config::{self, Config, ConfigError, Env};
-use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
+use crate::error::{EXIT_OK, EXIT_USAGE, Result};
 use crate::remember;
 use crate::store;
 use crate::{
@@ -640,12 +640,6 @@ pub enum Command {
         model: String,
     },
 
-    /// Seed a fresh database with starter memories.
-    ///
-    /// Whether this survives is undecided: its Python interface was "edit
-    /// the list inside the script", which a compiled binary cannot offer.
-    Seed,
-
     /// Restore a dump into a fresh database file, verifying row counts.
     ///
     /// Reads tursodb's `.dump` and this binary's own dumps, .sql or .sql.gz.
@@ -871,6 +865,7 @@ pub enum Command {
 impl Command {
     /// The subcommand's name as typed. Kept next to the enum so a rename cannot
     /// silently diverge from what the runbooks call it.
+    #[cfg(test)]
     pub fn name(&self) -> &'static str {
         match self {
             Command::Status => "status",
@@ -884,7 +879,6 @@ impl Command {
             Command::Coworkers { .. } => "coworkers",
             Command::Sleep { .. } => "sleep",
             Command::Backfill { .. } => "backfill",
-            Command::Seed => "seed",
             Command::Restore { .. } => "restore",
             Command::Backup => "backup",
             Command::FindExistingMemory { .. } => "find-existing-memory",
@@ -1066,9 +1060,6 @@ impl Command {
                     episodic_mode: episodic_mode.clone(),
                 },
             ),
-            _ => Err(Error::NotImplemented {
-                command: self.name(),
-            }),
         }
     }
 }
@@ -1333,7 +1324,7 @@ mod tests {
     use clap::CommandFactory;
 
     use super::*;
-    use crate::error::{EXIT_ERROR, EXIT_REFUSED};
+    use crate::error::EXIT_REFUSED;
 
     #[test]
     fn clap_definition_is_wellformed() {
@@ -1358,7 +1349,6 @@ mod tests {
             "coworkers",
             "sleep",
             "backfill",
-            "seed",
             "restore",
             "backup",
             "find-existing-memory",
@@ -1376,6 +1366,9 @@ mod tests {
         // `init` replaced the installer script's stand-in; nothing is left to
         // call by the old name.
         assert!(!registered.contains(&"install".to_string()));
+        // `init` creates the database and `remember` / `backfill` load it, so
+        // there is no separate seeding step to name.
+        assert!(!registered.contains(&"seed".to_string()));
     }
 
     /// Minimal valid arguments per subcommand, so each one gets past clap.
@@ -1450,13 +1443,6 @@ mod tests {
 
     #[test]
     fn every_subcommand_reports_a_name() {
-        let cfg = Config::from_env(&Env {
-            vars: Default::default(),
-            home: std::path::PathBuf::from("/home/tester"),
-            windows: false,
-            dotenv: crate::config::DotEnv::absent(crate::config::tests::EXE.into()),
-        })
-        .unwrap();
         for cmd in [
             Command::Status,
             Command::Recall {
@@ -1567,7 +1553,6 @@ mod tests {
                 project: None,
                 model: "unknown".into(),
             },
-            Command::Seed,
             Command::Restore {
                 dump: None,
                 out: PathBuf::from("/nonexistent/restored.db"),
@@ -1607,30 +1592,6 @@ mod tests {
             Command::Runbook { name: None },
         ] {
             assert!(!cmd.name().is_empty());
-            if !matches!(
-                cmd,
-                Command::Status
-                    | Command::Recall { .. }
-                    | Command::Remember { .. }
-                    | Command::Backfill { .. }
-                    | Command::Instruct { .. }
-                    | Command::Instructions { .. }
-                    | Command::List { .. }
-                    | Command::Show { .. }
-                    | Command::Embed { .. }
-                    | Command::Coworkers { .. }
-                    | Command::Eval { .. }
-                    | Command::Sleep { .. }
-                    | Command::Backup
-                    | Command::Restore { .. }
-                    | Command::FindExistingMemory { .. }
-                    | Command::Init { .. }
-                    | Command::Update { .. }
-                    | Command::Config
-                    | Command::Runbook { .. }
-            ) {
-                assert!(matches!(cmd.run(&cfg), Err(Error::NotImplemented { .. })));
-            }
         }
     }
 
@@ -2386,8 +2347,8 @@ mod tests {
     fn exit_codes() {
         assert_eq!(
             code(&["sm", "seed"]),
-            EXIT_ERROR,
-            "a stub is an error, not a refusal"
+            EXIT_USAGE,
+            "there is no seed command; an unknown subcommand is a usage error"
         );
         assert_eq!(
             code(&["sm", "coworkers"]),

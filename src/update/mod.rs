@@ -505,7 +505,6 @@ fn open_memory_database(cfg: &Config) -> Result<TursoStore> {
 fn reason(e: Error) -> String {
     match e {
         Error::Refused(why) | Error::Failed(why) => why,
-        other => other.to_string(),
     }
 }
 

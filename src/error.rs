@@ -21,8 +21,6 @@ pub enum Error {
     Refused(String),
     /// Something went wrong while doing the work.
     Failed(String),
-    /// The command exists but is not implemented yet.
-    NotImplemented { command: &'static str },
 }
 
 // The constructors are exercised by the tests below and used by the
@@ -40,7 +38,7 @@ impl Error {
     pub fn exit_code(&self) -> u8 {
         match self {
             Error::Refused(_) => EXIT_REFUSED,
-            Error::Failed(_) | Error::NotImplemented { .. } => EXIT_ERROR,
+            Error::Failed(_) => EXIT_ERROR,
         }
     }
 }
@@ -50,9 +48,6 @@ impl fmt::Display for Error {
         match self {
             Error::Refused(reason) => write!(f, "refused: {reason}"),
             Error::Failed(what) => write!(f, "error: {what}"),
-            Error::NotImplemented { command } => {
-                write!(f, "error: not implemented: {command}")
-            }
         }
     }
 }
@@ -86,12 +81,5 @@ mod tests {
             Error::failed("ollama is unreachable").to_string(),
             "error: ollama is unreachable"
         );
-    }
-
-    #[test]
-    fn not_implemented_names_its_command() {
-        let e = Error::NotImplemented { command: "recall" };
-        assert_eq!(e.to_string(), "error: not implemented: recall");
-        assert_eq!(e.exit_code(), EXIT_ERROR);
     }
 }

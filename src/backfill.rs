@@ -324,7 +324,6 @@ enum Outcome {
 fn reason(e: &Error) -> String {
     match e {
         Error::Refused(why) | Error::Failed(why) => why.clone(),
-        other => other.to_string(),
     }
 }
 

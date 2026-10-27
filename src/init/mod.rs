@@ -429,7 +429,6 @@ fn at(cfg: &Config, db: &Path) -> Config {
 fn reason(e: Error) -> String {
     match e {
         Error::Refused(why) | Error::Failed(why) => why,
-        other => other.to_string(),
     }
 }
 
