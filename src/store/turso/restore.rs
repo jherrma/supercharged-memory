@@ -167,12 +167,11 @@ fn effect(cmd: &Cmd) -> Effect {
         Stmt::Delete {
             tbl_name,
             where_clause,
-            limit,
             ..
         } => {
             if internal(&tbl_name.name) {
                 Effect::Internal
-            } else if where_clause.is_none() && limit.is_none() {
+            } else if where_clause.is_none() {
                 Effect::Empties(named(&tbl_name.name))
             } else {
                 Effect::Uncountable

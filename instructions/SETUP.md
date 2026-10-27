@@ -287,7 +287,7 @@ Run everything from **Git Bash**. Use PowerShell only for the installers below.
 PowerShell installer (no admin rights, installs per-user into `%USERPROFILE%\.turso`):
 
 ```powershell
-irm https://github.com/tursodatabase/turso/releases/download/v0.7.2/turso_cli-installer.ps1 -OutFile "$env:TEMP\turso-install.ps1"
+irm https://github.com/tursodatabase/turso/releases/download/v0.8.3/turso_cli-installer.ps1 -OutFile "$env:TEMP\turso-install.ps1"
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\turso-install.ps1"
 ```
 

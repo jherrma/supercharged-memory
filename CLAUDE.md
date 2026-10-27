@@ -65,7 +65,7 @@ Classification runs in **subagents** on the same contract as the sleep runbooks.
 Nothing is required. Both are recommended, and each missing one is listed by `init` with what the user loses:
 
 - **Ollama** at `localhost:11434` running the **bge-m3** embedding model (`ollama pull bge-m3`), 1024-dim. Without it: keyword-only recall, rows stored without an embedding (`embedding IS NULL`), text-only dedup, `status` = `DEGRADED n`; `embed --missing` catches up.
-- **tursodb** (Turso 0.7.2 — the targeted version; 0.7.0+ is the floor) registered as the **read-only** `turso` MCP server for ad-hoc reads. The binary itself never calls it. Its `current_database` MCP tool misreports `:memory: (default)` for a CLI-opened DB ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061)) — verify with a real `SELECT`, never `open_database`.
+- **tursodb** (Turso 0.8.3 — the targeted version; 0.7.0+ is the floor) registered as the **read-only** `turso` MCP server for ad-hoc reads. The binary itself never calls it. Its `current_database` MCP tool misreports `:memory: (default)` for a CLI-opened DB ([upstream #8061](https://github.com/tursodatabase/turso/issues/8061)) — verify with a real `SELECT`, never `open_database`.
 
 ## Common commands
 

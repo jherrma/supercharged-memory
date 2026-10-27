@@ -45,7 +45,7 @@ Without it the system still works, and says what it skips: `status` reads `DEGRA
 
 ### Turso (`tursodb`) — recommended, for ad-hoc reads
 
-Turso 0.7.0+ — **0.7.2 is what this project targets**. The binary never calls `tursodb`; it only helps you: registered as a Claude Code MCP server named `turso`, it gives the agent broad ad-hoc reads that the fixed commands (`recall`, `list`, `show`, `coworkers --load`, …) do not offer. Register it **read-only**, so writes can only go through the binary:
+Turso 0.7.0+ — **0.8.3 is what this project targets**. The binary never calls `tursodb`; it only helps you: registered as a Claude Code MCP server named `turso`, it gives the agent broad ad-hoc reads that the fixed commands (`recall`, `list`, `show`, `coworkers --load`, …) do not offer. Register it **read-only**, so writes can only go through the binary:
 
 ```bash
 claude mcp add turso --scope user -- <path to tursodb> <database path> --mcp --readonly --experimental-multiprocess-wal
