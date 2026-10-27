@@ -29,24 +29,19 @@ pub const BLOCK_END: &str = "<!-- END agentic-memory -->";
 /// repository checkout, whose commands name the Python scripts.
 pub const LEGACY_STAMP: &str = "<!-- supercharged-memory: synced-at ";
 
-/// What a machine whose block was rendered by the legacy installer has to do to
-/// move onto the binary. Printed by `init` (and `update`) when they find such a
+/// Where a machine whose block was rendered by the legacy installer finds how to
+/// move onto the binary, and its first two steps. Printed by `init` (and `update`) when they find such a
 /// block; `init` itself leaves the block untouched.
 pub const CUTOVER_NOTE: &str = "\
 This block was rendered by the legacy installer from a repository checkout; its
-commands name the Python scripts. init leaves it untouched. To move this machine
-onto the binary:
+commands name the Python scripts. init leaves it untouched. MIGRATING-FROM-PYTHON.md,
+at the root of the repository, is the whole move from the scripts to this binary.
+Its first two steps:
   1. Keep the binary in a permanent place under a stable name, and run it from there.
   2. Run init with --db-path <the database the block's machine uses>,
      --backup-dir <the repository's backups/ directory> and --episodic-mode <the
      block's mode>; relay the plan, then -y. It adopts the database and writes the .env.
-  3. Move RECALL_ALPHA (if set) into the .env, then remove SUPERCHARGED_MEMORY_TURSO_PATH,
-     BACKUP_DIR and RECALL_ALPHA from the \"env\" block of ~/.claude/settings.json: real
-     environment variables override the .env on every run. `config` must then show
-     every value coming from the .env.
-  4. Run `update` and relay it; once the user agrees, replace this block, from its BEGIN
-     line through its END line, with what `update --print-block` prints.
-  5. Point the scheduled backup job at `<this binary> backup`.";
+Then follow MIGRATING-FROM-PYTHON.md from step 3.";
 
 /// The first line inside a block `init` wrote: which binary version rendered it.
 pub fn stamp(version: &str) -> String {
@@ -231,6 +226,29 @@ pub fn separator(existing: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cutover_note_names_the_migration_notice_and_its_first_two_steps() {
+        assert!(CUTOVER_NOTE.contains("MIGRATING-FROM-PYTHON.md"));
+        assert!(CUTOVER_NOTE.lines().next().unwrap().starts_with(
+            "This block was rendered by the legacy installer from a repository checkout;"
+        ));
+        assert!(CUTOVER_NOTE.contains("  1. Keep the binary in a permanent place"));
+        assert!(CUTOVER_NOTE.contains("  2. Run init with --db-path"));
+        for later in ["  3.", "  4.", "  5.", "settings.json"] {
+            assert!(
+                !CUTOVER_NOTE.contains(later),
+                "the note repeats the notice from {later:?} on"
+            );
+        }
+        assert!(
+            CUTOVER_NOTE.lines().count() <= 12,
+            "the note is meant to be short"
+        );
+        let file =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("MIGRATING-FROM-PYTHON.md");
+        assert!(file.is_file(), "the note names a file that is not there");
+    }
 
     #[test]
     fn the_template_starts_with_the_headline() {
