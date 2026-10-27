@@ -17,9 +17,9 @@ use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Builder, Connection, Value};
 
 use super::{
-    ActiveRow, Appraisal, Appraised, Cell, ChainLink, Coworker, Embedded, EvalCase, EvalRun,
-    InstructionKey, InstructionState, NewMemory, Purged, ResultSet, Scope, SearchQuery, Store,
-    Table, Target,
+    ActiveRow, Appraisal, Appraised, Cell, ChainLink, Coworker, Currency, Embedded, EvalCase,
+    EvalRun, InstructionKey, InstructionState, NewMemory, Purged, ResultSet, RowFilter, Scope,
+    SearchQuery, Store, Table, Target,
 };
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -785,6 +785,99 @@ impl Store for TursoStore {
                 _ => None,
             })
             .collect())
+    }
+
+    fn list_rows(&self, table: Table, filter: &RowFilter) -> Result<ResultSet> {
+        let mut conds: Vec<String> = Vec::new();
+        let mut params: Vec<Value> = Vec::new();
+        if let Some(ids) = &filter.ids {
+            conds.push(format!("id IN ({})", placeholders(ids)));
+            params.extend(int_params(ids));
+        }
+        match filter.currency {
+            Some(Currency::Current) => conds.push(format!("({})", active(table))),
+            Some(Currency::NotCurrent) => conds.push(format!("NOT ({})", active(table))),
+            None => {}
+        }
+        if filter.unprocessed {
+            conds.push("processed_at IS NULL".into());
+        }
+        for (column, value) in [
+            ("topic", &filter.topic),
+            ("category", &filter.category),
+            ("source", &filter.source),
+            ("project", &filter.project),
+        ] {
+            if let Some(v) = value {
+                conds.push(format!("{column} = ?"));
+                params.push(Value::Text(v.clone()));
+            }
+        }
+        if let Some(since) = &filter.since {
+            conds.push("created_at >= ?".into());
+            params.push(Value::Text(since.clone()));
+        }
+        let columns = match table {
+            Table::Semantic => {
+                "id, created_at, topic, category, source, project, file_reference, \
+                 superseded_by, retired_at"
+            }
+            Table::Episodic => {
+                "id, created_at, topic, event_type, importance, source, project, \
+                 file_reference, processed_at"
+            }
+            Table::Instructions => {
+                "id, created_at, topic, source, project, file_reference, retired_at"
+            }
+        };
+        let text = if filter.with_text {
+            ", memory_text"
+        } else {
+            ""
+        };
+        let wher = if conds.is_empty() {
+            "1=1".to_string()
+        } else {
+            conds.join(" AND ")
+        };
+        self.query(
+            &format!(
+                "SELECT {columns}{text} FROM {} WHERE {wher} ORDER BY created_at, id;",
+                table.name()
+            ),
+            params,
+        )
+    }
+
+    fn show_rows(&self, table: Table, ids: &[i64]) -> Result<ResultSet> {
+        if ids.is_empty() {
+            return Ok(ResultSet {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            });
+        }
+        let columns = match table {
+            Table::Semantic => {
+                "id, created_at, updated_at, project, topic, category, source, model, \
+                 embed_model, memory_text, file_reference, superseded_by, retired_at"
+            }
+            Table::Episodic => {
+                "id, created_at, project, topic, event_type, importance, source, model, \
+                 embed_model, memory_text, file_reference, processed_at"
+            }
+            Table::Instructions => {
+                "id, created_at, updated_at, project, topic, source, model, embed_model, \
+                 memory_text, file_reference, retired_at"
+            }
+        };
+        self.query(
+            &format!(
+                "SELECT {columns} FROM {} WHERE id IN ({});",
+                table.name(),
+                placeholders(ids)
+            ),
+            int_params(ids),
+        )
     }
 
     fn existing_ids(&self, table: Table, ids: &[i64]) -> Result<Vec<i64>> {

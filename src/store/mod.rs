@@ -254,6 +254,36 @@ pub struct EvalRun {
     pub mrr: f64,
 }
 
+/// Whether a listing keeps current rows or the ones that are not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Currency {
+    /// Current truth: for semantic memory not superseded and not retired, for an
+    /// instruction not retired, and every episodic row.
+    Current,
+    /// The rest: superseded or retired rows. Episodic memory has none.
+    NotCurrent,
+}
+
+/// A fixed-shape listing of one table's rows. Every filter present must hold.
+/// Deliberately a handful of named fields and not an expression: a backend
+/// without SQL answers the same struct.
+#[derive(Debug, Clone, Default)]
+pub struct RowFilter {
+    pub ids: Option<Vec<i64>>,
+    pub currency: Option<Currency>,
+    /// Episodic rows no sleep pass has sifted yet.
+    pub unprocessed: bool,
+    /// Matched whole and case-sensitively.
+    pub topic: Option<String>,
+    pub category: Option<String>,
+    pub source: Option<String>,
+    pub project: Option<String>,
+    /// A stored `created_at`: keeps rows created at or after it.
+    pub since: Option<String>,
+    /// Add `memory_text` as the last column.
+    pub with_text: bool,
+}
+
 /// Rows plus their column names, which is what the output format needs. It is a
 /// result set, not a query -- a MongoDB backend produces the same shape.
 #[derive(Debug, Clone)]
@@ -369,6 +399,16 @@ pub trait Store {
     /// Every pair of active, embedded rows closer than `below` in cosine
     /// distance, once each, lower id first.
     fn close_pairs(&self, table: Table, below: f64) -> Result<Vec<(i64, i64)>>;
+
+    /// The rows matching the filter without their text or embedding, oldest
+    /// first (ties by id). Columns depend on the table: the descriptive
+    /// metadata and the state columns (superseded_by and retired_at, or
+    /// processed_at), plus `memory_text` last when asked for.
+    fn list_rows(&self, table: Table, filter: &RowFilter) -> Result<ResultSet>;
+
+    /// The full rows with these ids, current or not -- every column but the
+    /// embedding -- in no particular order.
+    fn show_rows(&self, table: Table, ids: &[i64]) -> Result<ResultSet>;
 
     /// Which of these ids are rows of this table, current or not.
     fn existing_ids(&self, table: Table, ids: &[i64]) -> Result<Vec<i64>>;

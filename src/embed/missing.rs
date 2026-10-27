@@ -895,7 +895,7 @@ mod tests {
                 k: 10,
                 coworker: None,
                 baseline: false,
-                topics: false,
+                topics: None,
                 candidates: false,
                 count: false,
             };

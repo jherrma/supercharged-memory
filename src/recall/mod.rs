@@ -24,7 +24,9 @@ pub struct Args {
     pub k: u32,
     pub coworker: Option<String>,
     pub baseline: bool,
-    pub topics: bool,
+    /// The topic index, narrowed to the topics whose name or keywords contain
+    /// this; an empty string is the whole index.
+    pub topics: Option<String>,
     pub candidates: bool,
     pub count: bool,
 }
@@ -49,7 +51,7 @@ impl TableArg {
 pub fn run(cfg: &Config, args: &Args) -> Result<()> {
     // Refuse a meaningless invocation BEFORE opening anything: an argument error
     // should not depend on whether the database happens to be reachable.
-    let has_mode = args.candidates || args.count || args.baseline || args.topics;
+    let has_mode = args.candidates || args.count || args.baseline || args.topics.is_some();
     let has_query = args.query.as_ref().is_some_and(|q| !q.trim().is_empty());
     if !has_mode && !has_query {
         return Err(Error::refused(
@@ -72,8 +74,8 @@ pub fn run(cfg: &Config, args: &Args) -> Result<()> {
         print!("{}", baseline(&store)?);
         return Ok(());
     }
-    if args.topics {
-        print!("{}", topics(&store)?);
+    if let Some(matching) = &args.topics {
+        print!("{}", topics(&store, matching)?);
         return Ok(());
     }
     let out = search(
@@ -117,13 +119,33 @@ pub(crate) fn baseline(store: &impl Store) -> Result<String> {
 }
 
 /// `--topics`, as printed.
-pub(crate) fn topics(store: &impl Store) -> Result<String> {
-    let rs = store.topics()?;
+///
+/// With a word, only the topics whose name or keywords contain it. The match is
+/// made here, not in SQL: SQLite's `lower()` and `LIKE` fold ASCII only, the
+/// index is small by design, and a `%` or `_` in the word must stay literal.
+pub(crate) fn topics(store: &impl Store, matching: &str) -> Result<String> {
+    let mut rs = store.topics()?;
+    let word = matching.trim().to_lowercase();
+    if !word.is_empty() {
+        rs.rows.retain(|row| {
+            row.iter()
+                .take(2)
+                .any(|cell| cell.render().to_lowercase().contains(&word))
+        });
+    }
     let n = rs.rows.len() as u64;
-    let mut out =
-        format!("===== topic index (load every session; {n} topic(s); rebuilt by sleep) =====\n");
-    out.push_str(&render::line(&rs));
-    out.push('\n');
+    let mut out = if word.is_empty() {
+        format!("===== topic index (load every session; {n} topic(s); rebuilt by sleep) =====\n")
+    } else {
+        format!(
+            "===== topic index ({n} topic(s) whose name or keywords contain {:?}; rebuilt by sleep) =====\n",
+            matching.trim()
+        )
+    };
+    if !rs.rows.is_empty() || word.is_empty() {
+        out.push_str(&render::line(&rs));
+        out.push('\n');
+    }
     if n > TOPIC_WARN_AT {
         out.push_str(&format!(
             "NOTE: {n} topics is a lot to hold in context every session — \
@@ -321,7 +343,7 @@ mod tests {
             k,
             coworker: None,
             baseline: false,
-            topics: false,
+            topics: None,
             candidates: false,
             count: false,
         }
@@ -566,5 +588,97 @@ mod tests {
             vec!["===== semantic (EMBEDDINGS=off — keyword-only, top 5) ====="]
         );
         assert!(out.contains("turso picks the iocp vfs"), "{out}");
+    }
+
+    // ---- the topic index, whole and narrowed ---------------------------------
+
+    fn index(name: &str) -> TursoStore {
+        use crate::store::turso::tests::rows;
+        let cfg = scratch(name);
+        for (topic, keywords, at) in [
+            ("deploy", "release, tag, Zürich", "2026-01-01 00:00:00"),
+            ("windows", "iocp vfs, PowerShell", "2026-01-03 00:00:00"),
+            (
+                "memory-design",
+                "recall, deploy order",
+                "2026-01-02 00:00:00",
+            ),
+        ] {
+            rows(
+                &cfg,
+                &format!(
+                    "INSERT INTO topic_keywords (topic, keywords, updated_at) \
+                     VALUES ('{topic}', '{keywords}', '{at}');"
+                ),
+            );
+        }
+        TursoStore::open(&cfg).unwrap()
+    }
+
+    #[test]
+    fn the_whole_index_is_what_it_always_was() {
+        let store = index("topics-whole");
+        // Names are right-aligned to the widest, one blank line after each row.
+        let want = [
+            "===== topic index (load every session; 3 topic(s); rebuilt by sleep) =====",
+            "   topic = windows",
+            "keywords = iocp vfs, PowerShell",
+            "",
+            "   topic = memory-design",
+            "keywords = recall, deploy order",
+            "",
+            "   topic = deploy",
+            "keywords = release, tag, Zürich",
+            "",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(topics(&store, "").unwrap(), want);
+    }
+
+    #[test]
+    fn a_blank_word_is_the_whole_index() {
+        let store = index("topics-blank");
+        assert_eq!(topics(&store, "  ").unwrap(), topics(&store, "").unwrap());
+    }
+
+    #[test]
+    fn a_word_keeps_the_topics_whose_name_or_keywords_contain_it() {
+        let store = index("topics-word");
+        let out = topics(&store, "deploy").unwrap();
+        // One by name, one by keywords, in the index's own order.
+        let first = out.find("memory-design").unwrap();
+        let second = out.find("topic = deploy").unwrap();
+        assert!(first < second, "{out}");
+        assert!(!out.contains("windows"), "{out}");
+        assert!(out.starts_with("===== topic index ("), "{out}");
+        assert!(out.lines().next().unwrap().contains("2 topic(s)"), "{out}");
+        assert!(out.lines().next().unwrap().contains("deploy"), "{out}");
+    }
+
+    #[test]
+    fn the_word_matches_ignoring_case_beyond_ascii() {
+        let store = index("topics-case");
+        let shell = topics(&store, "POWERSHELL").unwrap();
+        assert!(shell.contains("windows") && !shell.contains("topic = deploy"));
+        assert!(topics(&store, "zÜRICH").unwrap().contains("topic = deploy"));
+        assert!(topics(&store, "Iocp Vfs").unwrap().contains("windows"));
+    }
+
+    #[test]
+    fn the_word_is_a_substring_not_a_pattern() {
+        let store = index("topics-literal");
+        for pattern in ["%", "_", "dep%oy", "d_ploy"] {
+            let out = topics(&store, pattern).unwrap();
+            assert!(out.contains("0 topic(s)"), "{pattern}: {out}");
+        }
+    }
+
+    #[test]
+    fn a_word_nothing_contains_prints_the_header_with_zero_topics() {
+        let store = index("topics-none");
+        let out = topics(&store, "kubernetes").unwrap();
+        assert!(out.contains("0 topic(s)"), "{out}");
+        assert_eq!(out.lines().count(), 1, "{out}");
     }
 }

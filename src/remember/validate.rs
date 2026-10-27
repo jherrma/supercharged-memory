@@ -233,6 +233,14 @@ fn days_in_month(year: u32, month: u32) -> u32 {
     }
 }
 
+/// The keywords a stored text carries: what `assemble_text` appended after its
+/// body, or `None` when it has none.
+pub fn keywords_of(memory_text: &str) -> Option<&str> {
+    memory_text
+        .rsplit_once(KEYWORDS_LINE)
+        .map(|(_, keywords)| keywords)
+}
+
 /// The form two memories are compared in when there is no vector to compare:
 /// the text without its appended `Keywords:` line, lowercased, whitespace
 /// collapsed.
@@ -440,6 +448,27 @@ mod tests {
     /// The comparison form for the text-only near-duplicate guard: the same
     /// memory stored with other keywords, other case or other line breaks is the
     /// same memory.
+    #[test]
+    fn the_keywords_come_back_out_exactly_as_they_went_in() {
+        for kw in ["a, b", "tursodb, vfs, Zürich", "one", "x: y\nz"] {
+            let stored = assemble_text("a body", Some(kw)).unwrap();
+            assert_eq!(keywords_of(&stored), Some(kw), "{kw:?}");
+        }
+        // Spaces around the flag value are the writer's to drop.
+        let stored = assemble_text("a body", Some("  a, b  ")).unwrap();
+        assert_eq!(keywords_of(&stored), Some("a, b"));
+    }
+
+    #[test]
+    fn a_text_without_the_line_has_no_keywords() {
+        assert_eq!(keywords_of(&assemble_text("a body", None).unwrap()), None);
+        assert_eq!(
+            keywords_of(&assemble_text("a body", Some("  ")).unwrap()),
+            None
+        );
+        assert_eq!(keywords_of("mentions Keywords: inline"), None);
+    }
+
     #[test]
     fn the_dedup_key_drops_keywords_case_and_whitespace_differences() {
         let stored = assemble_text("Turso  needs\nthe WAL flag.", Some("turso, wal")).unwrap();

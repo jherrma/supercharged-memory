@@ -20,6 +20,7 @@ mod recall;
 mod remember;
 mod render;
 mod restore;
+mod rows;
 mod sleep;
 mod status;
 mod store;

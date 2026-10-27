@@ -14,8 +14,8 @@ use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
 use crate::{
-    backup, coworkers, embed, eval, find_existing, init, instructions, recall, restore, sleep,
-    status, update, version,
+    backup, coworkers, embed, eval, find_existing, init, instructions, recall, restore, rows,
+    sleep, status, update, version,
 };
 
 #[derive(Parser, Debug)]
@@ -56,6 +56,24 @@ impl From<OneTable> for store::Table {
         match t {
             OneTable::Semantic => store::Table::Semantic,
             OneTable::Episodic => store::Table::Episodic,
+        }
+    }
+}
+
+/// `list` / `show --table`: any one of the tables that hold rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReadTable {
+    Semantic,
+    Episodic,
+    Instructions,
+}
+
+impl From<ReadTable> for store::Table {
+    fn from(t: ReadTable) -> Self {
+        match t {
+            ReadTable::Semantic => store::Table::Semantic,
+            ReadTable::Episodic => store::Table::Episodic,
+            ReadTable::Instructions => store::Table::Instructions,
         }
     }
 }
@@ -132,8 +150,10 @@ pub enum Command {
         baseline: bool,
 
         /// Load the topic index (pure SQL; load every session, like --baseline).
-        #[arg(long)]
-        topics: bool,
+        /// With a word, only the topics whose name or keywords contain it,
+        /// ignoring case.
+        #[arg(long, value_name = "WORD", num_args = 0..=1, default_missing_value = "")]
+        topics: Option<String>,
 
         /// List memory databases and backups found outside the configured path.
         #[arg(long)]
@@ -311,6 +331,77 @@ pub enum Command {
         /// Narrow the search to one tracking-tool work item id.
         #[arg(long, requires = "searching")]
         project: Option<String>,
+    },
+
+    /// Metadata of the rows matching the filters, oldest first; never the text.
+    ///
+    /// A fixed set of filters, all of which must hold: the reads the runbooks
+    /// need without a SQL client. An empty result is an answer, not an error.
+    /// Pure reader: no Ollama, nothing written.
+    List {
+        /// Which table.
+        #[arg(long, value_enum)]
+        table: ReadTable,
+
+        /// Only these ids (comma-separated).
+        #[arg(long, value_name = "ID,ID,...")]
+        ids: Option<String>,
+
+        /// Current rows: not superseded and not retired (instructions: not
+        /// retired; every episodic row is current).
+        #[arg(long, conflicts_with = "not_current")]
+        current: bool,
+
+        /// Superseded or retired rows.
+        #[arg(long = "not-current")]
+        not_current: bool,
+
+        /// Episodic rows no sleep pass has sifted yet.
+        #[arg(long)]
+        unprocessed: bool,
+
+        /// Exactly this topic.
+        #[arg(long)]
+        topic: Option<String>,
+
+        /// Exactly this category (semantic only).
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Exactly this source.
+        #[arg(long)]
+        source: Option<String>,
+
+        /// Exactly this work item id.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Created at or after this: `YYYY-MM-DD HH:MM:SS` or `YYYY-MM-DD`.
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+
+        /// Add the first N characters of the text.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        preview: Option<u32>,
+
+        /// Add the `Keywords:` line `remember` appended to the text.
+        #[arg(long)]
+        keywords: bool,
+    },
+
+    /// Print whole rows, text included and embedding never.
+    ///
+    /// In the order given, current or not. An id that is not in the table is
+    /// named on stderr and the exit is non-zero, so a partial read cannot pass
+    /// for a complete one.
+    Show {
+        /// Which table.
+        #[arg(long, value_enum)]
+        table: ReadTable,
+
+        /// The ids, comma-separated.
+        #[arg(value_name = "ID,ID,...")]
+        ids: String,
     },
 
     /// Fill in the embeddings of rows stored without one.
@@ -743,6 +834,8 @@ impl Command {
             Command::Remember { .. } => "remember",
             Command::Instruct { .. } => "instruct",
             Command::Instructions { .. } => "instructions",
+            Command::List { .. } => "list",
+            Command::Show { .. } => "show",
             Command::Embed { .. } => "embed",
             Command::Coworkers { .. } => "coworkers",
             Command::Sleep { .. } => "sleep",
@@ -781,7 +874,7 @@ impl Command {
                     k: *k,
                     coworker: coworker.clone(),
                     baseline: *baseline,
-                    topics: *topics,
+                    topics: topics.clone(),
                     candidates: *candidates,
                     count: *count,
                 },
@@ -824,6 +917,37 @@ impl Command {
                     coworker: coworker.clone(),
                 },
             ),
+            Command::List {
+                table,
+                ids,
+                current,
+                not_current,
+                unprocessed,
+                topic,
+                category,
+                source,
+                project,
+                since,
+                preview,
+                keywords,
+            } => rows::run_list(
+                cfg,
+                &rows::ListArgs {
+                    table: Some((*table).into()),
+                    ids: ids.clone(),
+                    current: *current,
+                    not_current: *not_current,
+                    unprocessed: *unprocessed,
+                    topic: topic.clone(),
+                    category: category.clone(),
+                    source: source.clone(),
+                    project: project.clone(),
+                    since: since.clone(),
+                    preview: preview.map(|n| n as usize),
+                    keywords: *keywords,
+                },
+            ),
+            Command::Show { table, ids } => rows::run_show(cfg, (*table).into(), ids),
             Command::Instruct { .. } => instructions::write::run(cfg, &self.instruct_mode()),
             Command::Instructions { .. } => instructions::run(cfg, &self.lookup()),
             Command::Embed {
@@ -1197,6 +1321,8 @@ mod tests {
             "remember" => args.extend(["--table", "semantic", "--text", "a memory"]),
             "instruct" => args.extend(["--topic", "deploy", "--text", "run the checklist"]),
             "instructions" => args.push("--list"),
+            "list" => args.extend(["--table", "semantic"]),
+            "show" => args.extend(["--table", "semantic", "1"]),
             "embed" => args.push("--missing"),
             "restore" => args.extend(["--out", "/nonexistent/restored.db"]),
             "sleep" => args.push("--staleness"),
@@ -1274,7 +1400,7 @@ mod tests {
                 k: 5,
                 coworker: None,
                 baseline: false,
-                topics: false,
+                topics: None,
                 candidates: false,
                 count: false,
             },
@@ -1314,6 +1440,24 @@ mod tests {
                 list: true,
                 k: None,
                 project: None,
+            },
+            Command::List {
+                table: ReadTable::Semantic,
+                ids: None,
+                current: false,
+                not_current: false,
+                unprocessed: false,
+                topic: None,
+                category: None,
+                source: None,
+                project: None,
+                since: None,
+                preview: None,
+                keywords: false,
+            },
+            Command::Show {
+                table: ReadTable::Semantic,
+                ids: "1".into(),
             },
             Command::Embed {
                 missing: true,
@@ -1396,6 +1540,8 @@ mod tests {
                     | Command::Remember { .. }
                     | Command::Instruct { .. }
                     | Command::Instructions { .. }
+                    | Command::List { .. }
+                    | Command::Show { .. }
                     | Command::Embed { .. }
                     | Command::Coworkers { .. }
                     | Command::Eval { .. }
@@ -1974,6 +2120,108 @@ mod tests {
             panic!("not embed")
         };
         assert_eq!(table, EmbedTable::Instructions);
+    }
+
+    /// `recall --topics` is the whole index bare and a filter with a word; `list`
+    /// and `show` name their table. Parsed only, never run.
+    #[test]
+    fn the_read_commands_parse_their_arguments() {
+        let parse = |args: &[&str]| {
+            let mut full = vec!["sm"];
+            full.extend(args);
+            Cli::try_parse_from(full)
+        };
+        let topics = |args: &[&str]| match parse(args).unwrap().command {
+            Command::Recall { topics, query, .. } => (topics, query),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(topics(&["recall", "--topics"]), (Some(String::new()), None));
+        assert_eq!(
+            topics(&["recall", "--topics", "deploy"]),
+            (Some("deploy".into()), None)
+        );
+        assert_eq!(
+            topics(&["recall", "--topics=x y"]),
+            (Some("x y".into()), None)
+        );
+        assert_eq!(
+            topics(&["recall", "a query"]),
+            (None, Some("a query".into()))
+        );
+
+        let Command::List {
+            table,
+            current,
+            preview,
+            keywords,
+            since,
+            ids,
+            ..
+        } = parse(&[
+            "list",
+            "--table",
+            "semantic",
+            "--current",
+            "--preview",
+            "80",
+            "--keywords",
+            "--since",
+            "2026-01-01",
+            "--ids",
+            "1,2",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not a list")
+        };
+        assert_eq!(table, ReadTable::Semantic);
+        assert!(current && keywords);
+        assert_eq!(preview, Some(80));
+        assert_eq!(since.as_deref(), Some("2026-01-01"));
+        assert_eq!(ids.as_deref(), Some("1,2"));
+
+        let Command::Show { table, ids } = parse(&["show", "--table", "instructions", "3,1"])
+            .unwrap()
+            .command
+        else {
+            panic!("not a show")
+        };
+        assert_eq!(table, ReadTable::Instructions);
+        assert_eq!(ids, "3,1");
+    }
+
+    /// Malformed `list` and `show` invocations are usage errors: parsed only,
+    /// because a case that got past clap would read the real environment.
+    #[test]
+    fn malformed_read_invocations_are_usage_errors() {
+        for (args, why) in [
+            (vec!["list"], "a table is required"),
+            (vec!["list", "--table", "nonsense"], "unknown table"),
+            (
+                vec!["list", "--table", "semantic", "--current", "--not-current"],
+                "contradiction",
+            ),
+            (
+                vec!["list", "--table", "semantic", "--preview", "0"],
+                "empty preview",
+            ),
+            (
+                vec!["list", "--table", "semantic", "--preview", "x"],
+                "not a number",
+            ),
+            (
+                vec!["list", "--table", "semantic", "--sql", "x"],
+                "no passthrough",
+            ),
+            (vec!["show", "1,2"], "a table is required"),
+            (vec!["show", "--table", "semantic"], "ids are required"),
+        ] {
+            let mut full = vec!["sm"];
+            full.extend(&args);
+            let err = Cli::try_parse_from(full).expect_err(why);
+            assert!(err.use_stderr(), "{args:?}: {why}");
+        }
     }
 
     fn code(args: &[&str]) -> u8 {

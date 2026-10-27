@@ -468,7 +468,7 @@ mod tests {
                     k: 6,
                     coworker: None,
                     baseline: false,
-                    topics: false,
+                    topics: None,
                     candidates: false,
                     count: false,
                 },
@@ -609,7 +609,7 @@ mod tests {
             let store = TursoStore::open(cfg).unwrap();
             let mut out = crate::status::report(cfg, &Fake::up()).join("\n");
             out.push_str(&recall::baseline(&store).unwrap());
-            out.push_str(&recall::topics(&store).unwrap());
+            out.push_str(&recall::topics(&store, "").unwrap());
             out
         };
         assert_eq!(session(&with), session(&without));
