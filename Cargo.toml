@@ -23,6 +23,21 @@ turso = { version = "0.7.2", default-features = false }
 turso_parser = "0.7.2"
 ureq = { version = "3", features = ["json"] }
 
+# The end-to-end suite runs the binary and the Python reference side by side
+# on throwaway machines. It brings its own runner: it has to check the real
+# home before the first test and after the last one, and to print every
+# comparison it could not run, which libtest would swallow.
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+harness = false
+
+# The benchmark's measuring launcher; never shipped. Built for the host with
+# `cargo build --release --example bench-measure`, used by `bench/bench.py`.
+[[example]]
+name = "bench-measure"
+path = "bench/measure.rs"
+
 [profile.release]
 # One self-contained binary is the whole point (see stories/17-go-rewrite).
 # Strip symbols and optimise for size; a memory CLI is not throughput-bound.
