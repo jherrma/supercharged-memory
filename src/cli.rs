@@ -14,8 +14,8 @@ use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
 use crate::{
-    backup, coworkers, embed, eval, find_existing, init, instructions, recall, restore, rows,
-    runbook, sleep, status, update, version,
+    backfill, backup, coworkers, embed, eval, find_existing, init, instructions, recall, restore,
+    rows, runbook, sleep, status, update, version,
 };
 
 #[derive(Parser, Debug)]
@@ -606,7 +606,39 @@ pub enum Command {
     /// Bulk-import a directory of files, one memory per file.
     ///
     /// Shares the write path and every refusal with `remember`.
-    Backfill,
+    ///
+    /// Each file becomes ONE memory of at most 2000 characters; topic = the file
+    /// name without its last suffix, keywords = that name's words, source =
+    /// `backfill`. A file that is too long, empty, not UTF-8 or a near-duplicate
+    /// of a stored memory is reported and skipped; the rest of the run goes on.
+    /// The glob matches file names at any depth, ignoring case. NEVER import
+    /// files containing PII.
+    Backfill {
+        /// The directory to read, searched recursively.
+        #[arg(long)]
+        dir: PathBuf,
+
+        /// File-name pattern (`*` and `?`), matched without regard to case.
+        #[arg(long, default_value = "*.md")]
+        glob: String,
+
+        /// Where the memories go.
+        #[arg(long, value_enum, default_value = "semantic")]
+        table: OneTable,
+
+        /// Semantic category. Not baseline: that needs the user's confirmation,
+        /// so it goes through `remember --confirm-baseline`.
+        #[arg(long, default_value = "reference")]
+        category: String,
+
+        /// Tracking-tool work item id; omit if the files are not ticket-bound.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// The agent model doing the import.
+        #[arg(long, default_value = "unknown")]
+        model: String,
+    },
 
     /// Seed a fresh database with starter memories.
     ///
@@ -851,7 +883,7 @@ impl Command {
             Command::Embed { .. } => "embed",
             Command::Coworkers { .. } => "coworkers",
             Command::Sleep { .. } => "sleep",
-            Command::Backfill => "backfill",
+            Command::Backfill { .. } => "backfill",
             Command::Seed => "seed",
             Command::Restore { .. } => "restore",
             Command::Backup => "backup",
@@ -929,6 +961,24 @@ impl Command {
                     force: *force,
                     supersedes: supersedes.clone(),
                     coworker: coworker.clone(),
+                },
+            ),
+            Command::Backfill {
+                dir,
+                glob,
+                table,
+                category,
+                project,
+                model,
+            } => backfill::run(
+                cfg,
+                &backfill::Args {
+                    dir: dir.clone(),
+                    glob: glob.clone(),
+                    table: (*table).into(),
+                    category: category.clone(),
+                    project: project.clone(),
+                    model: model.clone(),
                 },
             ),
             Command::List {
@@ -1334,6 +1384,7 @@ mod tests {
         match name {
             "recall" => args.push("anything"),
             "remember" => args.extend(["--table", "semantic", "--text", "a memory"]),
+            "backfill" => args.extend(["--dir", "/nonexistent/notes"]),
             "instruct" => args.extend(["--topic", "deploy", "--text", "run the checklist"]),
             "instructions" => args.push("--list"),
             "list" => args.extend(["--table", "semantic"]),
@@ -1508,7 +1559,14 @@ mod tests {
                 threshold: None,
                 limit: None,
             },
-            Command::Backfill,
+            Command::Backfill {
+                dir: PathBuf::from("/nonexistent/notes"),
+                glob: "*.md".into(),
+                table: OneTable::Semantic,
+                category: "reference".into(),
+                project: None,
+                model: "unknown".into(),
+            },
             Command::Seed,
             Command::Restore {
                 dump: None,
@@ -1554,6 +1612,7 @@ mod tests {
                 Command::Status
                     | Command::Recall { .. }
                     | Command::Remember { .. }
+                    | Command::Backfill { .. }
                     | Command::Instruct { .. }
                     | Command::Instructions { .. }
                     | Command::List { .. }
@@ -1573,6 +1632,48 @@ mod tests {
                 assert!(matches!(cmd.run(&cfg), Err(Error::NotImplemented { .. })));
             }
         }
+    }
+
+    #[test]
+    fn backfill_takes_a_directory_and_defaults_the_rest() {
+        let cli = Cli::try_parse_from(["sm", "backfill", "--dir", "/notes"]).unwrap();
+        match cli.command {
+            Command::Backfill {
+                dir,
+                glob,
+                table,
+                category,
+                project,
+                model,
+            } => {
+                assert_eq!(dir, PathBuf::from("/notes"));
+                assert_eq!(glob, "*.md");
+                assert_eq!(table, OneTable::Semantic);
+                assert_eq!(category, "reference");
+                assert_eq!(project, None);
+                assert_eq!(model, "unknown");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn backfill_usage_errors_exit_64() {
+        for args in [
+            vec!["sm", "backfill"],
+            vec!["sm", "backfill", "--dir", "/n", "--table", "instructions"],
+            vec!["sm", "backfill", "--dir", "/n", "--force"],
+        ] {
+            assert_eq!(code(&args), EXIT_USAGE, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn backfill_of_a_missing_directory_is_a_refusal() {
+        assert_eq!(
+            code(&["sm", "backfill", "--dir", "/nonexistent/notes"]),
+            crate::error::EXIT_REFUSED
+        );
     }
 
     fn sleep_mode(args: &[&str]) -> sleep::Mode {

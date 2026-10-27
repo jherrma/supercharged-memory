@@ -4,6 +4,7 @@
 //! parsed its text output; see issue #17. Every subcommand is wired up and documented here, and each
 //! one is filled in as it is ported.
 
+mod backfill;
 mod backup;
 mod claude_md;
 mod cli;
