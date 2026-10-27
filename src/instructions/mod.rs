@@ -372,9 +372,8 @@ mod tests {
         assert!(section.contains("tag the release first"), "{out}");
     }
 
-    /// The ranking is recall's, so a word in every instruction weighs nothing
-    /// by keyword -- on a small table that is a real case. A search without a
-    /// hit says so and points at the list, rather than printing a bare header.
+    /// The ranking is recall's, so a query sharing no word with any instruction
+    /// earns no keyword credit. A search without a hit says so and points at the list, rather than printing a bare header.
     #[test]
     fn a_search_without_a_hit_says_so_and_points_at_the_list() {
         let cfg = scratch("instr-search-none");
@@ -385,7 +384,7 @@ mod tests {
             "2026-01-01 00:00:00",
             false,
         );
-        let out = search(&cfg, &down(), "checklist");
+        let out = search(&cfg, &down(), "unrelated");
         assert_eq!(
             out,
             "===== instructions (Ollama down — keyword-only, top 5) =====\n\n\

@@ -14,6 +14,12 @@
 
 /// Bound the df probe; queries longer than this are rare.
 pub const MAX_CANDIDATES: usize = 24;
+/// The fewest rows IDF is measured over before it is trusted.
+///
+/// IDF over fewer than this many rows cannot separate common from rare words: on
+/// a one-row table every word is in every row and weighs ln(1) = 0, so recall
+/// would find nothing at all. Below it, every query token weighs the same.
+pub const MIN_ROWS_FOR_IDF: u64 = 5;
 /// Tokens carried into the score, chosen by IDF.
 pub const MAX_TOKENS: usize = 8;
 
@@ -71,9 +77,10 @@ pub fn token_weights(candidates: &[String], dfs: &[u64], total: u64) -> Vec<Weig
     if candidates.is_empty() {
         return Vec::new();
     }
-    // A shape mismatch means the probe did not answer the question asked; fall
+    // A shape mismatch means the probe did not answer the question asked, and a
+    // table under MIN_ROWS_FOR_IDF cannot yield a meaningful IDF; either way fall
     // back to flat weights rather than ranking on a number that means nothing.
-    if dfs.len() != candidates.len() {
+    if dfs.len() != candidates.len() || total < MIN_ROWS_FOR_IDF {
         return candidates
             .iter()
             .take(MAX_TOKENS)
@@ -215,6 +222,20 @@ mod tests {
     fn a_token_in_every_row_earns_almost_nothing() {
         let w = token_weights(&["everywhere".to_string()], &[100], 100);
         assert!(w[0].weight.abs() < 0.02, "got {}", w[0].weight);
+    }
+
+    #[test]
+    fn below_the_threshold_every_token_weighs_the_same() {
+        let cands = vec!["common".to_string(), "rare".to_string()];
+        let w = token_weights(&cands, &[3, 1], MIN_ROWS_FOR_IDF - 1);
+        assert!(w.iter().all(|t| t.weight == 1.0), "{w:?}");
+    }
+
+    #[test]
+    fn at_the_threshold_idf_applies() {
+        let w = token_weights(&["everywhere".to_string()], &[5], MIN_ROWS_FOR_IDF);
+        assert!(w[0].weight.abs() < 1e-9, "{w:?}");
+        assert_eq!(MIN_ROWS_FOR_IDF, 5);
     }
 
     #[test]

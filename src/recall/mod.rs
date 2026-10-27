@@ -465,6 +465,42 @@ mod tests {
         );
     }
 
+    /// A keyword-only search over a table holding exactly `rows`.
+    fn kw_only(name: &str, rows: &[&str], query: &str) -> String {
+        let cfg = scratch(name);
+        for text in rows {
+            put(&cfg, Table::Semantic, text, true);
+        }
+        let down = Fake::down(Unavailable::Unreachable {
+            url: "http://127.0.0.1:9".into(),
+        });
+        run_search(&cfg, &down, 5, query)
+    }
+
+    #[test]
+    fn a_one_row_table_returns_the_row_with_full_keyword_credit() {
+        let out = kw_only("recall-idf-1", &["the wal flag"], "wal");
+        assert!(out.contains("the wal flag"), "{out}");
+        assert!(out.contains("kw = 1.0"), "{out}");
+    }
+
+    #[test]
+    fn a_three_row_table_returns_the_row_with_full_keyword_credit() {
+        let out = kw_only("recall-idf-3", &["wal one", "wal two", "wal three"], "wal");
+        assert_eq!(out.matches("memory_text = ").count(), 3, "{out}");
+        assert!(out.contains("kw = 1.0"), "{out}");
+    }
+
+    #[test]
+    fn a_five_row_table_keeps_idf_so_a_word_in_every_row_drops_out() {
+        let out = kw_only(
+            "recall-idf-5",
+            &["wal a", "wal b", "wal c", "wal d", "wal e"],
+            "wal",
+        );
+        assert_eq!(out.matches("memory_text = ").count(), 0, "{out}");
+    }
+
     #[test]
     fn keyword_only_mode_ranks_every_row_in_one_section() {
         let cfg = db("recall-kw-only", &["turso wal row stored without a vector"]);
