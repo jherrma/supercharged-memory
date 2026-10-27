@@ -14,8 +14,8 @@ use crate::error::{EXIT_OK, EXIT_USAGE, Error, Result};
 use crate::remember;
 use crate::store;
 use crate::{
-    backup, embed, find_existing, init, instructions, recall, restore, sleep, status, update,
-    version,
+    backup, coworkers, embed, find_existing, init, instructions, recall, restore, sleep, status,
+    update, version,
 };
 
 #[derive(Parser, Debug)]
@@ -343,11 +343,78 @@ pub enum Command {
         batch: u32,
     },
 
-    /// Add, appraise, retire or reactivate a coworker persona (writes only).
+    /// Coworker personas: add, appraise, set trust, retire, reactivate; list and load.
     ///
-    /// Loading and listing stay ad-hoc SQL via the turso MCP server. --retire
-    /// sets active=0; it never deletes.
-    Coworkers,
+    /// Exactly one mode per run. An appraisal supersedes the current one in
+    /// the same transaction, so one is current per coworker. --retire sets
+    /// active=0; nothing is ever deleted. Trust levels: supervised, trusted,
+    /// autonomous; none loosens a baseline rule. --load prints the coworker,
+    /// its current appraisal and the current feedback tagged to it since then;
+    /// a retired coworker's load says so on its first line.
+    #[command(
+        group(
+            ArgGroup::new("mode")
+                .required(true)
+                .args(["add", "appraise", "set_trust", "retire", "reactivate", "list", "load"])
+        ),
+        // One-member groups: clap counts a required ARGUMENT as satisfied when
+        // it conflicts with one that is present, and every other mode
+        // conflicts with it through `mode`.
+        group(ArgGroup::new("adding").args(["add"])),
+        group(ArgGroup::new("appraising").args(["appraise"]))
+    )]
+    Coworkers {
+        /// Add a coworker (with --name, --expertise, --personality). It starts
+        /// active and supervised.
+        #[arg(long, requires_all = ["name", "expertise", "personality"])]
+        add: bool,
+
+        /// --add: the name, unique forever (at most 64 characters, no comma).
+        #[arg(long, requires = "adding")]
+        name: Option<String>,
+
+        /// --add: what they are good at (at most 3000 characters).
+        #[arg(long, requires = "adding")]
+        expertise: Option<String>,
+
+        /// --add: tone, biases, what they push back on (at most 3000 characters).
+        #[arg(long, requires = "adding")]
+        personality: Option<String>,
+
+        /// Appraise a coworker (with --trust and --text): supersedes the
+        /// current appraisal and sets the trust level, in one transaction.
+        #[arg(long, value_name = "NAME", requires_all = ["trust", "text"])]
+        appraise: Option<String>,
+
+        /// --appraise: supervised, trusted or autonomous.
+        #[arg(long, value_name = "LEVEL", requires = "appraising")]
+        trust: Option<String>,
+
+        /// --appraise: the distilled appraisal (at most 2000 characters).
+        #[arg(long, requires = "appraising")]
+        text: Option<String>,
+
+        /// Set a coworker's trust level without an appraisal.
+        #[arg(long = "set-trust", num_args = 2, value_names = ["NAME", "LEVEL"])]
+        set_trust: Option<Vec<String>>,
+
+        /// Retire a coworker: sets active=0, never deletes.
+        #[arg(long, value_name = "NAME")]
+        retire: Option<String>,
+
+        /// Make a retired coworker active again.
+        #[arg(long, value_name = "NAME")]
+        reactivate: Option<String>,
+
+        /// Id, name, expertise, trust level and active flag of every coworker.
+        #[arg(long)]
+        list: bool,
+
+        /// The coworker, its current appraisal, and the current feedback
+        /// tagged to it since that appraisal (or since it was added).
+        #[arg(long, value_name = "NAME")]
+        load: Option<String>,
+    },
 
     /// Sleep-pass primitives: mark-processed, retire, rebuild-topics, purge, and read-only reports.
     ///
@@ -579,7 +646,7 @@ impl Command {
             Command::Instruct { .. } => "instruct",
             Command::Instructions { .. } => "instructions",
             Command::Embed { .. } => "embed",
-            Command::Coworkers => "coworkers",
+            Command::Coworkers { .. } => "coworkers",
             Command::Sleep { .. } => "sleep",
             Command::Backfill => "backfill",
             Command::Seed => "seed",
@@ -675,6 +742,7 @@ impl Command {
                 },
             ),
             Command::Sleep { .. } => sleep::run(cfg, &self.sleep_mode()),
+            Command::Coworkers { .. } => coworkers::run(cfg, &self.coworkers_mode()),
             Command::Backup => backup::run(cfg),
             Command::Restore { dump, out, force } => restore::run(
                 cfg,
@@ -775,6 +843,55 @@ impl Command {
             instructions::Lookup::Get(key.clone())
         } else {
             instructions::Lookup::List
+        }
+    }
+
+    /// The one mode a `coworkers` invocation names. clap's `mode` group
+    /// admits exactly one, so the order here decides nothing.
+    fn coworkers_mode(&self) -> coworkers::Mode {
+        let Command::Coworkers {
+            add,
+            name,
+            expertise,
+            personality,
+            appraise,
+            trust,
+            text,
+            set_trust,
+            retire,
+            reactivate,
+            list: _,
+            load,
+        } = self
+        else {
+            unreachable!("coworkers_mode is only called for coworkers")
+        };
+        let given = |v: &Option<String>| v.clone().unwrap_or_default();
+        if *add {
+            coworkers::Mode::Add {
+                name: given(name),
+                expertise: given(expertise),
+                personality: given(personality),
+            }
+        } else if let Some(name) = appraise {
+            coworkers::Mode::Appraise {
+                name: name.clone(),
+                trust: given(trust),
+                text: given(text),
+            }
+        } else if let Some([name, level]) = set_trust.as_deref() {
+            coworkers::Mode::SetTrust {
+                name: name.clone(),
+                level: level.clone(),
+            }
+        } else if let Some(name) = retire {
+            coworkers::Mode::Retire(name.clone())
+        } else if let Some(name) = reactivate {
+            coworkers::Mode::Reactivate(name.clone())
+        } else if let Some(name) = load {
+            coworkers::Mode::Load(name.clone())
+        } else {
+            coworkers::Mode::List
         }
     }
 
@@ -929,6 +1046,7 @@ mod tests {
             "embed" => args.push("--missing"),
             "restore" => args.extend(["--out", "/nonexistent/restored.db"]),
             "sleep" => args.push("--staleness"),
+            "coworkers" => args.push("--list"),
             _ => {}
         }
         args
@@ -1048,7 +1166,20 @@ mod tests {
                 limit: None,
                 batch: 1,
             },
-            Command::Coworkers,
+            Command::Coworkers {
+                add: false,
+                name: None,
+                expertise: None,
+                personality: None,
+                appraise: None,
+                trust: None,
+                text: None,
+                set_trust: None,
+                retire: None,
+                reactivate: None,
+                list: true,
+                load: None,
+            },
             Command::Sleep {
                 mark_processed: None,
                 retire: None,
@@ -1095,6 +1226,7 @@ mod tests {
                     | Command::Instruct { .. }
                     | Command::Instructions { .. }
                     | Command::Embed { .. }
+                    | Command::Coworkers { .. }
                     | Command::Sleep { .. }
                     | Command::Backup
                     | Command::Restore { .. }
@@ -1382,6 +1514,138 @@ mod tests {
         }
     }
 
+    #[test]
+    fn each_coworkers_flag_names_its_mode() {
+        use coworkers::Mode;
+        let mode = |args: &[&str]| {
+            let mut full = vec!["sm", "coworkers"];
+            full.extend(args);
+            parsed(&full).coworkers_mode()
+        };
+        for (args, want) in [
+            (
+                vec![
+                    "--add",
+                    "--name",
+                    "jeff",
+                    "--expertise",
+                    "rust",
+                    "--personality",
+                    "terse",
+                ],
+                Mode::Add {
+                    name: "jeff".into(),
+                    expertise: "rust".into(),
+                    personality: "terse".into(),
+                },
+            ),
+            (
+                vec!["--appraise", "jeff", "--trust", "trusted", "--text", "good"],
+                Mode::Appraise {
+                    name: "jeff".into(),
+                    trust: "trusted".into(),
+                    text: "good".into(),
+                },
+            ),
+            (
+                vec!["--set-trust", "jeff", "autonomous"],
+                Mode::SetTrust {
+                    name: "jeff".into(),
+                    level: "autonomous".into(),
+                },
+            ),
+            (vec!["--retire", "jeff"], Mode::Retire("jeff".into())),
+            (
+                vec!["--reactivate", "jeff"],
+                Mode::Reactivate("jeff".into()),
+            ),
+            (vec!["--list"], Mode::List),
+            (vec!["--load", "jeff"], Mode::Load("jeff".into())),
+        ] {
+            assert_eq!(mode(&args), want, "{args:?}");
+        }
+        // A bad trust level gets past clap on purpose: it is a refusal, with
+        // the `refused:` prefix, not a usage error.
+        assert_eq!(
+            mode(&["--set-trust", "jeff", "bogus"]),
+            Mode::SetTrust {
+                name: "jeff".into(),
+                level: "bogus".into(),
+            }
+        );
+    }
+
+    /// Every malformed `coworkers` is a usage error. Parsed only, never run: a
+    /// case that got past clap must not reach the real environment's database.
+    #[test]
+    fn malformed_coworkers_invocations_are_usage_errors() {
+        for (args, why) in [
+            (vec![], "no mode"),
+            (vec!["--list", "--load", "jeff"], "two modes"),
+            (
+                vec!["--retire", "jeff", "--reactivate", "jeff"],
+                "two modes",
+            ),
+            (
+                vec!["--add", "--name", "jeff", "--expertise", "rust"],
+                "--add needs --personality",
+            ),
+            (vec!["--add"], "--add needs its three fields"),
+            (vec!["--name", "jeff"], "--name belongs to --add"),
+            (
+                vec!["--list", "--expertise", "rust"],
+                "--expertise belongs to --add",
+            ),
+            (
+                vec!["--retire", "jeff", "--name", "ada"],
+                "--name belongs to --add",
+            ),
+            (
+                vec!["--appraise", "jeff"],
+                "--appraise needs --trust and --text",
+            ),
+            (
+                vec!["--appraise", "jeff", "--trust", "trusted"],
+                "--appraise needs --text",
+            ),
+            (
+                vec!["--load", "jeff", "--trust", "trusted"],
+                "--trust belongs to --appraise",
+            ),
+            (
+                vec!["--list", "--text", "x"],
+                "--text belongs to --appraise",
+            ),
+            (
+                vec![
+                    "--add",
+                    "--name",
+                    "jeff",
+                    "--expertise",
+                    "rust",
+                    "--personality",
+                    "terse",
+                    "--text",
+                    "x",
+                ],
+                "--text belongs to --appraise",
+            ),
+            (
+                vec!["--set-trust", "jeff"],
+                "--set-trust takes a name and a level",
+            ),
+            (vec!["--load"], "--load names a coworker"),
+            (vec!["--list", "--frobnicate"], "unknown flag"),
+        ] {
+            let mut full = vec!["sm", "coworkers"];
+            full.extend(args);
+            match Cli::try_parse_from(&full) {
+                Err(e) => assert!(e.use_stderr(), "{why}: {full:?}"),
+                Ok(cli) => panic!("{why}: {full:?} parsed as {:?}", cli.command),
+            }
+        }
+    }
+
     /// `embed --table all` covers every table that stores an embedding.
     #[test]
     fn embed_all_covers_every_table_with_an_embedding() {
@@ -1441,9 +1705,14 @@ mod tests {
     #[test]
     fn exit_codes() {
         assert_eq!(
-            code(&["sm", "coworkers"]),
+            code(&["sm", "seed"]),
             EXIT_ERROR,
             "a stub is an error, not a refusal"
+        );
+        assert_eq!(
+            code(&["sm", "coworkers"]),
+            EXIT_USAGE,
+            "coworkers without a mode is a usage error"
         );
         assert_eq!(
             code(&["sm", "remember"]),

@@ -13,11 +13,12 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Builder, Connection, Value};
 
 use super::{
-    ActiveRow, Cell, Embedded, InstructionKey, InstructionState, NewMemory, Purged, ResultSet,
-    Scope, SearchQuery, Store, Table,
+    ActiveRow, Appraisal, Appraised, Cell, Coworker, Embedded, InstructionKey, InstructionState,
+    NewMemory, Purged, ResultSet, Scope, SearchQuery, Store, Table,
 };
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -919,6 +920,229 @@ impl Store for TursoStore {
                  pointed at) — nothing was deleted",
             )
         })
+    }
+
+    fn coworker(&self, name: &str) -> Result<Option<Coworker>> {
+        let rs = self.query(
+            "SELECT id, created_at, updated_at, name, expertise, personality, trust_level, active \
+             FROM coworkers WHERE name = ?;",
+            vec![Value::Text(name.to_string())],
+        )?;
+        let Some(row) = rs.rows.into_iter().next() else {
+            return Ok(None);
+        };
+        match row.as_slice() {
+            [
+                Cell::Int(id),
+                Cell::Text(created_at),
+                Cell::Text(updated_at),
+                Cell::Text(name),
+                Cell::Text(expertise),
+                Cell::Text(personality),
+                Cell::Text(trust_level),
+                Cell::Int(active),
+            ] => Ok(Some(Coworker {
+                id: *id,
+                created_at: created_at.clone(),
+                updated_at: updated_at.clone(),
+                name: name.clone(),
+                expertise: expertise.clone(),
+                personality: personality.clone(),
+                trust_level: trust_level.clone(),
+                active: *active != 0,
+            })),
+            other => Err(Error::failed(format!(
+                "unexpected row shape in coworkers: {other:?}"
+            ))),
+        }
+    }
+
+    fn add_coworker(&self, name: &str, expertise: &str, personality: &str) -> Result<i64> {
+        self.with_retry(|| {
+            pollster::block_on(async {
+                self.conn
+                    .execute(
+                        "INSERT INTO coworkers (name, expertise, personality) VALUES (?, ?, ?);",
+                        vec![
+                            Value::Text(name.to_string()),
+                            Value::Text(expertise.to_string()),
+                            Value::Text(personality.to_string()),
+                        ],
+                    )
+                    .await?;
+                Ok(self.conn.last_insert_rowid())
+            })
+        })
+    }
+
+    fn appraise(&self, coworker: i64, trust_level: &str, text: &str) -> Result<Appraised> {
+        self.with_retry(|| {
+            pollster::block_on(async {
+                // IMMEDIATE: the write lock is taken before the current
+                // appraisals are read, so two appraisals of one coworker
+                // cannot both supersede the same row and leave two current.
+                // Dropped without a commit, the transaction is rolled back.
+                let tx =
+                    Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate).await?;
+                let mut current = Vec::new();
+                let mut newest = None;
+                {
+                    let mut rows = tx
+                        .query(
+                            "SELECT id, created_at FROM appraisals \
+                             WHERE coworker_id = ? AND superseded_by IS NULL \
+                             ORDER BY created_at DESC, id DESC;",
+                            vec![Value::Integer(coworker)],
+                        )
+                        .await?;
+                    while let Some(row) = rows.next().await? {
+                        if let Value::Integer(id) = row.get_value(0)? {
+                            current.push(id);
+                        }
+                        if newest.is_none() {
+                            newest = Some(row.get_value(1)?);
+                        }
+                    }
+                }
+                // The window this appraisal folds in starts where the one it
+                // supersedes was written, or where the coworker was added.
+                let period_start = match newest {
+                    Some(created_at) => created_at,
+                    None => {
+                        let mut rows = tx
+                            .query(
+                                "SELECT created_at FROM coworkers WHERE id = ?;",
+                                vec![Value::Integer(coworker)],
+                            )
+                            .await?;
+                        match rows.next().await? {
+                            Some(row) => row.get_value(0)?,
+                            None => Value::Null,
+                        }
+                    }
+                };
+                tx.execute(
+                    "INSERT INTO appraisals (coworker_id, period_start, trust_level, memory_text) \
+                     VALUES (?, ?, ?, ?);",
+                    vec![
+                        Value::Integer(coworker),
+                        period_start,
+                        Value::Text(trust_level.to_string()),
+                        Value::Text(text.to_string()),
+                    ],
+                )
+                .await?;
+                let id = self.conn.last_insert_rowid();
+                tx.execute(
+                    "UPDATE appraisals SET superseded_by = ? \
+                     WHERE coworker_id = ? AND superseded_by IS NULL AND id <> ?;",
+                    vec![
+                        Value::Integer(id),
+                        Value::Integer(coworker),
+                        Value::Integer(id),
+                    ],
+                )
+                .await?;
+                tx.execute(
+                    "UPDATE coworkers SET trust_level = ?, updated_at = datetime('now') \
+                     WHERE id = ?;",
+                    vec![
+                        Value::Text(trust_level.to_string()),
+                        Value::Integer(coworker),
+                    ],
+                )
+                .await?;
+                tx.commit().await?;
+                current.sort_unstable();
+                Ok(Appraised {
+                    id,
+                    superseded: current,
+                })
+            })
+        })
+    }
+
+    fn set_trust(&self, coworker: i64, trust_level: &str) -> Result<()> {
+        self.with_retry(|| {
+            pollster::block_on(self.conn.execute(
+                "UPDATE coworkers SET trust_level = ?, updated_at = datetime('now') WHERE id = ?;",
+                vec![
+                    Value::Text(trust_level.to_string()),
+                    Value::Integer(coworker),
+                ],
+            ))
+        })?;
+        Ok(())
+    }
+
+    fn set_active(&self, coworker: i64, active: bool) -> Result<bool> {
+        // The guard is in the UPDATE itself: a coworker already in that
+        // state is left alone, `updated_at` included.
+        let flag = Value::Integer(i64::from(active));
+        let changed = self.with_retry(|| {
+            pollster::block_on(self.conn.execute(
+                "UPDATE coworkers SET active = ?, updated_at = datetime('now') \
+                 WHERE id = ? AND active <> ?;",
+                vec![flag.clone(), Value::Integer(coworker), flag.clone()],
+            ))
+        })?;
+        Ok(changed == 1)
+    }
+
+    fn list_coworkers(&self) -> Result<ResultSet> {
+        self.query(
+            "SELECT id, name, expertise, trust_level, active FROM coworkers ORDER BY id;",
+            Vec::new(),
+        )
+    }
+
+    fn current_appraisal(&self, coworker: i64) -> Result<Option<Appraisal>> {
+        // Newest first, so a coworker left with two current rows by an
+        // earlier writer still loads the latest of them.
+        let rs = self.query(
+            "SELECT id, created_at, period_start, trust_level, memory_text FROM appraisals \
+             WHERE coworker_id = ? AND superseded_by IS NULL \
+             ORDER BY created_at DESC, id DESC LIMIT 1;",
+            vec![Value::Integer(coworker)],
+        )?;
+        let Some(row) = rs.rows.into_iter().next() else {
+            return Ok(None);
+        };
+        match row.as_slice() {
+            [
+                Cell::Int(id),
+                Cell::Text(created_at),
+                period_start,
+                Cell::Text(trust_level),
+                Cell::Text(memory_text),
+            ] => Ok(Some(Appraisal {
+                id: *id,
+                created_at: created_at.clone(),
+                period_start: match period_start {
+                    Cell::Text(t) => Some(t.clone()),
+                    _ => None,
+                },
+                trust_level: trust_level.clone(),
+                memory_text: memory_text.clone(),
+            })),
+            other => Err(Error::failed(format!(
+                "unexpected row shape in appraisals: {other:?}"
+            ))),
+        }
+    }
+
+    fn feedback_since(&self, coworker: i64, since: &str) -> Result<ResultSet> {
+        // At or after: timestamps have one-second resolution, and a row shown
+        // in two reviews costs less than one shown in none.
+        self.query(
+            "SELECT id, created_at, source, topic, memory_text FROM semantic_memory \
+             WHERE category = 'feedback' AND superseded_by IS NULL AND retired_at IS NULL \
+             AND created_at >= ? \
+             AND id IN (SELECT memory_id FROM memory_coworkers \
+                        WHERE memory_table = 'semantic' AND coworker_id = ?) \
+             ORDER BY created_at, id;",
+            vec![Value::Text(since.to_string()), Value::Integer(coworker)],
+        )
     }
 }
 

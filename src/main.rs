@@ -8,6 +8,7 @@ mod backup;
 mod claude_md;
 mod cli;
 mod config;
+mod coworkers;
 mod embed;
 mod error;
 mod find_existing;

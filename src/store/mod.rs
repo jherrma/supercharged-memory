@@ -174,6 +174,40 @@ pub struct Purged {
     pub coworker_tags: u64,
 }
 
+/// A coworker persona's row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Coworker {
+    pub id: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub name: String,
+    pub expertise: String,
+    pub personality: String,
+    pub trust_level: String,
+    /// `false` once retired. A coworker is never deleted.
+    pub active: bool,
+}
+
+/// A coworker's current appraisal: the one no later appraisal supersedes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Appraisal {
+    pub id: i64,
+    pub created_at: String,
+    /// The start of the feedback window this appraisal folded in.
+    pub period_start: Option<String>,
+    pub trust_level: String,
+    pub memory_text: String,
+}
+
+/// What an appraisal wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Appraised {
+    pub id: i64,
+    /// The appraisals it superseded: normally the one before it, none for the
+    /// first.
+    pub superseded: Vec<i64>,
+}
+
 /// Rows plus their column names, which is what the output format needs. It is a
 /// result set, not a query -- a MongoDB backend produces the same shape.
 #[derive(Debug, Clone)]
@@ -313,6 +347,36 @@ pub trait Store {
     /// `memory_coworkers` rows scoping them, in one transaction. Refuses, and
     /// deletes nothing, unless every id is such a row and none strands another.
     fn purge_semantic(&self, ids: &[i64]) -> Result<Purged>;
+
+    /// The coworker with exactly this name, retired or not.
+    fn coworker(&self, name: &str) -> Result<Option<Coworker>>;
+
+    /// Add a coworker, active and supervised; returns its id.
+    fn add_coworker(&self, name: &str, expertise: &str, personality: &str) -> Result<i64>;
+
+    /// Store a new appraisal, supersede every current one of this coworker,
+    /// and set the coworker's trust level -- in ONE transaction, so exactly
+    /// one appraisal is current afterwards. The window it folds in starts at
+    /// the appraisal it supersedes, or at the coworker's creation.
+    fn appraise(&self, coworker: i64, trust_level: &str, text: &str) -> Result<Appraised>;
+
+    /// Set the trust level without an appraisal.
+    fn set_trust(&self, coworker: i64, trust_level: &str) -> Result<()>;
+
+    /// Retire (`false`) or reactivate (`true`) a coworker; nothing is
+    /// deleted. `false` when it already was, and nothing changed.
+    fn set_active(&self, coworker: i64, active: bool) -> Result<bool>;
+
+    /// Id, name, expertise, trust level and active flag of every coworker,
+    /// retired ones included, by id.
+    fn list_coworkers(&self) -> Result<ResultSet>;
+
+    /// The coworker's current appraisal, or `None` before the first.
+    fn current_appraisal(&self, coworker: i64) -> Result<Option<Appraisal>>;
+
+    /// The current `feedback` memories tagged to this coworker, created at or
+    /// after `since`, oldest first.
+    fn feedback_since(&self, coworker: i64, since: &str) -> Result<ResultSet>;
 }
 
 /// Open the configured database, or refuse with the candidate report.

@@ -464,6 +464,92 @@ mod tests {
         );
     }
 
+    /// Scoped to a coworker, a search sees the untagged rows and the rows
+    /// tagged to them -- shared ones included -- and never a row tagged only
+    /// to someone else: in the ranking, in the section of rows without an
+    /// embedding, and keyword-only, in both tables.
+    #[test]
+    fn a_search_scoped_to_a_coworker_sees_global_rows_and_theirs_never_anothers() {
+        use crate::store::turso::tests::rows;
+        let cfg = scratch("recall-coworker");
+        rows(
+            &cfg,
+            "INSERT INTO coworkers (name, expertise, personality) \
+             VALUES ('jeff', 'x', 'y'), ('ada', 'x', 'y');",
+        );
+        let tag = |table: Table, id: i64, coworker: i64| {
+            rows(
+                &cfg,
+                &format!(
+                    "INSERT INTO memory_coworkers (memory_table, memory_id, coworker_id) \
+                     VALUES ('{}', {id}, {coworker});",
+                    table.as_str()
+                ),
+            );
+        };
+        for table in [Table::Semantic, Table::Episodic] {
+            for (embedded, kind) in [(true, "embedded"), (false, "blind")] {
+                put(&cfg, table, &format!("global {kind}"), embedded);
+                let jeff = put(&cfg, table, &format!("jeff {kind}"), embedded);
+                tag(table, jeff, 1);
+                let ada = put(&cfg, table, &format!("ada {kind}"), embedded);
+                tag(table, ada, 2);
+                let shared = put(&cfg, table, &format!("shared {kind}"), embedded);
+                tag(table, shared, 1);
+                tag(table, shared, 2);
+            }
+        }
+        let texts = |out: &str| -> Vec<String> {
+            let mut t: Vec<String> = out
+                .lines()
+                .filter_map(|l| l.trim_start().strip_prefix("memory_text = "))
+                .map(str::to_string)
+                .collect();
+            t.sort();
+            t
+        };
+        let every = |names: &[&str]| -> Vec<String> {
+            let mut t = Vec::new();
+            for _table in 0..2 {
+                for name in names {
+                    for kind in ["embedded", "blind"] {
+                        t.push(format!("{name} {kind}"));
+                    }
+                }
+            }
+            t.sort();
+            t
+        };
+        let down = Fake::down(Unavailable::Unreachable {
+            url: "http://127.0.0.1:9".into(),
+        });
+        let store = TursoStore::open(&cfg).unwrap();
+        for embedder in [&Fake::up() as &dyn Embedder, &down] {
+            let search_as = |coworker: Option<&str>| {
+                let mut a = args(10);
+                a.table = TableArg::Both;
+                a.coworker = coworker.map(str::to_string);
+                search(&cfg, &store, embedder, &a, "global jeff ada shared").expect("search")
+            };
+            assert_eq!(
+                texts(&search_as(Some("jeff"))),
+                every(&["global", "jeff", "shared"])
+            );
+            assert_eq!(
+                texts(&search_as(Some("ada"))),
+                every(&["ada", "global", "shared"])
+            );
+            assert_eq!(
+                texts(&search_as(None)),
+                every(&["ada", "global", "jeff", "shared"])
+            );
+        }
+        let mut a = args(10);
+        a.coworker = Some("nobody".into());
+        let e = search(&cfg, &store, &Fake::up(), &a, "global").expect_err("unknown coworker");
+        assert_eq!(e.to_string(), "refused: no coworker named 'nobody'.");
+    }
+
     #[test]
     fn embeddings_off_recalls_by_keyword_without_contacting_ollama() {
         let mut cfg = db("recall-off", &[]);

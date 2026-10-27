@@ -63,13 +63,20 @@ pub fn one_of(flag: &str, value: &str, allowed: &[&str]) -> Result<String> {
 /// insert so the caller learns which flag was too long, not just that a
 /// constraint failed.
 pub fn meta_fits(flag: &str, value: &Option<String>) -> Result<()> {
-    if let Some(v) = value {
-        let n = v.chars().count();
-        if n > MAX_META {
-            return Err(Error::refused(format!(
-                "{flag} is {n} chars; hard cap {MAX_META}. Nothing was stored."
-            )));
-        }
+    match value {
+        Some(v) => fits(flag, v, MAX_META),
+        None => Ok(()),
+    }
+}
+
+/// A column's length CHECK, refused before the write and naming the flag.
+/// Characters, not bytes, as the schema counts them.
+pub fn fits(flag: &str, value: &str, cap: usize) -> Result<()> {
+    let n = value.chars().count();
+    if n > cap {
+        return Err(Error::refused(format!(
+            "{flag} is {n} chars; hard cap {cap}. Nothing was stored."
+        )));
     }
     Ok(())
 }

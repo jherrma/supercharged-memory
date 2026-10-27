@@ -105,7 +105,7 @@ fn a_malformed_dotenv_makes_every_command_refuse() {
         &["recall", "anything"],
         &["recall", "--baseline"],
         &["remember", "--table", "semantic", "--text", "x"],
-        &["coworkers"],
+        &["coworkers", "--list"],
         &["backup"],
     ] {
         let out = run(&exe, &dir, &[], args);
